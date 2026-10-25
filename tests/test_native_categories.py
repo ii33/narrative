@@ -65,15 +65,25 @@ def _pump(
 
 def _seed(path: Path) -> Path:
     ops = Operations.create_graph_project(path)
+    # 节点带披露位置：按时间显示时列表要用它判断"出场了没有"。
+    source_id = ops.import_source("第一章", "林舟脸色铁青，身受重伤。")
     ops.graph_accept(
         ops.graph_propose(
             [
-                {"kind": "node", "id": "1", "node_type": "person", "name": "林舟"},
-                {"kind": "node", "id": "2", "node_type": "person", "name": "老周"},
-                {"kind": "node", "id": "3", "node_type": "item", "name": "铜钥匙"},
-                {"kind": "node", "id": "4", "node_type": "event", "name": "开场"},
-                {"kind": "node", "id": "5", "node_type": "event", "name": "后来又过了些日子"},
-                {"kind": "node", "id": "6", "node_type": "item", "name": "令牌"},
+                {"kind": "source_order", "id": "order_1", "source_id": source_id,
+                 "ordinal": 1, "context_id": "canon"},
+                {"kind": "node", "id": "1", "node_type": "person", "name": "林舟",
+                 "disclosure": {"source_id": source_id, "start": 0}},
+                {"kind": "node", "id": "2", "node_type": "person", "name": "老周",
+                 "disclosure": {"source_id": source_id, "start": 1}},
+                {"kind": "node", "id": "3", "node_type": "item", "name": "铜钥匙",
+                 "disclosure": {"source_id": source_id, "start": 2}},
+                {"kind": "node", "id": "4", "node_type": "event", "name": "开场",
+                 "disclosure": {"source_id": source_id, "start": 3}},
+                {"kind": "node", "id": "5", "node_type": "event", "name": "后来又过了些日子",
+                 "disclosure": {"source_id": source_id, "start": 4}},
+                {"kind": "node", "id": "6", "node_type": "item", "name": "令牌",
+                 "disclosure": {"source_id": source_id, "start": 5}},
             ],
             ops.graph_project_info()["revision"],
         ),
@@ -293,6 +303,54 @@ def test_inbound_records_follow_the_reading_cut(workspace) -> None:
     _pump(app, results, "node_properties", "1")
     app.processEvents()
     assert _value(page.property("inboundRows")) == []
+
+
+def test_the_list_narrows_with_the_time_filter(workspace) -> None:
+    """「按时间显示」打开后，列表只列已经出场过的节点。"""
+    app, _bridge, page, results, _errors = workspace
+    assert page.property("total") == 6
+
+    # 打开开关但停在「最新」：没有收窄。
+    del results[:]
+    page.toggleTimeFilter()
+    _pump(app, results, "graph_view")
+    assert page.property("timeFilter") is True
+    assert page.property("total") == 6
+
+    # 切到第一个事件（披露位置 3）：之后出场的 5、6 不在列表里。
+    del results[:]
+    page.pickCut(1)
+    _pump(app, results, "reading_cut")
+    _pump(app, results, "graph_view")
+    app.processEvents()
+    assert page.property("total") == 4
+
+    # 关掉开关：列表恢复全书。
+    del results[:]
+    page.toggleTimeFilter()
+    _pump(app, results, "graph_view")
+    assert page.property("total") == 6
+
+
+def test_a_node_that_has_not_appeared_yet_loses_the_selection(workspace) -> None:
+    app, _bridge, page, results, _errors = workspace
+    del results[:]
+    page.toggleTimeFilter()
+    _pump(app, results, "graph_view")
+
+    del results[:]
+    page.select("6")
+    _pump(app, results, "detail", "6")
+    _pump(app, results, "node_properties", "6")
+
+    # 收窄到第一个事件后，令牌还没出场：详情不能留在屏幕上。
+    del results[:]
+    page.pickCut(1)
+    _pump(app, results, "reading_cut")
+    _pump(app, results, "graph_view")
+    app.processEvents()
+    assert page.property("selectedId") == ""
+    assert _value(page.property("propertyRows")) == []
 
 
 def test_a_reading_cut_switches_the_state(tmp_path: Path) -> None:

@@ -440,15 +440,36 @@ class NativeBridge(QObject):
 
     @Slot(str)
     def setReadingCut(self, event_id: str) -> None:
-        """Move the reading position used by the property pane.
+        """Move the reading position used by the property pane and the node list.
 
         An empty id means "everything disclosed so far". The cut is an event, not
         a story time: it says how far the reader has read, not when things happen.
+        Resolving it here keeps one source of truth — the list and the properties
+        both take their position from this answer.
         """
-        self._state_cut = event_id.strip()
-        self.resultReady.emit(
-            "reading_cut", {"event_id": self._state_cut, "node_id": self._detail_node}
-        )
+        event_id = event_id.strip()
+
+        def work(ops) -> dict:
+            if not event_id:
+                return {"event_id": "", "source_id": "", "start": -1, "name": ""}
+            snapshot = ops.graph_snapshot()
+            node = next(
+                (item for item in snapshot.get("nodes", []) if item["id"] == event_id), None
+            )
+            disclosure = (node or {}).get("disclosure") or {}
+            start = disclosure.get("start")
+            return {
+                "event_id": event_id,
+                "source_id": disclosure.get("source_id") or "",
+                "start": start if isinstance(start, int) else -1,
+                "name": (node or {}).get("name") or event_id,
+            }
+
+        def apply(result: dict) -> dict:
+            self._state_cut = str(result.get("event_id") or "")
+            return result
+
+        self._project_task("reading_cut", work, apply)
 
     @Slot()
     def loadPropertyCategories(self) -> None:

@@ -64,10 +64,18 @@ Item {
     // 阅读位置：选一个事件，属性区显示"读到这里时"的状态；空串表示看到最新。
     property string cutEventId: ""
     property string cutEventName: ""
+    property string cutSourceId: ""
+    property int cutStart: -1
     property int cutLater: 0
+    // 节点列表是否跟着阅读位置收窄。默认全部显示。
+    property bool timeFilter: false
 
     function load() {
-        bridge.loadGraphView({view: "table", limit: 2000})
+        var spec = {view: "table", limit: 2000}
+        // 只有「按时间显示」才把节点列表也切到阅读位置；属性区始终跟着切点。
+        if (page.timeFilter && page.cutSourceId.length > 0 && page.cutStart >= 0)
+            spec.disclosure_cut = {source_id: page.cutSourceId, start: page.cutStart}
+        bridge.loadGraphView(spec)
     }
 
     function nameOf(id) {
@@ -87,10 +95,23 @@ Item {
             tally[kind] = (tally[kind] || 0) + 1
             if (kind === "event") events.push({id: allNodes[i].id, name: allNodes[i].name || allNodes[i].id})
         }
-        eventOptions = events
+        // 事件列表只从「全部显示」的那次结果里取：收窄后的列表只剩已出场的节点，
+        // 拿它当选项会让人无法再往前走。
+        if (!page.timeFilter) eventOptions = events
         counts = tally
         rebuildCategories()
         rebuild()
+        // 收窄后选中的节点可能还没出场：不能留着一个"此刻还不存在"的详情。
+        if (page.selectedId.length > 0 && !allNodes.some(function (node) {
+            return node.id === page.selectedId
+        })) {
+            page.selectedId = ""
+            page.detail = ({})
+            page.propertyRows = []
+            page.categoryGroups = []
+            page.inboundRows = []
+            page.expandedProps = ({})
+        }
     }
 
     function rebuildCategories() {
@@ -144,8 +165,13 @@ Item {
         cutEventId = event ? event.id : ""
         cutEventName = event ? event.name : ""
         cutLater = 0
+        // 切点的来源位置由后端解析，列表与属性共用同一个答案。
         bridge.setReadingCut(cutEventId)
-        if (selectedId.length > 0) bridge.loadNodeProperties(selectedId)
+    }
+
+    function toggleTimeFilter() {
+        page.timeFilter = !page.timeFilter
+        page.load()
     }
 
     function backToLatest() {
@@ -392,6 +418,14 @@ Item {
                 detail = payload
                 var index = payload.node ? page.typeKeys.indexOf(payload.node.node_type) : -1
                 kindEditor.currentIndex = index >= 0 ? index : 0
+            } else if (kind === "reading_cut") {
+                page.cutSourceId = payload.source_id || ""
+                page.cutStart = payload.start === undefined ? -1 : payload.start
+                page.cutEventName = payload.name || ""
+                page.cutLater = 0
+                // 列表（按时间显示时）和属性都按这个位置重取。
+                page.load()
+                if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
             } else if (kind === "node_properties") {
                 page.applyProperties(payload)
             } else if (kind === "property_categorize") {
@@ -442,6 +476,15 @@ Item {
                 font.pixelSize: 12
             }
             Item { Layout.fillWidth: true }
+            // 列表是否跟着阅读位置收窄。
+            Button {
+                objectName: "browseTimeFilter"
+                text: page.timeFilter ? "按时间显示" : "全部显示"
+                flat: !page.timeFilter
+                highlighted: page.timeFilter
+                font.pixelSize: 11
+                onClicked: page.toggleTimeFilter()
+            }
             // 阅读位置：切到某个事件，右侧属性显示"读到这里时"的状态。
             Label {
                 text: "阅读位置"

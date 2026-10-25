@@ -64,6 +64,7 @@ def main() -> int:
     parser.add_argument("--expand", default="", help="要展开的属性名，默认展开第一条有历史的")
     parser.add_argument("--height", type=int, default=0, help="窗口高度；属性多时调高，少滚一点")
     parser.add_argument("--cut", default="", help="阅读位置：事件编号，只显示读到这里时已知的属性")
+    parser.add_argument("--time", action="store_true", help="同时把节点列表也收窄到该阅读位置")
     args = parser.parse_args()
     project = args.project.resolve()
     if not project.is_file():
@@ -118,6 +119,10 @@ def main() -> int:
             if index is None:
                 raise RuntimeError(f"没有编号为 {args.cut} 的事件")
             page.pickCut(index + 1)
+            wait_for("reading_cut")
+            if args.time:
+                page.toggleTimeFilter()
+                wait_for("graph_view")
             app.processEvents()
         page.select(args.node)
         wait_for("node_properties")

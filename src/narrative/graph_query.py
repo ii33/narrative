@@ -19,14 +19,24 @@ def _contexts(objects: dict[str, dict], selected: str) -> list[str]:
     return lineage
 
 
-def _revealed(node: dict, cut: dict) -> bool:
-    """A node is visible once the reader has reached its disclosure position."""
+def _revealed(node: dict, cut: dict, orders: dict[str, int] | None = None) -> bool:
+    """A node is visible once the reader has reached its disclosure position.
+
+    ``orders`` maps a source to its reading ordinal. Without it a node from
+    another source is always visible — true for a single-chapter project, wrong
+    for a book: a chapter read later is not known yet.
+    """
     disclosure = node.get("disclosure")
     if not isinstance(disclosure, dict):
         return False
     if disclosure.get("source_id") != cut.get("source_id"):
-        # The cut speaks about one source; other sources are judged by their own
-        # order, which this projection does not model.
+        if orders:
+            source = disclosure.get("source_id")
+            cut_source = cut.get("source_id")
+            left = orders.get(source) if isinstance(source, str) else None
+            right = orders.get(cut_source) if isinstance(cut_source, str) else None
+            if left is not None and right is not None:
+                return left < right
         return True
     start = disclosure.get("start")
     return isinstance(start, int) and start <= cut.get("start", 0)
@@ -73,7 +83,12 @@ def query_graph(
     if kinds:
         result = [node for node in result if node.get("node_type") in kinds]
     if disclosure_cut is not None:
-        result = [node for node in result if _revealed(node, disclosure_cut)]
+        orders = {
+            row["source_id"]: row["ordinal"]
+            for row in snapshot.get("source_orders", []) or []
+            if isinstance(row, dict) and "source_id" in row and "ordinal" in row
+        }
+        result = [node for node in result if _revealed(node, disclosure_cut, orders)]
     if limit is not None:
         result = result[:limit]
 
