@@ -531,9 +531,8 @@ class NativeBridge(QObject):
 
         self._project_task("property_merge", work)
 
-    @Slot("QVariantMap")
-    def addPropertyRecord(self, payload: dict) -> None:
-        """Stage one hand-written disclosure. Acceptance still happens on the review page.
+    def _manual_record(self, payload: dict) -> dict:
+        """One hand-written disclosure from a QVariantMap.
 
         The quote is optional but checked the same way as a model's: it has to be
         an exact, unique substring of the source, or the precheck refuses it.
@@ -544,12 +543,10 @@ class NativeBridge(QObject):
         property_id = str(payload.get("property_id") or "").strip()
         event_id = str(payload.get("event_id") or "").strip()
         if not node_id or not property_id or not event_id:
-            self.errorOccurred.emit("property_add", "节点、属性名和披露事件都要填")
-            return
+            raise ValueError("节点、属性名和披露事件都要填")
         value = payload.get("value")
         if value is None or (isinstance(value, str) and not value.strip()):
-            self.errorOccurred.emit("property_add", "值不能为空")
-            return
+            raise ValueError("值不能为空")
         record: dict = {
             "kind": "property_value",
             "id": f"manual_{uuid4().hex[:12]}",
@@ -560,64 +557,143 @@ class NativeBridge(QObject):
             # A human picked the anchor, so it is stated rather than inferred.
             "anchor_basis": "model",
         }
-        quote = str(payload.get("quote") or "").strip()
-        source_id = str(payload.get("source_id") or "").strip()
-        start = payload.get("start")
-        start = start if isinstance(start, int) and start >= 0 else None
-        if quote and source_id:
-            record["evidence"] = {"source_id": source_id, "quote": quote}
         source = str(payload.get("source") or "").strip()
         if source:
             record["source"] = source
         category = str(payload.get("category") or "").strip()
         if category:
             record["category"] = category
+        quote = str(payload.get("quote") or "").strip()
+        source_id = str(payload.get("source_id") or "").strip()
+        if quote and source_id:
+            record["evidence"] = {"source_id": source_id, "quote": quote}
+        return record
+
+    def _stage_records(self, kind: str, build) -> None:
+        """Precheck a hand-written batch and stage it as one candidate."""
 
         def work(ops) -> dict:
             revision = ops.graph_project_info()["revision"]
-            # Where the reader meets this sentence: the quote is the honest way
-            # to say it, so the offset is derived from it rather than typed.
-            if quote and source_id:
-                found = ops.locate(source_id, quote)
-                if len(found) == 1:
-                    record["disclosure"] = {
-                        "source_id": source_id, "start": found[0]["start"],
-                    }
-                elif len(found) > 1 and start is None:
-                    return {
-                        "status": "precheck_failed",
-                        "diagnostics": [{
-                            "code": "EVIDENCE", "severity": "error",
-                            "object_id": record["id"],
-                            "message": "这段引文在原文中出现多次，请写长一点以唯一定位",
-                        }],
-                    }
-            records: list[dict] = []
-            # A hand-written property may be the first use of its name; without a
-            # definition the value cannot be checked at all.
-            defined = any(
-                item.get("kind") == "property_definition" and item.get("id") == property_id
-                for item in ops.property_records()
-            )
-            if not defined:
-                records.append({
-                    "kind": "property_definition", "id": property_id,
-                    "value_type": "any", "cardinality": "one",
-                    "persistence": "until_changed",
-                })
-            records.append(record)
+            try:
+                records, note = build(ops)
+            except ValueError as exc:
+                return {
+                    "status": "precheck_failed",
+                    "diagnostics": [{
+                        "code": "MANUAL", "severity": "error",
+                        "object_id": None, "message": str(exc),
+                    }],
+                }
             diagnostics = ops.property_precheck(records, revision)
             if any(item.get("severity") == "error" for item in diagnostics):
                 return {"status": "precheck_failed", "diagnostics": diagnostics}
-            candidate = ops.property_propose(
-                records, revision, source="manual", note="人工补录"
-            )
+            candidate = ops.property_propose(records, revision, source="manual", note=note)
             return {
                 "status": "pending", "candidate_id": candidate,
                 "diagnostics": diagnostics,
             }
 
-        self._project_task("property_add", work)
+        self._project_task(kind, work)
+
+    def _place_evidence(self, ops, record: dict, payload: dict) -> str | None:
+        """Where the reader meets this sentence: derived from the quote, not typed."""
+        quote = str(payload.get("quote") or "").strip()
+        source_id = str(payload.get("source_id") or "").strip()
+        if not quote or not source_id:
+            return None
+        found = ops.locate(source_id, quote)
+        if len(found) == 1:
+            record["disclosure"] = {"source_id": source_id, "start": found[0]["start"]}
+            return None
+        if len(found) > 1:
+            return "这段引文在原文中出现多次，请写长一点以唯一定位"
+        return "这段引文不在原文里，逐字复制后再提交"
+
+    @Slot("QVariantMap")
+    def addPropertyRecord(self, payload: dict) -> None:
+        """Stage one hand-written disclosure; acceptance still happens on the review page."""
+        try:
+            record = self._manual_record(payload)
+        except ValueError as exc:
+            self.errorOccurred.emit("property_add", str(exc))
+            return
+
+        def build(ops) -> tuple[list[dict], str]:
+            problem = self._place_evidence(ops, record, payload)
+            if problem:
+                raise ValueError(problem)
+            records: list[dict] = []
+            # A hand-written property may be the first use of its name; without a
+            # definition the value cannot be checked at all.
+            defined = any(
+                item.get("kind") == "property_definition"
+                and item.get("id") == record["property_id"]
+                for item in ops.property_records()
+            )
+            if not defined:
+                records.append({
+                    "kind": "property_definition", "id": record["property_id"],
+                    "value_type": "any", "cardinality": "one",
+                    "persistence": "until_changed",
+                })
+            records.append(record)
+            return records, "人工补录"
+
+        self._stage_records("property_add", build)
+
+    @Slot(str, "QVariantMap")
+    def correctPropertyRecord(self, record_id: str, payload: dict) -> None:
+        """Correct one disclosure by appending a new one, optionally retracting the old.
+
+        Both records go into one candidate, so a correction can never land
+        without its retraction (or the other way round).
+        """
+        from uuid import uuid4
+
+        try:
+            record = self._manual_record(payload)
+        except ValueError as exc:
+            self.errorOccurred.emit("property_correct", str(exc))
+            return
+
+        def build(ops) -> tuple[list[dict], str]:
+            problem = self._place_evidence(ops, record, payload)
+            if problem:
+                raise ValueError(problem)
+            records: list[dict] = []
+            if payload.get("retract_old"):
+                records.append({
+                    "kind": "property_retraction",
+                    "id": f"retract_{uuid4().hex[:12]}",
+                    "target_id": record_id,
+                    "reason": str(payload.get("reason") or "更正：以新记录为准"),
+                })
+            records.append(record)
+            return records, f"更正 {record['property_id']}"
+
+        self._stage_records("property_correct", build)
+
+    @Slot(str, str)
+    def retractPropertyRecords(self, targets_json: str, reason: str) -> None:
+        """Invalidate records; the rows stay for audit but stop being read."""
+        try:
+            targets = json.loads(targets_json)
+        except json.JSONDecodeError as exc:
+            self.errorOccurred.emit("property_retract", f"记录 ID 列表无效：{exc.msg}")
+            return
+        if not isinstance(targets, list) or not all(isinstance(item, str) for item in targets):
+            self.errorOccurred.emit("property_retract", "请提供记录 ID 数组")
+            return
+
+        def work(ops) -> dict:
+            return ops.property_retract([str(item) for item in targets], reason)
+
+        self._project_task("property_retract", work)
+
+    @Slot(str)
+    def loadNodeEditor(self, node_id: str) -> None:
+        """Everything the node editor needs: the node, its whole history, the events."""
+        self._project_task("node_editor", lambda ops: ops.node_editor(node_id))
 
     @Slot(str, int)
     def acceptPropertyCandidate(self, candidate_id: str, version: int) -> None:

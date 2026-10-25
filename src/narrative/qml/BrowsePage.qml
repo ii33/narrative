@@ -450,8 +450,16 @@ Item {
                 page.applyBrowse(payload)
             } else if (kind === "detail") {
                 detail = payload
-                var index = payload.node ? page.typeKeys.indexOf(payload.node.node_type) : -1
-                kindEditor.currentIndex = index >= 0 ? index : 0
+            } else if (kind === "property_correct") {
+                if (payload.status === "pending") {
+                    app.toast("更正已提交，去「审核」接受后生效", false)
+                } else {
+                    var problem = (payload.diagnostics || [])[0] || ({})
+                    app.toast("更正未通过预检：" + (problem.message || "未知原因"), true)
+                }
+            } else if (kind === "property_retract") {
+                app.toast("已撤回 " + (payload.retracted || []).length + " 条记录", false)
+                if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
             } else if (kind === "node_properties") {
                 page.applyProperties(payload)
             } else if (kind === "property_categorize") {
@@ -1010,33 +1018,22 @@ Item {
                         color: t.line
                     }
 
-                    Label {
-                        text: "节点类型"
-                        color: t.muted
-                        font.pixelSize: 11
-                    }
-                    ComboBox {
-                        id: kindEditor
-                        Layout.fillWidth: true
-                        model: page.typeKeys.map(function (key) { return page.typeLabels[key] })
-                        enabled: detail.node !== undefined && detail.node !== null
-                    }
+                    // 节点字段、属性补录/更正/失效都在编辑器里，这里只留一个入口。
                     Button {
+                        objectName: "browseOpenEditor"
                         Layout.fillWidth: true
-                        text: "提交类型修订"
+                        text: "编辑节点"
                         enabled: page.selectedId.length > 0
-                        onClicked: bridge.reviseNode(page.selectedId,
-                            {node_type: page.typeKeys[kindEditor.currentIndex]})
-                    }
-                    Button {
-                        Layout.fillWidth: true
-                        text: "撤回该节点"
-                        enabled: page.selectedId.length > 0
-                        onClicked: bridge.reviseNode(page.selectedId, {retracted: true})
+                        onClicked: nodeEditor.openFor(page.selectedId)
                     }
                 }
             }
         }
+    }
+
+    NodeEditor {
+        id: nodeEditor
+        host: page
     }
 
     // 移动分类：只改整理位置。取值、披露顺序、原文引文都不动。

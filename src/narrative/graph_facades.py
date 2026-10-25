@@ -121,9 +121,16 @@ class GraphPropertyFacade:
         return self.properties.history(node_id, property_id, **kwargs)
 
     def node_properties(
-        self, node_id: str, as_of_revision: int | None = None, cut: object = None
+        self,
+        node_id: str,
+        as_of_revision: int | None = None,
+        cut: object = None,
+        *,
+        include_retracted: bool = False,
     ) -> dict:
-        return self.properties.node_properties(node_id, as_of_revision, cut)
+        return self.properties.node_properties(
+            node_id, as_of_revision, cut, include_retracted=include_retracted
+        )
 
     def audit(
         self, node_ids: set[str] | None = None, as_of_revision: int | None = None
@@ -144,6 +151,9 @@ class GraphPropertyFacade:
 
     def merge(self, alias_id: str, target_id: str, note: str = "") -> dict:
         return self.properties.merge(alias_id, target_id, note)
+
+    def retract(self, targets: list[str], reason: str) -> dict:
+        return self.properties.retract(targets, reason)
 
 
 class GraphChangeFacade:

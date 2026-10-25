@@ -436,6 +436,31 @@ class GraphOperations:
         """Read one property name as another. A separate act from moving a category."""
         return self.properties.merge(alias_id, target_id, note)
 
+    def property_retract(self, targets: list[str], reason: str) -> dict:
+        """Invalidate records: they stay for audit, readers stop seeing them."""
+        return self.properties.retract(targets, reason)
+
+    def node_editor(self, node_id: str) -> dict:
+        """Everything the node editor needs: the node, its whole history, the events."""
+        from .browse_view import steps
+
+        snapshot = self.graph_snapshot()
+        node = next(
+            (item for item in snapshot.get("nodes", []) if item["id"] == node_id), None
+        )
+        if node is None:
+            raise ValueError("节点不存在")
+        summary = self.properties.node_properties(node_id, include_retracted=True)
+        return {
+            "node_id": node_id,
+            "node": node,
+            # The editor edits the whole history, not the reading position the
+            # browse pane happens to be sitting at.
+            "properties": summary["properties"],
+            "events": steps(snapshot, "event"),
+            "revision": summary["revision"],
+        }
+
     def property_history(
         self,
         node_id: str,

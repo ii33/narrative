@@ -530,3 +530,61 @@ def test_a_hand_written_record_is_checked_against_the_source(tmp_path: Path) -> 
         assert rejected["status"] == "precheck_failed"
     finally:
         bridge.close()
+
+
+def test_the_node_editor_corrects_and_invalidates(workspace) -> None:
+    """编辑器：改值＝追加一条更正，失效＝撤回记录，两者都先成为候选。"""
+    app, _bridge, page, results, _errors = workspace
+    editor = page.findChild(object, "nodeEditor")
+    assert editor is not None
+
+    del results[:]
+    editor.openFor("3")
+    payload = _pump(app, results, "node_editor")
+    assert payload["node_id"] == "3"
+    assert {item["label"] for item in _value(editor.property("properties"))} == {
+        "持有者", "状态",
+    }
+
+    # 更正：拿「状态」的最新一条，改成新值并同时撤回旧记录。
+    item = next(
+        entry for entry in _value(editor.property("properties"))
+        if entry["label"] == "状态"
+    )
+    record = item["records"][-1]
+    editor.startEdit(item, record)
+    assert editor.property("editRecordId") == record["id"]
+    editor.setProperty("editValue", "完好如初")
+    editor.setProperty("editRetractOld", True)
+    del results[:]
+    editor.submitEdit()
+    corrected = _pump(app, results, "property_correct")
+    assert corrected["status"] == "pending"
+
+    # 失效：整条属性一起撤回，必须写原因。
+    del results[:]
+    editor.reload()
+    payload = _pump(app, results, "node_editor")
+    item = next(
+        entry for entry in _value(editor.property("properties"))
+        if entry["label"] == "持有者"
+    )
+    editor.startRetract(item)
+    assert _value(editor.property("retractTargets")) == [row["id"] for row in item["records"]]
+    editor.setProperty("retractReason", "这条读错了")
+    del results[:]
+    editor.submitRetract()
+    retracted = _pump(app, results, "property_retract")
+    assert retracted["retracted"]
+
+    # 撤回之后编辑器仍然看得到那条记录，并带着原因。
+    del results[:]
+    editor.reload()
+    payload = _pump(app, results, "node_editor")
+    item = next(
+        entry for entry in _value(editor.property("properties"))
+        if entry["label"] == "持有者"
+    )
+    assert all(row["retracted"] for row in item["records"])
+    assert item["records"][0]["retraction_reason"] == "这条读错了"
+

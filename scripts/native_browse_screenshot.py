@@ -68,6 +68,7 @@ def main() -> int:
                         help="事件等级：按场景还是按事件切")
     parser.add_argument("--time", action="store_true", help="同时把节点列表也收窄到该阅读位置")
     parser.add_argument("--related", action="store_true", help="只显示当前步骤的相关节点")
+    parser.add_argument("--editor", action="store_true", help="打开节点编辑器再截图")
     args = parser.parse_args()
     project = args.project.resolve()
     if not project.is_file():
@@ -134,6 +135,13 @@ def main() -> int:
         app.processEvents()
         page.select(args.node)
         wait_for("node_properties")
+        if args.editor:
+            editor = window.findChild(object, "nodeEditor")
+            if editor is None:
+                raise RuntimeError("节点编辑器没有加载")
+            editor.openFor(args.node)
+            wait_for("node_editor")
+            QTest.qWait(300)
         app.processEvents()
 
         rows = page.property("propertyRows")

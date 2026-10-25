@@ -776,11 +776,64 @@ class PropertyStore:
             "target_id": target_id,
         }
 
+    def retract(self, targets: list[str], reason: str) -> dict:
+        """Invalidate records. The row stays for audit; readers stop seeing it.
+
+        Retraction is the only way to take something back, because a value is
+        never edited in place: a wrong record is retracted, and a corrected one
+        is appended as a new disclosure.
+        """
+        from uuid import uuid4
+
+        reason = (reason or "").strip()
+        if not reason:
+            raise ValueError("撤回需要写清原因")
+        if not isinstance(targets, list) or not targets:
+            raise ValueError("请提供要撤回的记录")
+        records = self.accepted_records(include_retracted=True)
+        by_id = {
+            record["id"]: record for record in records if isinstance(record.get("id"), str)
+        }
+        already = {
+            record.get("target_id") for record in records
+            if record.get("kind") == "property_retraction"
+        }
+        pending: list[dict] = []
+        for target in dict.fromkeys(targets):
+            record = by_id.get(target)
+            if record is None:
+                raise ValueError(f"记录不存在：{target}")
+            if record.get("kind") not in {
+                "property_value", "property_categorization", "property_merge"
+            }:
+                raise ValueError("只有取值、分类或归并记录可以撤回")
+            if target in already:
+                continue
+            pending.append({
+                "kind": "property_retraction",
+                "id": f"retract_{uuid4().hex[:12]}",
+                "target_id": target,
+                "reason": reason,
+            })
+        if not pending:
+            return {"revision": self.store.revision, "retracted": [], "reason": reason}
+        revision = self.store.revision
+        candidate = self.propose(
+            pending, revision, source="correction", note=f"撤回：{reason}"
+        )
+        return {
+            "revision": self.accept(candidate, 1),
+            "retracted": [record["target_id"] for record in pending],
+            "reason": reason,
+        }
+
     def node_properties(
         self,
         node_id: str,
         as_of_revision: int | None = None,
         cut: object = None,
+        *,
+        include_retracted: bool = False,
     ) -> dict:
         """Every property a node carries, grouped for reading.
 
@@ -798,7 +851,15 @@ class PropertyStore:
         under both headings, each carrying only its own records.
         """
         snapshot = self.store.snapshot(as_of_revision)
-        records = self.accepted_records(snapshot["revision"])
+        records = self.accepted_records(
+            snapshot["revision"], include_retracted=include_retracted
+        )
+        # A retraction does not delete the row: the editor shows what was taken
+        # back and why, while the browsing pane simply stops seeing it.
+        retracted_by = {
+            record.get("target_id"): record for record in records
+            if record.get("kind") == "property_retraction"
+        }
         config = property_categories.load(self.store)
         definitions = {
             record["id"]: record for record in records
@@ -929,6 +990,8 @@ class PropertyStore:
                     "property_label": property_labels.label_for(entry["property_id"]),
                     "category": category,
                     "category_source": entry["category_source"],
+                    "retracted": row.get("id") in retracted_by,
+                    "retraction_reason": (retracted_by.get(row.get("id")) or {}).get("reason"),
                 })
             latest = decorated[-1]
             values_only = [entry for entry in decorated if entry.get("kind") == "property_value"]
