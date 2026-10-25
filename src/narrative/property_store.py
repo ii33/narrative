@@ -625,7 +625,11 @@ class PropertyStore:
         from .property_audit import audit_properties
 
         snapshot = self.store.snapshot(as_of_revision)
-        records = self.accepted_records(snapshot["revision"])
+        # Retracted rows are read too: judging a retraction needs the record it
+        # points at, and a target the audit never saw looks like a broken pointer.
+        records = self.accepted_records(
+            snapshot["revision"], include_retracted=True
+        )
         # An alias that was merged is no longer a separate name: auditing it as
         # one would keep reporting the split the human already resolved.
         records = _with_canonical_names(records, _merge_map(records))
@@ -851,15 +855,20 @@ class PropertyStore:
         under both headings, each carrying only its own records.
         """
         snapshot = self.store.snapshot(as_of_revision)
-        records = self.accepted_records(
-            snapshot["revision"], include_retracted=include_retracted
-        )
+        # Read the whole history even when the caller only wants what stands: a
+        # retracted value is still needed to know that the aspect was invalidated,
+        # and the retraction itself has to be resolvable to its target.
+        all_records = self.accepted_records(snapshot["revision"], include_retracted=True)
         # A retraction does not delete the row: the editor shows what was taken
         # back and why, while the browsing pane simply stops seeing it.
         retracted_by = {
-            record.get("target_id"): record for record in records
+            record.get("target_id"): record for record in all_records
             if record.get("kind") == "property_retraction"
         }
+        records = all_records if include_retracted else [
+            record for record in all_records
+            if record.get("id") not in retracted_by
+        ]
         config = property_categories.load(self.store)
         definitions = {
             record["id"]: record for record in records
@@ -906,8 +915,10 @@ class PropertyStore:
         # record rather than a reason to split the line — a claim about the realm
         # and the realm itself are the same subject, told differently.
         lines: dict[tuple[str, str], list[dict]] = {}
-        for record in records:
-            if record.get("kind") not in {"property_value", "property_retraction"}:
+        for record in all_records:
+            # Only values sit on a line. A retraction has no node or aspect of its
+            # own — it points at a value and is applied through `retracted_by`.
+            if record.get("kind") != "property_value":
                 continue
             if record.get("node_id") != node_id:
                 continue
@@ -922,17 +933,45 @@ class PropertyStore:
                 "property_id": name,
                 "category_source": category_source,
             })
-        aspect_categories: dict[str, set[str]] = {}
-        for aspect, category in lines:
-            aspect_categories.setdefault(aspect, set()).add(category)
-
         # A reading cut turns the pane into "what was known at this point": the
         # later disclosures are not wrong, they simply have not happened for the
         # reader yet, so they are counted rather than shown.
         cut_position = self._cut_position(cut) if cut else None
+        # A slice with nothing left is not shown at all, so it must not be
+        # advertised either: "也在「其他」中" has to point at a row that exists.
+        shown_categories: dict[str, set[str]] = {}
 
         items: list[dict] = []
         hidden_total = 0
+        # An aspect can span two categories (state = 脸色铁青 in 外貌, state = 笑了
+        # in 心理与意图). A slice with nothing left earns a line only when the
+        # aspect as a whole stands empty; otherwise the survivors already say what
+        # is known, and a ghost row would just repeat the edit.
+        standing: dict[str, int] = {}
+        newest: dict[str, tuple[tuple, str]] = {}
+        # Retractions are counted per aspect, not per slice: a record can be taken
+        # back from one category while the aspect still stands in another, and the
+        # reader should still be told that something went.
+        taken_back: dict[str, int] = {}
+        for (aspect_key, category_key), entries in lines.items():
+            standing[aspect_key] = standing.get(aspect_key, 0) + sum(
+                1 for entry in entries
+                if include_retracted
+                or entry["record"].get("id") not in retracted_by
+            )
+            taken_back[aspect_key] = taken_back.get(aspect_key, 0) + sum(
+                1 for entry in entries if entry["record"].get("id") in retracted_by
+            )
+            for entry in entries:
+                key = position(entry["record"])
+                # The ghost line belongs to the slice the reader actually reached,
+                # not to a record beyond the cut.
+                if cut_position is not None and key > cut_position:
+                    continue
+                if aspect_key not in newest or key > newest[aspect_key][0]:
+                    newest[aspect_key] = (key, category_key)
+                if include_retracted or entry["record"].get("id") not in retracted_by:
+                    shown_categories.setdefault(aspect_key, set()).add(category_key)
         for (aspect, category), line in lines.items():
             ordered = sorted(line, key=lambda entry: position(entry["record"]))
             later = 0
@@ -943,15 +982,60 @@ class PropertyStore:
                 ]
                 later = len(ordered) - len(visible)
                 hidden_total += later
-                visible_ids = {entry["record"].get("id") for entry in visible}
-                # A retraction whose target is not known yet says nothing.
-                ordered = [
-                    entry for entry in visible
-                    if entry["record"].get("kind") != "property_retraction"
-                    or entry["record"].get("target_id") in visible_ids
-                ]
+                ordered = visible
                 if not ordered:
                     continue
+            # Retraction is not "not yet read": it is read and taken back, so it
+            # is applied here rather than at the cut. The line survives even when
+            # nothing is left — "this aspect was invalidated" is an answer, and a
+            # line that silently disappears hides the edit that caused it.
+            kept = [
+                entry for entry in ordered
+                if include_retracted
+                or entry["record"].get("id") not in retracted_by
+            ]
+            retracted_count = 0 if include_retracted else taken_back.get(aspect, 0)
+            if not kept:
+                # One line for the aspect, in the category of its newest record —
+                # not one ghost per category it used to sit in.
+                if standing.get(aspect, 0) > 0 or newest.get(aspect, (None, ""))[1] != category:
+                    continue
+                property_ids = sorted({entry["property_id"] for entry in ordered})
+                items.append({
+                    "property_id": property_ids[-1],
+                    "property_ids": property_ids,
+                    "aspect": aspect,
+                    "label": property_labels.label_for(
+                        aspect if aspect in property_ids else property_ids[-1]
+                    ),
+                    "category": category,
+                    "category_source": ordered[-1]["category_source"],
+                    "other_categories": sorted(
+                        shown_categories.get(aspect, set()) - {category}
+                    ),
+                    "value": None,
+                    "value_node": None,
+                    "value_type": None,
+                    "scope": None,
+                    "scopes": sorted({
+                        entry["record"].get("scope", "world") for entry in ordered
+                    }),
+                    "holder_id": None,
+                    "holder_name": None,
+                    "event_id": None,
+                    "start": None,
+                    "current_from_event": None,
+                    "current_from_start": None,
+                    "retracted": True,
+                    "current_retracted": True,
+                    "history_count": 0,
+                    "record_count": 0,
+                    "retracted_count": retracted_count,
+                    "later_count": later,
+                    "records": [],
+                })
+                continue
+            ordered = kept
             property_ids = sorted({entry["property_id"] for entry in ordered})
             definition = definitions.get(ordered[-1]["property_id"]) or {}
             node_valued = definition.get("value_type") in {"node", "either"}
@@ -1008,11 +1092,13 @@ class PropertyStore:
                 # The same aspect may sit in another category too; the reader is
                 # told rather than shown a silently partial list.
                 "other_categories": sorted(
-                    name for name in aspect_categories[aspect] if name != category
+                    shown_categories.get(aspect, set()) - {category}
                 ),
                 "current_from_event": names.get(latest.get("event_id") or ""),
                 "current_from_start": (latest.get("disclosure") or {}).get("start"),
-                "current_retracted": latest.get("kind") == "property_retraction",
+                # The current value is the one the reader meets last — and it is
+                # invalid when that record itself has been taken back.
+                "current_retracted": latest.get("id") in retracted_by,
                 "history_count": max(0, len(values_only) - 1),
                 "value_node": node_ref(latest.get("value")) if node_valued else None,
                 "scope": latest.get("scope"),
@@ -1023,8 +1109,9 @@ class PropertyStore:
                 "value": latest.get("value"),
                 "event_id": latest.get("event_id"),
                 "start": (latest.get("disclosure") or {}).get("start"),
-                "retracted": latest.get("kind") == "property_retraction",
+                "retracted": latest.get("id") in retracted_by,
                 "record_count": len(decorated),
+                "retracted_count": retracted_count,
                 # Disclosures after the cut: the pane says how many it is not
                 # showing instead of pretending this is everything.
                 "later_count": later,
@@ -1035,13 +1122,6 @@ class PropertyStore:
         )
         items.sort(key=lambda item: (
             ordered_categories.index(item["category"]), item["label"], item["aspect"],
-        ))
-        ordered_categories = property_categories.order_categories(
-            sorted({item["category"] for item in items}), node_type, config
-        )
-        items.sort(key=lambda item: (
-            ordered_categories.index(item["category"]),
-            item["property_id"], item["scope"], item["holder_id"] or "",
         ))
 
         # The other end of a relation: a record stored on another node whose

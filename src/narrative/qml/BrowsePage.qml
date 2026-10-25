@@ -281,6 +281,13 @@ Item {
                 || (item.holder_id ? page.nameOf(item.holder_id) : ""),
             validFrom: item.current_retracted ? "" : ("起于 " + (item.current_from_event || "—")),
             historyText: item.history_count > 0 ? "另有 " + item.history_count + " 条历史" : "",
+            // 失效是编辑动作，不是披露：说清楚撤了几条、整条还剩不剩。
+            retractedText: item.retracted
+                ? ((item.record_count || 0) === 0
+                    ? "整条已失效，当前没有有效值"
+                    : "当前值已失效")
+                : ((item.retracted_count || 0) > 0
+                    ? "撤回 " + item.retracted_count + " 条" : ""),
             laterText: (item.later_count || 0) > 0
                 ? "此后还有 " + item.later_count + " 条披露" : "",
             records: records

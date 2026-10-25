@@ -167,12 +167,14 @@ def test_audit_can_be_limited_to_the_nodes_of_one_extraction(tmp_path: Path) -> 
     assert limited["checked_records"] == 2
 
 
-def _retraction(rid: str, node_id: str, property_id: str, target: str, *,
-                event="9", start=900) -> dict:
+def _retraction(rid: str, target: str, reason: str = "原文否定了这条") -> dict:
+    """撤回只指向一条取值记录：节点、属性、作用域都从目标读。
+
+    生产端就是这么写的（`PropertyStore.retract`），测试也必须照这个形状，
+    否则测的是一条永远不会出现的记录。
+    """
     return {
-        "kind": "property_retraction", "id": rid, "node_id": node_id,
-        "property_id": property_id, "target_id": target, "reason": "原文否定了这条",
-        "event_id": event, "disclosure": {"source_id": "s1", "start": start},
+        "kind": "property_retraction", "id": rid, "target_id": target, "reason": reason,
     }
 
 
@@ -180,7 +182,7 @@ def test_retraction_pointing_nowhere_is_an_error() -> None:
     records = [
         _definition("holder"),
         _value("v1", "1", "holder", "7", start=0),
-        _retraction("r1", "1", "holder", "missing"),
+        _retraction("r1", "missing"),
     ]
     report = audit_properties(records, [_node("1", "火纹石", "item")])
 
@@ -188,24 +190,27 @@ def test_retraction_pointing_nowhere_is_an_error() -> None:
     assert issue["severity"] == "error"
 
 
-def test_retraction_must_target_the_same_property() -> None:
+def test_a_retraction_takes_its_aspect_from_the_target() -> None:
+    """撤回没有自己的节点和属性名，所以不能因此报「记录不完整」。"""
     records = [
         _definition("holder"),
         _definition("state"),
         _value("v1", "1", "state", "完好", start=0),
-        _retraction("r1", "1", "holder", "v1"),
+        _retraction("r1", "v1"),
     ]
     report = audit_properties(records, [_node("1", "火纹石", "item")])
 
-    issue = next(item for item in report["issues"] if item["code"] == "retraction_mismatch")
-    assert issue["severity"] == "error"
+    assert report["counts"]["error"] == 0
+    # 它只作用于目标那条记录所在的属性，别的属性不受影响。
+    issue = next(item for item in report["issues"] if item["code"] == "retracted_no_successor")
+    assert issue["property_id"] == "state"
 
 
 def test_retraction_without_a_later_value_leaves_no_current_value() -> None:
     records = [
         _definition("holder"),
         _value("v1", "1", "holder", "7", event="1", start=0),
-        _retraction("r1", "1", "holder", "v1", event="9", start=900),
+        _retraction("r1", "v1"),
     ]
     report = audit_properties(records, [_node("1", "火纹石", "item")])
 
@@ -213,18 +218,20 @@ def test_retraction_without_a_later_value_leaves_no_current_value() -> None:
     assert issue["severity"] == "warning"
 
 
-def test_value_after_retraction_is_allowed_and_noted() -> None:
+def test_a_retraction_that_leaves_a_value_standing_is_only_noted() -> None:
     records = [
         _definition("holder"),
         _value("v1", "1", "holder", "7", event="1", start=0),
-        _retraction("r1", "1", "holder", "v1", event="5", start=500),
-        _value("v2", "1", "holder", "8", event="9", start=900),
+        _value("v2", "1", "holder", "8", event="2", start=100),
+        _retraction("r1", "v2"),
     ]
     report = audit_properties(records, [_node("1", "火纹石", "item")])
 
     codes = _codes(report)
-    assert "value_after_retraction" in codes
+    assert "retraction_partial" in codes
     assert "retracted_no_successor" not in codes
+    # 撤回掉的那条不该再被当成「矛盾值」的证据。
+    assert "conflicting_values" not in codes
     assert report["counts"]["error"] == 0
 
 

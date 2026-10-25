@@ -77,11 +77,20 @@ def audit_properties(
     either "this node has problems" or "the whole extraction has problems".
     """
     names = {node["id"]: node for node in nodes}
-    values = [
+    # A retracted value is still a record: it is what a retraction points at, and
+    # it is what tells the audit that an aspect lost its last standing value. It
+    # is excluded from the value checks, though — a taken-back record must not be
+    # reported as an overlap or a contradiction.
+    retracted_ids = {
+        record.get("target_id") for record in records
+        if record.get("kind") == "property_retraction"
+    }
+    values_all = [
         record for record in records
         if record.get("kind") == "property_value"
         and (node_ids is None or record.get("node_id") in node_ids)
     ]
+    values = [record for record in values_all if record.get("id") not in retracted_ids]
     definitions = {
         record["id"]: record for record in records
         if record.get("kind") == "property_definition"
@@ -97,10 +106,7 @@ def audit_properties(
             overrides[target] = category.strip()
 
     retracted_nodes = {node["id"] for node in nodes if node.get("retracted")}
-    values_by_id = {
-        record["id"]: record for record in records
-        if record.get("kind") == "property_value"
-    }
+    values_by_id = {record["id"]: record for record in values_all}
     issues: list[dict] = []
     groups: dict[tuple, list[dict]] = defaultdict(list)
     per_node_names: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
@@ -119,7 +125,6 @@ def audit_properties(
             continue
         node = names.get(node_id, {"id": node_id, "name": node_id})
         scope = record.get("scope", "world")
-        groups[(node_id, property_id, scope, record.get("holder_id"))].append(record)
         # Two names for one aspect (`cultivation`, `cultivation_stage`) are the
         # same subject; the reader sees them on one line, so the check has to
         # happen at that level too.
@@ -205,41 +210,55 @@ def audit_properties(
     retractions = [
         record for record in records
         if record.get("kind") == "property_retraction"
-        and (node_ids is None or record.get("node_id") in node_ids)
     ]
     retract_groups: dict[tuple, list[dict]] = defaultdict(list)
     for record in retractions:
-        node_id = record.get("node_id")
-        property_id = record.get("property_id")
-        node = names.get(node_id or "", {"id": node_id, "name": node_id})
-        if not isinstance(node_id, str) or not isinstance(property_id, str):
-            issues.append(_issue(
-                "record_incomplete", ERROR,
-                "撤回记录缺少节点或属性名", records=[record],
-            ))
-            continue
-        retract_groups[(node_id, property_id, record.get("scope", "world"),
-                        record.get("holder_id"))].append(record)
+        # A retraction has no node, aspect or position of its own: it is an
+        # editorial act pointing at one disclosure. Everything about it is read
+        # from that target, so the two can never disagree.
         target = values_by_id.get(record.get("target_id") or "")
         if target is None:
             issues.append(_issue(
                 "retraction_without_target", ERROR,
                 f"撤回记录指向的 {record.get('target_id') or '（空）'} 不存在，撤不掉任何东西",
-                node=node, property_id=property_id, records=[record],
+                records=[record],
                 suggestion="撤回必须指向一条已接受的取值记录",
             ))
-        elif (target.get("node_id"), target.get("property_id")) != (node_id, property_id):
-            issues.append(_issue(
-                "retraction_mismatch", ERROR,
-                f"撤回记录指向的 {record.get('target_id')} 属于别的节点或属性",
-                node=node, property_id=property_id, records=[record, target],
-                suggestion="撤回只能作用于同一节点、同一属性的记录",
-            ))
+            continue
+        retract_groups[(
+            target.get("node_id"), target.get("property_id"),
+            target.get("scope", "world"), target.get("holder_id"),
+        )].append(record)
+
+    # Groups come from every value, retracted or not: a group whose values were
+    # all taken back still has to be judged, and it would otherwise vanish from
+    # the report exactly when it became empty.
+    for record in values_all:
+        node_id, property_id = record.get("node_id"), record.get("property_id")
+        if isinstance(node_id, str) and isinstance(property_id, str):
+            groups[(
+                node_id, property_id, record.get("scope", "world"),
+                record.get("holder_id"),
+            )].append(record)
 
     for (node_id, property_id, scope, holder_id), rows in groups.items():
         node = names.get(node_id, {"id": node_id, "name": node_id})
         label = _SCOPE_LABELS.get(scope, scope)
-        ordered = sorted(rows, key=_position)
+        retr = retract_groups.get((node_id, property_id, scope, holder_id)) or []
+        # Retracted rows are not evidence of anything: they are only kept so the
+        # group exists. Every check below works on what still stands.
+        ordered = sorted(
+            (row for row in rows if row.get("id") not in retracted_ids), key=_position
+        )
+        if not ordered:
+            if retr:
+                issues.append(_issue(
+                    "retracted_no_successor", WARNING,
+                    f"属性「{property_id}」（{label}）的记录都已撤回，当前没有有效值",
+                    node=node, property_id=property_id, records=retr,
+                    suggestion="确认这是有意终止；若之后又有新说法，补一条取值记录",
+                ))
+            continue
         seen: dict[str, list[dict]] = defaultdict(list)
         for row in ordered:
             seen[_text(row.get("value"))].append(row)
@@ -282,24 +301,16 @@ def audit_properties(
                            f"，早先的 {len(earlier)} 条保留为历史",
             ))
 
-        retr = retract_groups.get((node_id, property_id, scope, holder_id)) or []
-        if retr:
-            last_value = max(_position(row) for row in ordered)
-            last_retraction = max(_position(row) for row in retr)
-            if last_retraction > last_value:
-                issues.append(_issue(
-                    "retracted_no_successor", WARNING,
-                    f"属性「{property_id}」（{label}）最后一次披露是撤回，当前没有有效值",
-                    node=node, property_id=property_id, records=retr,
-                    suggestion="确认这是有意终止；若之后又有新说法，补一条取值记录",
-                ))
-            else:
-                issues.append(_issue(
-                    "value_after_retraction", INFO,
-                    f"属性「{property_id}」（{label}）在撤回之后又重新给出了值",
-                    node=node, property_id=property_id, records=ordered,
-                    suggestion="允许的转折；确认新值确实在撤回之后披露",
-                ))
+        if retr and len(ordered) < len(rows):
+            # Some disclosures were taken back but the aspect still stands: the
+            # reader sees the survivors, and the report says how many went.
+            issues.append(_issue(
+                "retraction_partial", INFO,
+                f"属性「{property_id}」（{label}）撤回了 {len(rows) - len(ordered)} 条，"
+                f"仍有 {len(ordered)} 条站得住",
+                node=node, property_id=property_id, records=retr,
+                suggestion="允许的更正；确认剩下的值确实是当前有效的那条",
+            ))
 
         if holder_id and not names.get(holder_id):
             issues.append(_issue(
@@ -335,7 +346,9 @@ def audit_properties(
                 suggestion="节点撤回时一并撤回它的属性记录，或恢复该节点",
             ))
 
-    used = {record.get("property_id") for record in values}
+    # A definition whose records were all taken back is not unused — it is in use
+    # and currently empty, which `retracted_no_successor` already says.
+    used = {record.get("property_id") for record in values_all}
     for property_id in definitions:
         if property_id not in used:
             issues.append(_issue(
@@ -379,7 +392,11 @@ def audit_candidate(ops: Any, built: dict) -> dict:
         obj for obj in built.get("objects", [])
         if obj.get("kind") == "node"
     ]
-    records = list(ops.property_records()) + list(built.get("property_records", []))
+    # Retracted rows are included: a retraction in this candidate may point at a
+    # record that was taken back earlier, and judging it needs that record.
+    records = list(ops.property_records(include_retracted=True)) + list(
+        built.get("property_records", [])
+    )
     node_ids = {
         obj["id"] for obj in built.get("objects", [])
         if obj.get("kind") == "node"

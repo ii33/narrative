@@ -91,3 +91,41 @@ def test_retracting_twice_is_a_no_op(tmp_path: Path) -> None:
 
     assert second["retracted"] == []
     assert second["revision"] == first["revision"]
+
+
+def test_a_partial_retraction_keeps_the_line_and_counts_the_loss(tmp_path: Path) -> None:
+    """撤回一条之后，这一方面仍然站得住：不出现空行，但要说撤了几条。"""
+    ops = _project(tmp_path / "partial.sqlite3")
+    ops.property_retract(["v2"], "读错了")
+
+    item = ops.property_node_summary("1")["properties"][0]
+    assert item["retracted"] is False
+    assert item["retracted_count"] == 1
+    assert item["record_count"] == 1
+    assert [row["value"] for row in item["records"]] == ["二十九岁"]
+
+
+def test_an_aspect_with_nothing_left_says_so_instead_of_vanishing(tmp_path: Path) -> None:
+    """整条失效是一句答案，不能让它悄悄消失——否则看不见自己做过什么。"""
+    ops = _project(tmp_path / "gone.sqlite3")
+    ops.property_retract(["v1", "v2"], "两句都读错了")
+
+    items = ops.property_node_summary("1")["properties"]
+    assert len(items) == 1
+    item = items[0]
+    assert item["label"] == "年龄"
+    assert item["retracted"] is True
+    assert item["current_retracted"] is True
+    # 值不再可见，但「撤了几条」还在。
+    assert item["value"] is None
+    assert item["record_count"] == 0
+    assert item["retracted_count"] == 2
+    assert item["records"] == []
+
+    # 编辑器里仍然看得见这两条和原因。
+    rows = ops.node_editor("1")["properties"][0]["records"]
+    assert [(row["value"], row["retracted"]) for row in rows] == [
+        ("二十九岁", True), ("三十岁", True),
+    ]
+    assert {row["retraction_reason"] for row in rows} == {"两句都读错了"}
+

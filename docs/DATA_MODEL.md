@@ -140,7 +140,21 @@ v6 图项目。两层：来源、对象。对象之间不再有断言层——�
 | `property_definition` | 值类型、基数、持续性 |
 | `property_value` | `node_id` + `property_id` + `value` + `event_id` + `anchor_basis` + 可选 `applies_to` / `source` / `related_nodes` / `scope` / `holder_id` / `category` + 证据 |
 | `property_categorization` | 把某条取值记录移到另一个显示大类：`target_id` + `category`。整理动作，不是披露，没有证据 |
-| `property_retraction` | 撤回序列里的某一条：行保留供审计，读取时过滤 |
+| `property_retraction` | 把序列里的某一条设为失效：`target_id` + `reason`。行保留供审计，读取时过滤 |
+
+`property_retraction` **没有自己的节点、属性名和位置**：它是编辑动作，不是披露。
+节点、方面、作用域一律从 `target_id` 指向的那条记录读，两处因此不会互相矛盾。
+读取时它做两件事：把目标记录从投影里去掉；目标所在方面如果一条都不剩，
+就在该方面最新一条所属的大类下留一行「已失效」，而不是让这一行悄悄消失。
+
+失效与「过时」不是一回事：
+
+- **被后一条披露取代**——不是撤回。值窗口自然结束于下一次披露（`valid_to_event`），
+  旧值退为历史，仍然可见、可查。
+- **撤回**——显式编辑。记录从投影里消失，编辑器仍看得到它和原因；
+  审计给 `retracted_no_successor`（一条都不剩，警告）或 `retraction_partial`（提示）。
+- **未读到**——阅读切点之外的披露。它们既没过时也没失效，只是读者还没读到，
+  界面上以「此后还有 N 条披露」计数，不显示。
 
 `category` 只管显示位置，与 `scope` 各管一件事；分片规则与移动方式见
 [`PROPERTY_CATEGORIES.md`](PROPERTY_CATEGORIES.md)。

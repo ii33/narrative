@@ -113,9 +113,12 @@ Column {
             Label {
                 Layout.fillWidth: true
                 visible: item.row.validFrom.length > 0 || item.splitHint.length > 0
-                text: [item.row.validFrom, item.row.historyText, item.row.laterText, item.splitHint]
+                    || item.row.retractedText.length > 0
+                text: [item.row.validFrom, item.row.historyText, item.row.laterText,
+                       item.row.retractedText, item.splitHint]
                     .filter(function (part) { return part.length > 0 }).join(" · ")
-                color: item.t.muted
+                // 失效是编辑留下的痕迹，用提示色而不是普通说明色。
+                color: item.row.retracted ? item.t.warn : item.t.muted
                 font.pixelSize: 10
                 elide: Text.ElideRight
             }
