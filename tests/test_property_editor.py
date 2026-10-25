@@ -67,9 +67,11 @@ def test_the_editor_sees_what_was_retracted(tmp_path: Path) -> None:
     assert [event["name"] for event in payload["events"]] == ["交代年龄"]
     item = payload["properties"][0]
     rows = {row["id"]: row for row in item["records"]}
-    assert rows["v2"]["retracted"] is True
-    assert rows["v2"]["retraction_reason"] == "读错了"
-    assert rows["v1"]["retracted"] is False
+    assert rows["v2"]["valid"] is False
+    assert rows["v2"]["invalid_reason"] == "读错了"
+    # 没给时间点的失效是「读错了」，不是「被取代」：它在任何阅读位置都不算数。
+    assert rows["v2"]["invalidated_at"] == ""
+    assert rows["v1"]["valid"] is True
 
 
 def test_retraction_needs_a_reason_and_a_real_record(tmp_path: Path) -> None:
@@ -100,7 +102,7 @@ def test_a_partial_retraction_keeps_the_line_and_counts_the_loss(tmp_path: Path)
 
     item = ops.property_node_summary("1")["properties"][0]
     assert item["retracted"] is False
-    assert item["retracted_count"] == 1
+    assert item["invalid_count"] == 1
     assert item["record_count"] == 1
     assert [row["value"] for row in item["records"]] == ["二十九岁"]
 
@@ -115,17 +117,16 @@ def test_an_aspect_with_nothing_left_says_so_instead_of_vanishing(tmp_path: Path
     item = items[0]
     assert item["label"] == "年龄"
     assert item["retracted"] is True
-    assert item["current_retracted"] is True
-    # 值不再可见，但「撤了几条」还在。
+    # 值不再可见，但「失效了几条」还在。
     assert item["value"] is None
     assert item["record_count"] == 0
-    assert item["retracted_count"] == 2
+    assert item["invalid_count"] == 2
     assert item["records"] == []
 
     # 编辑器里仍然看得见这两条和原因。
     rows = ops.node_editor("1")["properties"][0]["records"]
-    assert [(row["value"], row["retracted"]) for row in rows] == [
-        ("二十九岁", True), ("三十岁", True),
+    assert [(row["value"], row["valid"]) for row in rows] == [
+        ("二十九岁", False), ("三十岁", False),
     ]
-    assert {row["retraction_reason"] for row in rows} == {"两句都读错了"}
+    assert {row["invalid_reason"] for row in rows} == {"两句都读错了"}
 

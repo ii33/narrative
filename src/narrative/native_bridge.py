@@ -691,6 +691,28 @@ class NativeBridge(QObject):
         self._project_task("property_retract", work)
 
     @Slot(str)
+    def applySuperseded(self, pairs_json: str) -> None:
+        """Mark older values invalid from the disclosure that replaced them.
+
+        The pairs come from the audit's `superseded_values` findings: each one
+        names a record and the event it stopped counting at. Nothing is deleted
+        and no reading position before that event changes.
+        """
+        try:
+            pairs = json.loads(pairs_json)
+        except json.JSONDecodeError as exc:
+            self.errorOccurred.emit("property_supersede", f"失效建议无效：{exc.msg}")
+            return
+        if not isinstance(pairs, list) or not pairs:
+            self.errorOccurred.emit("property_supersede", "没有可应用的失效建议")
+            return
+
+        def work(ops) -> dict:
+            return ops.property_supersede([dict(item) for item in pairs])
+
+        self._project_task("property_supersede", work)
+
+    @Slot(str)
     def loadNodeEditor(self, node_id: str) -> None:
         """Everything the node editor needs: the node, its whole history, the events."""
         self._project_task("node_editor", lambda ops: ops.node_editor(node_id))

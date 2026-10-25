@@ -151,7 +151,11 @@ def test_properties_form_one_value_sequence(tmp_path: Path) -> None:
     assert built["errors"] == []
     assert built["property_count"] == 3
     kinds = {item["kind"] for item in built["property_records"]}
-    assert kinds <= {"property_definition", "property_value"}
+    # 同一方面出现多个值时，候选里同时带着「旧值失效」的标记：值和取代它的
+    # 披露一起落地，不会出现「新值进了、旧值还站着」的半截状态。
+    assert kinds <= {"property_definition", "property_value", "property_retraction"}
+    marks = [item for item in built["property_records"] if item["kind"] == "property_retraction"]
+    assert all(mark["basis"] == "audit" and mark["event_id"] for mark in marks)
 
     candidate = ops.change_propose(
         built["objects"], built["property_records"], built["revision"], source="model"
@@ -758,12 +762,27 @@ def test_node_properties_orders_by_reading_not_write_order(tmp_path: Path) -> No
     assert item["records"][0]["event_name"] == "交代年龄"
     assert item["records"][0]["related"] == [{"id": "2", "name": "交代年龄"}]
 
-    # Validity window: the earlier value stops where the later one is disclosed.
-    assert item["history_count"] == 1
-    assert item["current_from_event"] == "交代年龄"
-    assert [row["is_current"] for row in item["records"]] == [False, True]
-    assert item["records"][0]["valid_to_event"] == "交代年龄"
-    assert item["records"][1]["valid_to_event"] is None
+    # 有效期不再算：两条都还是有效记录，谁被取代要由失效标记来说。
+    assert item["disclosed_at"] == "交代年龄"
+    assert [row["valid"] for row in item["records"]] == [True, True]
+    assert (item["valid_count"], item["invalid_count"]) == (2, 0)
+
+    # 审核轮判定「旧值已被取代」之后，早的那条从取代它的披露起不再算数。
+    ops.property_supersede([
+        {"target_id": item["records"][0]["id"], "event_id": "2", "reason": "被后一条披露取代"}
+    ])
+    item = ops.property_node_summary("1")["properties"][0]
+    # 浏览区只显示站得住的那条，失效的条数说清楚。
+    assert [row["value"] for row in item["records"]] == ["三十三岁"]
+    assert item["invalid_count"] == 1
+    assert item["value"] == "三十三岁"
+
+    # 编辑器看全历史：失效的那条还在，并带着失效的时间点。
+    rows = ops.node_editor("1")["properties"][0]["records"]
+    assert [(row["value"], row["valid"], row["invalidated_at"]) for row in rows] == [
+        ("二十九岁", False, "交代年龄"),
+        ("三十三岁", True, ""),
+    ]
 
 
 def test_node_properties_keeps_one_line_per_aspect(tmp_path: Path) -> None:

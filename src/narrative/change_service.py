@@ -24,7 +24,9 @@ from . import dependency_core
 from .graph_service import GraphService
 from .property_store import PropertyStore
 
-CHANGE_SOURCES = {"manual", "model", "correction"}
+# `audit` marks what the review round decided on its own (an old value is no
+# longer the state); `correction` is a human fixing something.
+CHANGE_SOURCES = {"manual", "model", "correction", "audit"}
 
 
 class ChangeService:

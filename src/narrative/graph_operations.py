@@ -436,9 +436,19 @@ class GraphOperations:
         """Read one property name as another. A separate act from moving a category."""
         return self.properties.merge(alias_id, target_id, note)
 
-    def property_retract(self, targets: list[str], reason: str) -> dict:
-        """Invalidate records: they stay for audit, readers stop seeing them."""
-        return self.properties.retract(targets, reason)
+    def property_retract(
+        self, targets: list[str], reason: str, *, event_id: str | None = None
+    ) -> dict:
+        """Invalidate records: they stay for audit, readers stop seeing them.
+
+        Without ``event_id`` the record was misread and never counted; with it the
+        record stops counting from that disclosure on (superseded).
+        """
+        return self.properties.retract(targets, reason, event_id=event_id)
+
+    def property_supersede(self, pairs: list[dict], note: str = "") -> dict:
+        """Mark older values invalid from the disclosure that replaced them."""
+        return self.properties.supersede(pairs, note)
 
     def node_editor(self, node_id: str) -> dict:
         """Everything the node editor needs: the node, its whole history, the events."""

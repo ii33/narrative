@@ -413,7 +413,9 @@ def test_two_names_for_one_aspect_share_a_line(tmp_path: Path) -> None:
     assert [row["scope"] for row in item["records"]] == ["claim", "world", "cognition"]
     assert item["scopes"] == ["claim", "cognition", "world"]
     assert item["value"] == "到了元婴初期"
-    assert [row["is_current"] for row in item["records"]] == [False, False, True]
+    # 三条都还是有效记录：谁是「当前」由失效标记决定，不由位置推算。
+    assert [row["valid"] for row in item["records"]] == [True, True, True]
+    assert item["valid_count"] == 3
     # 每条记录仍带自己的属性名，读者能看出它来自哪个名字。
     assert [row["property_label"] for row in item["records"]] == ["修为", "修为境界", "修为境界"]
 

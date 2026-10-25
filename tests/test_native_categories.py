@@ -585,6 +585,6 @@ def test_the_node_editor_corrects_and_invalidates(workspace) -> None:
         entry for entry in _value(editor.property("properties"))
         if entry["label"] == "持有者"
     )
-    assert all(row["retracted"] for row in item["records"])
-    assert item["records"][0]["retraction_reason"] == "这条读错了"
+    assert all(not row["valid"] for row in item["records"])
+    assert item["records"][0]["invalid_reason"] == "这条读错了"
 

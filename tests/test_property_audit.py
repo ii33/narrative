@@ -72,10 +72,13 @@ def test_different_values_report_the_current_one() -> None:
     ]
     report = audit_properties(records, [_node("1", "林舟")])
 
-    conflict = next(item for item in report["issues"] if item["code"] == "conflicting_values")
-    assert "180 公分" in conflict["message"]
-    # History is kept: the earlier value is not an error, only context.
-    assert conflict["severity"] == "warning"
+    finding = next(item for item in report["issues"] if item["code"] == "superseded_values")
+    assert "180 公分" in finding["message"]
+    # 值变了是推进，不是错误：审核只给出「哪条该失效」的建议。
+    assert finding["severity"] == "info"
+    # 建议里带够信息，界面才能一键落地：目标记录 + 从哪个事件起失效。
+    pairs = finding["action"]["pairs"]
+    assert [(item["target_id"], item["event_id"]) for item in pairs] == [("v1", "2")]
 
 
 def test_missing_definition_evidence_and_anchor_are_reported() -> None:
@@ -218,7 +221,8 @@ def test_retraction_without_a_later_value_leaves_no_current_value() -> None:
     assert issue["severity"] == "warning"
 
 
-def test_a_retraction_that_leaves_a_value_standing_is_only_noted() -> None:
+def test_a_retraction_that_leaves_a_value_standing_is_not_reported() -> None:
+    """失效是常规动作：只要还剩一条站得住，就不必每次都在审核里说一遍。"""
     records = [
         _definition("holder"),
         _value("v1", "1", "holder", "7", event="1", start=0),
@@ -228,10 +232,9 @@ def test_a_retraction_that_leaves_a_value_standing_is_only_noted() -> None:
     report = audit_properties(records, [_node("1", "火纹石", "item")])
 
     codes = _codes(report)
-    assert "retraction_partial" in codes
     assert "retracted_no_successor" not in codes
-    # 撤回掉的那条不该再被当成「矛盾值」的证据。
-    assert "conflicting_values" not in codes
+    # 撤回掉的那条不该再被当成「已被取代」的证据。
+    assert "superseded_values" not in codes
     assert report["counts"]["error"] == 0
 
 
@@ -288,6 +291,6 @@ def test_a_changing_value_is_a_progression_not_a_conflict() -> None:
     codes = _codes(report)
 
     assert "name_variant" not in codes
-    assert "conflicting_values" in codes
+    assert "superseded_values" in codes
     assert report["counts"]["error"] == 0
 

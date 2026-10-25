@@ -41,6 +41,17 @@ REVIEW_PROMPT = """你在为一部小说的属性记录做去重。
 `at_event` 填**披露这个值所在的事件**名称，它只表示读者读到哪里知道这件事，
 不要求该事件导致变化。填不出来就留空，不影响保留。
 
+## 旧值失效
+
+除了「新值取代旧值」，还有一种情况：旧值**没有被新值取代**，但本章的叙述说明它
+已经不成立了（情绪过去了、伤好了、身份变了、人走了）。这种要在 `supersede` 里给出：
+
+- `at_event` 必填：读者在本章哪个事件读到「它不再成立」（必须是本章事件）。
+- 只给**明确终止**的：原文没有交代，就不要猜。拿不准的一律不给。
+- 不要因为「和旧值不一样」就给：同一方面在不同时点有不同值是正常的推进，
+  取代关系由程序按披露顺序自动标记，不需要你重复。
+- 给出旧值时要照抄它原来的写法，便于对上记录。
+
 如果连信息都不够，返回 `{{"need": ["<你还想查什么>"]}}`，我会补给你。
 
 只输出 JSON：
@@ -48,6 +59,8 @@ REVIEW_PROMPT = """你在为一部小说的属性记录做去重。
 {{"keep": [{{"node": "林舟", "property": "height", "value": "又长高了一些", "at_event": ""}}],
  "drop": [{{"node": "林舟", "property": "height", "value": "一百八十公分",
            "reason": "同一位置重复输出"}}],
+ "supersede": [{{"node": "林舟", "property": "state", "value": "心里对女人有点发怵",
+                "at_event": "林舟走进站前旅社", "reason": "进了酒店之后没再提，情绪已经过去"}}],
  "unsure": [{{"node": "林舟", "property": "skin", "value": "白净",
              "question": "不确定这是变化还是同义描述"}}]}}
 """
@@ -240,6 +253,7 @@ def review_properties(
         keep = list(payload.get("keep") or [])
         drop = list(payload.get("drop") or [])
         unsure = list(payload.get("unsure") or [])
+        supersede = list(payload.get("supersede") or [])
         if unsure:
             context = _context_for(ops, data, unsure)
             payload = _turn(
@@ -247,8 +261,11 @@ def review_properties(
             )
             keep += list(payload.get("keep") or [])
             drop += list(payload.get("drop") or [])
+            supersede += list(payload.get("supersede") or [])
             unsure = list(payload.get("unsure") or [])
-        return _apply(data, keep, drop, rounds[0], unresolved=unsure)
+        return _apply(
+            data, keep, drop, rounds[0], unresolved=unsure, supersede=supersede
+        )
     finally:
         runner.close()
 
@@ -277,7 +294,7 @@ def _answer_need(ops: GraphOperations, need: list) -> dict:
 
 
 def _apply(data: dict, keep: list, drop: list, rounds: int,
-           unresolved: list | None = None) -> dict:
+           unresolved: list | None = None, supersede: list | None = None) -> dict:
     """Rebuild the property list from the model's verdict."""
     proposed = {
         (prop["node"], prop["property"], str(prop["value"])): prop
@@ -299,6 +316,10 @@ def _apply(data: dict, keep: list, drop: list, rounds: int,
         "properties": kept,
         "dropped": [item for item in drop if isinstance(item, dict)],
         "unresolved": [item for item in (unresolved or []) if isinstance(item, dict)],
+        # Old values this chapter says are over. Only a proposal: the anchor event
+        # and the target record are resolved later, and anything unresolvable is
+        # dropped rather than guessed.
+        "supersede": [item for item in (supersede or []) if isinstance(item, dict)],
         "rounds": rounds,
         "stored_seen": True,
     }

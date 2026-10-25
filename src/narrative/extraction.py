@@ -16,6 +16,8 @@ from uuid import uuid4
 
 from .harness import HarnessReply, HarnessRunner, HarnessSettings
 from .order_ids import allocate
+from .property_categories import aspect_of
+from .property_store import record_position
 
 NODE_TYPES = ("person", "group", "item", "location", "scene", "event")
 
@@ -434,6 +436,10 @@ def extract_chapter(
             ops, result, settings=settings, api_key=api_key, workdir=workdir
         )
         result["properties"] = reviewed["properties"]
+        # Old values the review round judged to be over. They are proposals until
+        # an event and a record can be resolved for them; `build_candidate` does
+        # that and drops whatever does not resolve.
+        result["supersede"] = reviewed.get("supersede") or []
         result["review"] = {
             "dropped": reviewed["dropped"],
             "unresolved": reviewed.get("unresolved") or [],
@@ -470,6 +476,99 @@ def _checkpoint_at(start: int, checkpoints: list[tuple[int, int, str]]) -> str |
     if preceding:
         return max(preceding, key=lambda item: item[0])[2]
     return min(checkpoints, key=lambda item: item[0])[2]
+
+
+def _supersede_retractions(
+    ops, batch: list[dict], accepted: list[dict]
+) -> list[dict]:
+    """Older values this extraction replaces, as retractions anchored where the
+    replacement was disclosed.
+
+    The rule lives in `property_store.supersede_plan` so the audit and the
+    extraction cannot disagree about what "superseded" means. Here it only becomes
+    records: the marks ride along in the same candidate as the value that caused
+    them, so a value and its invalidation can never land apart.
+    """
+    from .property_store import supersede_plan
+
+    out: list[dict] = []
+    for item in supersede_plan(accepted, batch):
+        digest = hashlib.sha1(
+            f"{item['target_id']}:{item['event_id']}".encode()
+        ).hexdigest()[:12]
+        record = {
+            "kind": "property_retraction",
+            "id": f"retract_{digest}",
+            "target_id": item["target_id"],
+            "reason": item["reason"],
+            "event_id": item["event_id"],
+            "basis": "audit",
+        }
+        if isinstance(item.get("disclosure"), dict):
+            record["disclosure"] = item["disclosure"]
+        out.append(record)
+    return out
+
+
+def _review_supersede(
+    data: dict,
+    records: list[dict],
+    accepted: list[dict],
+    node_ids: dict[str, str],
+    event_by_name: dict[str, str],
+) -> list[dict]:
+    """Turn the review round's "this old value is over" into retraction records.
+
+    Only two things are needed and both must be exact: the old record (node +
+    aspect + the value as it was written) and the event where the reader learns it
+    no longer holds. Anything that does not resolve is dropped — a guessed anchor
+    would invent a reading position the text does not have.
+    """
+    items = data.get("supersede") or []
+    if not items:
+        return []
+    marked = {
+        record.get("target_id") for record in accepted + records
+        if record.get("kind") == "property_retraction"
+    }
+    candidates: dict[tuple[str, str, str], list[dict]] = {}
+    for record in accepted + records:
+        if record.get("kind") != "property_value":
+            continue
+        key = (
+            str(record.get("node_id")),
+            aspect_of(record.get("property_id") or ""),
+            str(record.get("value")),
+        )
+        candidates.setdefault(key, []).append(record)
+
+    out: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        node_id = node_ids.get(str(item.get("node") or ""))
+        anchor = event_by_name.get(str(item.get("at_event") or ""))
+        if not node_id or not anchor:
+            continue
+        key = (node_id, aspect_of(str(item.get("property") or "")), str(item.get("value")))
+        found = candidates.get(key) or []
+        if not found:
+            continue
+        # The latest such record is the one the claim is about.
+        target = max(found, key=record_position)
+        if target.get("id") in marked:
+            continue
+        digest = hashlib.sha1(f"{target.get('id')}:{anchor}".encode()).hexdigest()[:12]
+        out.append({
+            "kind": "property_retraction",
+            "id": f"retract_{digest}",
+            "target_id": target.get("id"),
+            "reason": str(item.get("reason") or "").strip() or "本章之后不再成立",
+            "event_id": anchor,
+            "basis": "audit",
+        })
+        marked.add(target.get("id"))
+    return out
 
 
 def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dict:
@@ -801,6 +900,22 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
             record["scope"] = scope
             record["holder_id"] = holder
         records.append(record)
+
+    # The review round's deterministic half: whatever this batch replaces stops
+    # being the state from the disclosure that replaced it. The marks ride along
+    # in the same candidate, so a value and its invalidation can never land apart.
+    accepted_records = ops.property_records(include_retracted=True)
+    records.extend(_supersede_retractions(ops, records, accepted_records))
+    # Its judgment half: an old value this chapter says is over, even when nothing
+    # replaced it. Anchored at the event that ended it, or dropped.
+    known_names: dict[str, str] = {}
+    for node in snapshot["nodes"]:
+        known_names.setdefault(node["name"], node["id"])
+    for (_kind, name), node_id in ids.items():
+        known_names.setdefault(name, node_id)
+    records.extend(
+        _review_supersede(data, records, accepted_records, known_names, event_by_name)
+    )
 
     revision = ops.graph_project_info()["revision"]
     if not objects and not records:

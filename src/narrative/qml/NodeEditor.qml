@@ -102,7 +102,7 @@ Dialog {
     function startRetract(item) {
         var ids = []
         for (var i = 0; i < (item.records || []).length; ++i)
-            if (!item.records[i].retracted) ids.push(item.records[i].id)
+            if (item.records[i].valid) ids.push(item.records[i].id)
         retractTargets = ids
         retractLabel = item.label || item.property_id
         retractReason = ""
@@ -277,7 +277,7 @@ Dialog {
                                     var records = modelData.records || []
                                     var latest = null
                                     for (var i = records.length - 1; i >= 0; --i)
-                                        if (!records[i].retracted) { latest = records[i]; break }
+                                        if (records[i].valid) { latest = records[i]; break }
                                     if (latest === null && records.length > 0) latest = records[records.length - 1]
                                     if (latest !== null) editor.startEdit(modelData, latest)
                                 }
@@ -302,10 +302,10 @@ Dialog {
                                 spacing: 6
                                 Label {
                                     Layout.preferredWidth: 34
-                                    text: modelData.retracted ? "失效"
-                                        : modelData.is_current ? "当前" : "历史"
-                                    color: modelData.retracted ? t.bad
-                                        : modelData.is_current ? t.ok : t.muted
+                                    // 有效就是有效，不分「当前/历史」：谁被取代由记录上的
+                                    // 失效标记说，不由位置推算。
+                                    text: modelData.valid ? "有效" : "失效"
+                                    color: modelData.valid ? t.ok : t.bad
                                     font.pixelSize: 9
                                 }
                                 Label {
@@ -313,9 +313,11 @@ Dialog {
                                     text: String(modelData.value === null || modelData.value === undefined
                                         ? "（空）" : modelData.value)
                                         + (modelData.event_name ? " · " + modelData.event_name : "")
-                                        + (modelData.retracted && modelData.retraction_reason
-                                            ? " · 撤回：" + modelData.retraction_reason : "")
-                                    color: modelData.retracted ? t.muted : t.body
+                                        + (!modelData.valid && modelData.invalidated_at
+                                            ? " · 失效于「" + modelData.invalidated_at + "」" : "")
+                                        + (!modelData.valid && modelData.invalid_reason
+                                            ? "：" + modelData.invalid_reason : "")
+                                    color: modelData.valid ? t.body : t.muted
                                     font.pixelSize: 10
                                     elide: Text.ElideRight
                                 }

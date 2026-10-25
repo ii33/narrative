@@ -41,6 +41,115 @@ def _issue(code: str, message: str, object_id: str | None = None, severity: str 
 _AFTER_EVENT = 10**12
 
 
+def record_position(record: dict) -> tuple:
+    """Where a record sits on the disclosure chain.
+
+    Event number first, then the record's own offset inside that event. One
+    anchor can hold several disclosures (a retelling, a correction), and their
+    order is the order of the source text, not the write order.
+    """
+    anchor = record.get("event_id")
+    key = order_key(anchor) if isinstance(anchor, str) else None
+    disclosure = record.get("disclosure")
+    offset = disclosure.get("start") if isinstance(disclosure, dict) else None
+    return (key or (999,), offset if isinstance(offset, int) else 0)
+
+
+def invalid_at(records: list[dict], cut: tuple | None) -> dict[str, dict]:
+    """Records that no longer count at this reading position, and why.
+
+    A retraction with no event was a misreading: it never counted, so it applies
+    at every position. One with an event says "from here this is no longer the
+    state", so before that position the old value is still what the reader knows.
+    ``cut=None`` means "as of the last thing disclosed".
+    """
+    result: dict[str, dict] = {}
+    for record in records:
+        if record.get("kind") != "property_retraction":
+            continue
+        target = record.get("target_id")
+        if not isinstance(target, str):
+            continue
+        anchor = record.get("event_id")
+        if isinstance(anchor, str) and cut is not None:
+            if record_position(record) > cut:
+                continue
+        result[target] = record
+    return result
+
+
+def supersede_plan(
+    accepted: list[dict], batch: list[dict] | tuple = ()
+) -> list[dict]:
+    """Older values that a later disclosure already replaced.
+
+    One line per aspect, because that is what the reader sees: `cultivation` and
+    `cultivation_stage` describe one subject. A new value for the same aspect of
+    the same node (same scope, same holder) means the older one is no longer the
+    state — but only from that disclosure on, so the plan carries the replacing
+    event instead of deleting anything.
+
+    A restatement (same value) supersedes nothing: it confirms. Multi-valued
+    properties are left alone, because their values coexist by definition.
+    """
+    from .property_categories import aspect_of
+
+    definitions = {
+        record["id"]: record for record in list(accepted) + list(batch)
+        if record.get("kind") == "property_definition"
+    }
+    # A record already marked invalid keeps that mark; a second one would say
+    # nothing new and would double the reason in the history.
+    marked = {
+        record.get("target_id") for record in list(accepted) + list(batch)
+        if record.get("kind") == "property_retraction"
+    }
+    groups: dict[tuple, list[dict]] = {}
+    for record in list(accepted) + list(batch):
+        if record.get("kind") != "property_value" or record.get("id") in marked:
+            continue
+        definition = definitions.get(record.get("property_id") or "")
+        if definition is not None and definition.get("cardinality") == "many":
+            continue
+        key = (
+            record.get("node_id"),
+            aspect_of(record.get("property_id") or ""),
+            record.get("scope", "world"),
+            record.get("holder_id"),
+        )
+        groups.setdefault(key, []).append(record)
+
+    plan: list[dict] = []
+    for group in groups.values():
+        ordered = sorted(group, key=record_position)
+        still_valid: list[dict] = []
+        for record in ordered:
+            for older in still_valid:
+                if str(older.get("value")) == str(record.get("value")):
+                    continue
+                item = {
+                    "target_id": older.get("id"),
+                    "event_id": record.get("event_id"),
+                    "reason": "被后一条披露取代",
+                    "node_id": older.get("node_id"),
+                    "property_id": older.get("property_id"),
+                }
+                disclosure = record.get("disclosure")
+                if isinstance(disclosure, dict) and isinstance(
+                    disclosure.get("source_id"), str
+                ):
+                    item["disclosure"] = {
+                        "source_id": disclosure["source_id"],
+                        "start": record_position(record)[1],
+                    }
+                plan.append(item)
+            still_valid = [record]
+    unique: dict[str, dict] = {}
+    for item in plan:
+        unique.setdefault(str(item["target_id"]), item)
+    return list(unique.values())
+
+
 def _categorization_overrides(records: list[dict]) -> dict[str, str]:
     """Current category of each moved record: the last accepted move wins."""
     overrides: dict[str, str] = {}
@@ -122,9 +231,12 @@ class PropertyStore:
     ) -> list[dict]:
         """Return immutable authoritative records visible at one review revision.
 
-        A retraction keeps the original row for audit but removes it from every
-        projection, so the default read drops retracted records. Pass
-        ``include_retracted=True`` only when auditing the history.
+        Only a retraction *without* an event removes a record here: that one says
+        the record was misread, so it never counted. A retraction with an event
+        says the record stops being the state from that point on — before it the
+        record is still what the reader knows, so removing it here would rewrite
+        the reading order. Those are applied where a reading position exists
+        (``node_properties``, ``_value_state``).
         """
         with self.store.connect() as db:
             records = self._records_from_db(db, as_of_revision)
@@ -134,6 +246,7 @@ class PropertyStore:
             item.get("target_id")
             for item in records
             if item.get("kind") == "property_retraction"
+            and not isinstance(item.get("event_id"), str)
         }
         return [item for item in records if item.get("id") not in retracted]
 
@@ -259,7 +372,7 @@ class PropertyStore:
         note: str = "",
         run_id: str | None = None,
     ) -> str:
-        if source not in {"manual", "model", "correction"}:
+        if source not in {"manual", "model", "correction", "audit"}:
             raise ValueError("属性候选来源无效")
         snapshot = self.store.snapshot()
         diagnostics = self._diagnostics(
@@ -548,8 +661,12 @@ class PropertyStore:
         """
         cut_position = cut
 
-        records = self.accepted_records()
-        merges = _merge_map(records)
+        # A value stops counting when a retraction says so, and a retraction
+        # anchored at a later disclosure does not apply yet at this position.
+        all_records = self.accepted_records(include_retracted=True)
+        invalid = invalid_at(all_records, cut_position)
+        records = [item for item in all_records if item.get("id") not in invalid]
+        merges = _merge_map(all_records)
         wanted = merges.get(property_id, property_id)
 
         def name_of(record: dict) -> str:
@@ -565,27 +682,15 @@ class PropertyStore:
             and (scope == "world" or record.get("holder_id") == holder_id)
         ]
 
-        def position(record: dict) -> tuple:
-            """Event number first, then the record's own offset inside that event.
-
-            One anchor can hold several disclosures (a retelling, a correction),
-            and their order is the order of the source text, not the write order.
-            """
-            anchor = record.get("event_id")
-            key = order_key(anchor) if isinstance(anchor, str) else None
-            disclosure = record.get("disclosure")
-            offset = disclosure.get("start") if isinstance(disclosure, dict) else None
-            return (key or (999,), offset if isinstance(offset, int) else 0)
-
         applicable = [
             record for record in values
-            if cut_position is None or position(record) <= cut_position
+            if cut_position is None or record_position(record) <= cut_position
         ]
         if not applicable:
             return {"state": {"kind": "unrecorded"}, "record_ids": []}
         # Later disclosure wins; when positions tie, the later record wins.
         best = max(
-            enumerate(applicable), key=lambda pair: (position(pair[1]), pair[0])
+            enumerate(applicable), key=lambda pair: (record_position(pair[1]), pair[0])
         )[1]
         return {
             "state": {"kind": "known", "value": best.get("value")},
@@ -780,12 +885,25 @@ class PropertyStore:
             "target_id": target_id,
         }
 
-    def retract(self, targets: list[str], reason: str) -> dict:
+    def retract(
+        self,
+        targets: list[str],
+        reason: str,
+        *,
+        event_id: str | None = None,
+        basis: str = "human",
+    ) -> dict:
         """Invalidate records. The row stays for audit; readers stop seeing it.
 
         Retraction is the only way to take something back, because a value is
         never edited in place: a wrong record is retracted, and a corrected one
         is appended as a new disclosure.
+
+        ``event_id`` separates the two reasons it can happen:
+
+        - absent — the record was misread. It never counted, at any position.
+        - present — the record was true, but from this reading position it is no
+          longer part of the state. Before that position it still counts.
         """
         from uuid import uuid4
 
@@ -813,12 +931,24 @@ class PropertyStore:
                 raise ValueError("只有取值、分类或归并记录可以撤回")
             if target in already:
                 continue
-            pending.append({
+            item: dict = {
                 "kind": "property_retraction",
                 "id": f"retract_{uuid4().hex[:12]}",
                 "target_id": target,
                 "reason": reason,
-            })
+                "basis": basis,
+            }
+            if event_id:
+                item["event_id"] = event_id
+                # The position inside that event is the target's own disclosure:
+                # the old value stops counting exactly where the new one appears.
+                disclosure = (record.get("disclosure") or {})
+                if isinstance(disclosure.get("source_id"), str):
+                    item["disclosure"] = {
+                        "source_id": disclosure["source_id"],
+                        "start": record_position(record)[1],
+                    }
+            pending.append(item)
         if not pending:
             return {"revision": self.store.revision, "retracted": [], "reason": reason}
         revision = self.store.revision
@@ -829,6 +959,64 @@ class PropertyStore:
             "revision": self.accept(candidate, 1),
             "retracted": [record["target_id"] for record in pending],
             "reason": reason,
+        }
+
+    def supersede(self, pairs: list[dict], note: str = "") -> dict:
+        """Mark older values as no longer the state, from a later disclosure on.
+
+        Each pair is ``{target_id, event_id, reason}``: the target is invalid from
+        ``event_id`` on. This is what the audit round proposes when a new value
+        replaces an older one — the newer disclosure says the older one is no
+        longer what holds, and nothing is rewritten or deleted.
+        """
+        from uuid import uuid4
+
+        if not isinstance(pairs, list) or not pairs:
+            raise ValueError("请提供要失效的记录")
+        records = self.accepted_records(include_retracted=True)
+        by_id = {
+            record["id"]: record for record in records if isinstance(record.get("id"), str)
+        }
+        already = {
+            record.get("target_id") for record in records
+            if record.get("kind") == "property_retraction"
+        }
+        pending: list[dict] = []
+        for pair in pairs:
+            target = str(pair.get("target_id") or "").strip()
+            event_id = str(pair.get("event_id") or "").strip()
+            reason = str(pair.get("reason") or "").strip() or "被后一条披露取代"
+            record = by_id.get(target)
+            if record is None or record.get("kind") != "property_value":
+                raise ValueError(f"记录不存在或不是取值记录：{target}")
+            if not event_id:
+                raise ValueError("失效需要一个时间点（事件）")
+            if target in already:
+                continue
+            item: dict = {
+                "kind": "property_retraction",
+                "id": f"retract_{uuid4().hex[:12]}",
+                "target_id": target,
+                "reason": reason,
+                "event_id": event_id,
+                "basis": "audit",
+            }
+            disclosure = record.get("disclosure") or {}
+            if isinstance(disclosure.get("source_id"), str):
+                item["disclosure"] = {
+                    "source_id": disclosure["source_id"],
+                    "start": record_position(record)[1],
+                }
+            pending.append(item)
+        if not pending:
+            return {"revision": self.store.revision, "superseded": []}
+        revision = self.store.revision
+        candidate = self.propose(
+            pending, revision, source="audit", note=note or "审核轮：旧值失效"
+        )
+        return {
+            "revision": self.accept(candidate, 1),
+            "superseded": [record["target_id"] for record in pending],
         }
 
     def node_properties(
@@ -856,19 +1044,17 @@ class PropertyStore:
         """
         snapshot = self.store.snapshot(as_of_revision)
         # Read the whole history even when the caller only wants what stands: a
-        # retracted value is still needed to know that the aspect was invalidated,
-        # and the retraction itself has to be resolvable to its target.
+        # record that stopped counting is still needed to know that the aspect
+        # lost a value, and a retraction has to be resolvable to its target.
         all_records = self.accepted_records(snapshot["revision"], include_retracted=True)
-        # A retraction does not delete the row: the editor shows what was taken
-        # back and why, while the browsing pane simply stops seeing it.
-        retracted_by = {
-            record.get("target_id"): record for record in all_records
-            if record.get("kind") == "property_retraction"
-        }
-        records = all_records if include_retracted else [
-            record for record in all_records
-            if record.get("id") not in retracted_by
-        ]
+        # A reading cut turns the pane into "what was known at this point". It is
+        # also what decides whether a retraction applies: one anchored at a later
+        # disclosure has not happened for the reader yet.
+        cut_position = self._cut_position(cut) if cut else None
+        # Validity is explicit, not computed: a record counts until a retraction
+        # says otherwise. Nothing here derives a window from the next disclosure.
+        invalid = invalid_at(all_records, cut_position)
+        records = all_records
         config = property_categories.load(self.store)
         definitions = {
             record["id"]: record for record in records
@@ -887,12 +1073,15 @@ class PropertyStore:
         }
         node = nodes.get(node_id, {})
         node_type = node.get("node_type")
+        # A move or a merge that has been invalidated stops applying: these are
+        # editorial records too, and taking one back must restore what came before.
+        editorial = [item for item in records if item.get("id") not in invalid]
         # A move is one record pointing at one disclosure; the last accepted one
         # is the current grouping, so moving twice keeps the second answer.
-        overrides = _categorization_overrides(records)
+        overrides = _categorization_overrides(editorial)
         # A merged alias reads as its canonical name everywhere: one aspect, one
         # line, one label, without rewriting the records that used the old name.
-        merges = _merge_map(records)
+        merges = _merge_map(editorial)
 
         def node_ref(value: object) -> dict | None:
             """A node-valued property stores an id; the reader wants the name."""
@@ -902,11 +1091,7 @@ class PropertyStore:
             return {"id": value, "name": name} if name else None
 
         def position(record: dict) -> tuple:
-            anchor = record.get("event_id")
-            key = order_key(anchor) if isinstance(anchor, str) else None
-            disclosure = record.get("disclosure")
-            offset = disclosure.get("start") if isinstance(disclosure, dict) else None
-            return (key or (999,), offset if isinstance(offset, int) else 0)
+            return record_position(record)
 
         # One line per aspect and category. The aspect is the first token of the
         # property name, so `cultivation` and `cultivation_stage` share a line:
@@ -917,7 +1102,7 @@ class PropertyStore:
         lines: dict[tuple[str, str], list[dict]] = {}
         for record in all_records:
             # Only values sit on a line. A retraction has no node or aspect of its
-            # own — it points at a value and is applied through `retracted_by`.
+            # own — it points at a value and is applied through `invalid_at`.
             if record.get("kind") != "property_value":
                 continue
             if record.get("node_id") != node_id:
@@ -933,10 +1118,6 @@ class PropertyStore:
                 "property_id": name,
                 "category_source": category_source,
             })
-        # A reading cut turns the pane into "what was known at this point": the
-        # later disclosures are not wrong, they simply have not happened for the
-        # reader yet, so they are counted rather than shown.
-        cut_position = self._cut_position(cut) if cut else None
         # A slice with nothing left is not shown at all, so it must not be
         # advertised either: "也在「其他」中" has to point at a row that exists.
         shown_categories: dict[str, set[str]] = {}
@@ -945,33 +1126,30 @@ class PropertyStore:
         hidden_total = 0
         # An aspect can span two categories (state = 脸色铁青 in 外貌, state = 笑了
         # in 心理与意图). A slice with nothing left earns a line only when the
-        # aspect as a whole stands empty; otherwise the survivors already say what
-        # is known, and a ghost row would just repeat the edit.
+        # aspect as a whole has no valid value; otherwise the survivors already
+        # say what is known, and a ghost row would just repeat the edit.
         standing: dict[str, int] = {}
         newest: dict[str, tuple[tuple, str]] = {}
-        # Retractions are counted per aspect, not per slice: a record can be taken
-        # back from one category while the aspect still stands in another, and the
-        # reader should still be told that something went.
-        taken_back: dict[str, int] = {}
+        # One aspect has one state, even when its records were classified into two
+        # categories. Which record holds it is decided here, across slices, so the
+        # other slice cannot claim a current value of its own.
+        holding: dict[str, tuple[tuple, str]] = {}
         for (aspect_key, category_key), entries in lines.items():
-            standing[aspect_key] = standing.get(aspect_key, 0) + sum(
-                1 for entry in entries
-                if include_retracted
-                or entry["record"].get("id") not in retracted_by
-            )
-            taken_back[aspect_key] = taken_back.get(aspect_key, 0) + sum(
-                1 for entry in entries if entry["record"].get("id") in retracted_by
-            )
             for entry in entries:
+                record_id = entry["record"].get("id")
                 key = position(entry["record"])
                 # The ghost line belongs to the slice the reader actually reached,
                 # not to a record beyond the cut.
                 if cut_position is not None and key > cut_position:
                     continue
+                if record_id not in invalid:
+                    standing[aspect_key] = standing.get(aspect_key, 0) + 1
+                    if aspect_key not in holding or key > holding[aspect_key][0]:
+                        holding[aspect_key] = (key, record_id)
+                    shown_categories.setdefault(aspect_key, set()).add(category_key)
                 if aspect_key not in newest or key > newest[aspect_key][0]:
                     newest[aspect_key] = (key, category_key)
-                if include_retracted or entry["record"].get("id") not in retracted_by:
-                    shown_categories.setdefault(aspect_key, set()).add(category_key)
+
         for (aspect, category), line in lines.items():
             ordered = sorted(line, key=lambda entry: position(entry["record"]))
             later = 0
@@ -985,16 +1163,16 @@ class PropertyStore:
                 ordered = visible
                 if not ordered:
                     continue
-            # Retraction is not "not yet read": it is read and taken back, so it
-            # is applied here rather than at the cut. The line survives even when
-            # nothing is left — "this aspect was invalidated" is an answer, and a
-            # line that silently disappears hides the edit that caused it.
+            # Validity is explicit, never derived from the next disclosure. An
+            # invalid record is still a disclosure: it is hidden here, not
+            # deleted, and the editor shows it with the reason it went.
             kept = [
                 entry for entry in ordered
-                if include_retracted
-                or entry["record"].get("id") not in retracted_by
+                if include_retracted or entry["record"].get("id") not in invalid
             ]
-            retracted_count = 0 if include_retracted else taken_back.get(aspect, 0)
+            # Counted per line, not per aspect: each row says how many of its own
+            # records went, which is what the reader is looking at.
+            invalid_count = len(ordered) - len(kept)
             if not kept:
                 # One line for the aspect, in the category of its newest record —
                 # not one ghost per category it used to sit in.
@@ -1024,13 +1202,12 @@ class PropertyStore:
                     "holder_name": None,
                     "event_id": None,
                     "start": None,
-                    "current_from_event": None,
-                    "current_from_start": None,
+                    "disclosed_at": None,
+                    "is_current": False,
                     "retracted": True,
-                    "current_retracted": True,
-                    "history_count": 0,
+                    "valid_count": 0,
+                    "invalid_count": invalid_count,
                     "record_count": 0,
-                    "retracted_count": retracted_count,
                     "later_count": later,
                     "records": [],
                 })
@@ -1040,8 +1217,9 @@ class PropertyStore:
             definition = definitions.get(ordered[-1]["property_id"]) or {}
             node_valued = definition.get("value_type") in {"node", "either"}
             decorated: list[dict] = []
-            for index, entry in enumerate(ordered):
+            for entry in ordered:
                 row = entry["record"]
+                gone = invalid.get(row.get("id")) or {}
                 decorated.append({
                     "id": row.get("id"),
                     "kind": row.get("kind"),
@@ -1049,13 +1227,6 @@ class PropertyStore:
                     "value_node": node_ref(row.get("value")) if node_valued else None,
                     "event_id": row.get("event_id"),
                     "event_name": names.get(row.get("event_id") or ""),
-                    # From this disclosure up to the next one in the same line;
-                    # the last entry is the current value and stays open.
-                    "is_current": index == len(ordered) - 1
-                    and row.get("kind") != "property_retraction",
-                    "valid_to_event": names.get(
-                        ordered[index + 1]["record"].get("event_id") or ""
-                    ) if index + 1 < len(ordered) else None,
                     "disclosure": row.get("disclosure"),
                     "source_title": source_titles.get(
                         (row.get("disclosure") or {}).get("source_id") or ""
@@ -1074,11 +1245,31 @@ class PropertyStore:
                     "property_label": property_labels.label_for(entry["property_id"]),
                     "category": category,
                     "category_source": entry["category_source"],
-                    "retracted": row.get("id") in retracted_by,
-                    "retraction_reason": (retracted_by.get(row.get("id")) or {}).get("reason"),
+                    # Explicit invalidation. `invalidated_at` is the disclosure
+                    # that ended it; empty means "read wrong", which applies
+                    # everywhere instead of from a point on.
+                    "valid": not gone,
+                    "invalidated_at": names.get(gone.get("event_id") or "") or "",
+                    "invalid_reason": gone.get("reason"),
+                    "invalid_basis": gone.get("basis"),
                 })
             latest = decorated[-1]
-            values_only = [entry for entry in decorated if entry.get("kind") == "property_value"]
+            valid_rows = [row for row in decorated if row["valid"]]
+            # The state is what still counts, not what was said last: a value the
+            # audit invalidated is history even if nothing newer replaced it.
+            current = valid_rows[-1] if valid_rows else None
+            # Only the slice holding the aspect's state is current; the other one is
+            # the same aspect seen through another category, so it says it is
+            # history. Two values disclosed at the same position are both current —
+            # that is one sentence saying two things, not a progression.
+            current_at = next(
+                (position(entry["record"]) for entry in ordered
+                 if current and entry["record"].get("id") == current["id"]),
+                None,
+            )
+            is_current = bool(
+                current and current_at == holding.get(aspect, (None, ""))[0]
+            )
             # The label names the aspect, not the newest spelling of it: a line
             # holding `cultivation` and `cultivation_stage` is 修为.
             label_id = aspect if aspect in property_ids else latest["property_id"]
@@ -1094,24 +1285,21 @@ class PropertyStore:
                 "other_categories": sorted(
                     shown_categories.get(aspect, set()) - {category}
                 ),
-                "current_from_event": names.get(latest.get("event_id") or ""),
-                "current_from_start": (latest.get("disclosure") or {}).get("start"),
-                # The current value is the one the reader meets last — and it is
-                # invalid when that record itself has been taken back.
-                "current_retracted": latest.get("id") in retracted_by,
-                "history_count": max(0, len(values_only) - 1),
-                "value_node": node_ref(latest.get("value")) if node_valued else None,
-                "scope": latest.get("scope"),
-                "scopes": sorted({entry["scope"] for entry in decorated}),
-                "holder_id": latest.get("holder_id"),
-                "holder_name": names.get(latest.get("holder_id") or ""),
+                "value_node": current["value_node"] if current else None,
+                "scope": current["scope"] if current else None,
+                "scopes": sorted({row["scope"] for row in decorated}),
+                "holder_id": current["holder_id"] if current else None,
+                "holder_name": current["holder_name"] if current else None,
                 "value_type": definition.get("value_type"),
-                "value": latest.get("value"),
-                "event_id": latest.get("event_id"),
-                "start": (latest.get("disclosure") or {}).get("start"),
-                "retracted": latest.get("id") in retracted_by,
+                "value": current["value"] if current else None,
+                "event_id": current["event_id"] if current else None,
+                "start": (current["disclosure"] or {}).get("start") if current else None,
+                "disclosed_at": current["event_name"] if current else None,
+                "is_current": is_current,
+                "retracted": current is None,
+                "valid_count": len(valid_rows),
+                "invalid_count": invalid_count,
                 "record_count": len(decorated),
-                "retracted_count": retracted_count,
                 # Disclosures after the cut: the pane says how many it is not
                 # showing instead of pretending this is everything.
                 "later_count": later,

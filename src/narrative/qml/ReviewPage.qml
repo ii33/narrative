@@ -45,6 +45,25 @@ Item {
         auditScope = scope
     }
 
+    // 失效建议：审核轮判定「更早的值已被取代」，每条带目标记录和失效的时间点。
+    // 这里只是把它们收集起来，点一下交给后端写成失效标记。
+    readonly property var supersedePairs: {
+        var out = []
+        for (var i = 0; i < auditIssues.length; ++i) {
+            var action = auditIssues[i].action || null
+            if (action === null) continue
+            var pairs = action.pairs || []
+            for (var j = 0; j < pairs.length; ++j) out.push(pairs[j])
+        }
+        return out
+    }
+    readonly property int supersedeCount: supersedePairs.length
+
+    function applySuperseded() {
+        if (supersedePairs.length === 0) return
+        bridge.applySuperseded(JSON.stringify(supersedePairs))
+    }
+
     function rebuildObjects() {
         objectRows.clear()
         var objects = current.objects || []
@@ -98,6 +117,10 @@ Item {
                       + page.auditWarnings + " 个待确认"
                     : "已生成候选", false)
                 page.load()
+            } else if (kind === "property_supersede") {
+                app.toast("已标记 " + (payload.superseded || []).length
+                    + " 条失效：从取代它们的披露起不再算状态", false)
+                bridge.auditProperties()
             } else if (kind === "review") {
                 app.toast("已处理，修订号 " + (payload.revision || ""), false)
                 page.load()
@@ -307,6 +330,14 @@ Item {
                                 + (page.auditInfos > 0 ? " · " + page.auditInfos + " 提示" : "")
                             color: page.auditErrors > 0 ? t.bad : t.warn
                             font.pixelSize: 11
+                        }
+                        Button {
+                            objectName: "applySupersededButton"
+                            visible: page.supersedeCount > 0
+                            text: "标记 " + page.supersedeCount + " 条失效"
+                            flat: true
+                            highlighted: true
+                            onClicked: page.applySuperseded()
                         }
                         Button {
                             objectName: "auditPropertiesButton"

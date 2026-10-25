@@ -245,7 +245,7 @@ Item {
     }
 
     function valueText(item) {
-        if (item.retracted) return "（已撤回）"
+        if (item.retracted) return "（已失效）"
         if (item.value_node) return item.value_node.name
         if (item.value === null || item.value === undefined) return "（空）"
         return String(item.value)
@@ -272,22 +272,22 @@ Item {
             categorySource: item.category_source || "",
             otherCategories: item.other_categories || [],
             recordIds: ids,
-            valueText: page.valueText(item),
+            valueText: (item.is_current === false && item.retracted !== true
+                        ? "（历史）" : "") + page.valueText(item),
             valueNodeId: item.value_node ? item.value_node.id : "",
             scopeText: scopes.length > 1 ? scopeText : (page.scopeLabels[item.scope] || "世界"),
             mixedScope: scopes.length > 1,
             holderId: item.holder_id || "",
             holderName: item.holder_name
                 || (item.holder_id ? page.nameOf(item.holder_id) : ""),
-            validFrom: item.current_retracted ? "" : ("起于 " + (item.current_from_event || "—")),
-            historyText: item.history_count > 0 ? "另有 " + item.history_count + " 条历史" : "",
-            // 失效是编辑动作，不是披露：说清楚撤了几条、整条还剩不剩。
+            // 有效与否是记录上的显式标记，不是算出来的区间：这里只说披露在哪儿。
+            disclosedText: item.retracted ? "" : ("披露于 " + (item.disclosed_at || "—")),
+            // 失效是编辑动作，不是披露：说清楚失效几条、整条还剩不剩。
             retractedText: item.retracted
-                ? ((item.record_count || 0) === 0
-                    ? "整条已失效，当前没有有效值"
-                    : "当前值已失效")
-                : ((item.retracted_count || 0) > 0
-                    ? "撤回 " + item.retracted_count + " 条" : ""),
+                ? ((item.invalid_count || 0) > 0
+                    ? "已失效，当前没有有效值" : "")
+                : ((item.invalid_count || 0) > 0
+                    ? item.invalid_count + " 条已失效" : ""),
             laterText: (item.later_count || 0) > 0
                 ? "此后还有 " + item.later_count + " 条披露" : "",
             records: records

@@ -112,9 +112,9 @@ Column {
 
             Label {
                 Layout.fillWidth: true
-                visible: item.row.validFrom.length > 0 || item.splitHint.length > 0
+                visible: item.row.disclosedText.length > 0 || item.splitHint.length > 0
                     || item.row.retractedText.length > 0
-                text: [item.row.validFrom, item.row.historyText, item.row.laterText,
+                text: [item.row.disclosedText, item.row.laterText,
                        item.row.retractedText, item.splitHint]
                     .filter(function (part) { return part.length > 0 }).join(" · ")
                 // 失效是编辑留下的痕迹，用提示色而不是普通说明色。
@@ -236,11 +236,14 @@ Column {
                 }
                 Label {
                     Layout.fillWidth: true
+                    // 只写披露在哪个事件；不再声称「到某处为止」，那是算出来的。
                     text: (modelData.event_name || modelData.event_id || "—")
-                        + "  →  " + (modelData.valid_to_event || "至今")
-                    color: modelData.event_name ? item.t.accent : item.t.muted
+                        + (modelData.valid ? "" : "  · 失效")
+                        + (!modelData.valid && modelData.invalidated_at
+                            ? "于「" + modelData.invalidated_at + "」" : "")
+                    color: modelData.valid ? item.t.accent : item.t.muted
                     font.pixelSize: 10
-                    font.underline: !!modelData.event_name
+                    font.underline: !!modelData.event_name && modelData.valid
                     elide: Text.ElideRight
                     MouseArea {
                         anchors.fill: parent

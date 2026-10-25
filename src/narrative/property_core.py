@@ -42,7 +42,14 @@ _FIELDS = {
     # Two names for one aspect, merged: `alias_id` is read as `target_id`.
     # Nothing is rewritten; the alias definition and its records stay as they are.
     "property_merge": _COMMON | {"alias_id", "target_id", "note"},
-    "property_retraction": _COMMON | {"target_id", "reason"},
+    # Two ways to invalidate a record, told apart by `event_id`:
+    #   without it — the record was wrong, it never counted (a correction);
+    #   with it    — the record was true, but from this reading position it is no
+    #                longer part of the state (superseded by a later disclosure).
+    # `basis` says who decided: the audit round or a human.
+    "property_retraction": _COMMON | {
+        "target_id", "reason", "event_id", "disclosure", "basis",
+    },
 }
 
 
@@ -376,6 +383,20 @@ def validate_records(
                 issues.append(
                     _issue("RETRACTION_REASON", "retraction requires a non-empty reason", rid)
                 )
+            # Where it stops counting. Absent means "everywhere" — the record was
+            # misread, not superseded.
+            anchor = record.get("event_id")
+            if anchor is not None:
+                event = nodes.get(anchor) if isinstance(anchor, str) else None
+                if event is None or event.get("node_type") != "event":
+                    issues.append(_issue(
+                        "RETRACTION_ANCHOR", "retraction event must be an existing event", rid
+                    ))
+            basis = record.get("basis")
+            if basis is not None and basis not in {"audit", "human"}:
+                issues.append(_issue(
+                    "RETRACTION_BASIS", "retraction basis must be audit or human", rid
+                ))
             continue
         node_id = (
             record.get("node_id") if kind in {"property_initial", "property_observation"} else None

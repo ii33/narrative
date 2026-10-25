@@ -152,8 +152,14 @@ class GraphPropertyFacade:
     def merge(self, alias_id: str, target_id: str, note: str = "") -> dict:
         return self.properties.merge(alias_id, target_id, note)
 
-    def retract(self, targets: list[str], reason: str) -> dict:
-        return self.properties.retract(targets, reason)
+    def retract(
+        self, targets: list[str], reason: str, *, event_id: str | None = None,
+        basis: str = "human",
+    ) -> dict:
+        return self.properties.retract(targets, reason, event_id=event_id, basis=basis)
+
+    def supersede(self, pairs: list[dict], note: str = "") -> dict:
+        return self.properties.supersede(pairs, note)
 
 
 class GraphChangeFacade:

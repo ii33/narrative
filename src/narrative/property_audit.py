@@ -106,6 +106,12 @@ def audit_properties(
             overrides[target] = category.strip()
 
     retracted_nodes = {node["id"] for node in nodes if node.get("retracted")}
+    # What the review round would mark: older values a later disclosure replaced.
+    # Computed from the same rule the extraction uses, so the audit cannot ask for
+    # a different invalidation than the one already written into a candidate.
+    from .property_store import supersede_plan
+
+    plan = supersede_plan(records)
     values_by_id = {record["id"]: record for record in values_all}
     issues: list[dict] = []
     groups: dict[tuple, list[dict]] = defaultdict(list)
@@ -290,27 +296,23 @@ def audit_properties(
 
         if len(seen) > 1:
             latest = _text(ordered[-1].get("value"))
-            earlier = [value for value in seen if value != latest]
-            issues.append(_issue(
-                "conflicting_values", WARNING,
-                f"属性「{property_id}」（{label}）前后出现 {len(seen)} 个不同值，"
-                f"最近一次是「{latest or '（空）'}」",
-                node=node, property_id=property_id, records=ordered,
-                suggestion="确认这些是不同时点的披露还是互相矛盾；"
-                           f"若只是过时说法，当前有效值是「{latest or '（空）'}」"
-                           f"，早先的 {len(earlier)} 条保留为历史",
-            ))
-
-        if retr and len(ordered) < len(rows):
-            # Some disclosures were taken back but the aspect still stands: the
-            # reader sees the survivors, and the report says how many went.
-            issues.append(_issue(
-                "retraction_partial", INFO,
-                f"属性「{property_id}」（{label}）撤回了 {len(rows) - len(ordered)} 条，"
-                f"仍有 {len(ordered)} 条站得住",
-                node=node, property_id=property_id, records=retr,
-                suggestion="允许的更正；确认剩下的值确实是当前有效的那条",
-            ))
+            group_ids = {row.get("id") for row in ordered}
+            pairs = [
+                item for item in plan if item.get("target_id") in group_ids
+            ]
+            if pairs:
+                # Different values over time are a progression, not a
+                # contradiction. What the reader needs to know is which of them
+                # still counts — the review round says so, and the pairs travel
+                # with the finding so the review page can apply them in one step.
+                issues.append(_issue(
+                    "superseded_values", INFO,
+                    f"属性「{property_id}」（{label}）先后有 {len(seen)} 个值，"
+                    f"最近一次是「{latest or '（空）'}」；更早的 {len(pairs)} 条已被取代",
+                    node=node, property_id=property_id, records=ordered,
+                    suggestion="在审核页把更早的值标为失效：从取代它的披露起不再算状态，"
+                               "更早的阅读位置仍然看得到它",
+                ) | {"action": {"pairs": pairs}})
 
         if holder_id and not names.get(holder_id):
             issues.append(_issue(
