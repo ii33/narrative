@@ -50,6 +50,20 @@ def test_identical_values_at_one_anchor_are_an_overlap() -> None:
     assert overlap["record_ids"] == ["v1", "v2"]
 
 
+def test_same_value_at_different_places_is_a_restatement_not_an_error() -> None:
+    records = [
+        _definition("holder"),
+        _value("v1", "1", "holder", "7", event="1", start=100),
+        _value("v2", "1", "holder", "7", event="5", start=900),
+    ]
+    report = audit_properties(records, [_node("1", "火纹石", "item")])
+
+    codes = _codes(report)
+    assert "duplicate_value" not in codes
+    assert "repeated_value" in codes
+    assert report["counts"]["error"] == 0
+
+
 def test_different_values_report_the_current_one() -> None:
     records = [
         _definition("height"),

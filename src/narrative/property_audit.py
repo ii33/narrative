@@ -141,12 +141,28 @@ def audit_properties(
             seen[_text(row.get("value"))].append(row)
 
         for value_text, same in seen.items():
-            if len(same) > 1:
+            # The same value at the same place is a duplicate. The same value at
+            # different places is a restatement, which the model allows on
+            # purpose — flagging it as an error would punish correct capture.
+            at_position: dict[tuple, list[dict]] = defaultdict(list)
+            for row in same:
+                disclosure = row.get("disclosure") or {}
+                at_position[(disclosure.get("source_id"), disclosure.get("start"))].append(row)
+            for rows_here in at_position.values():
+                if len(rows_here) > 1:
+                    issues.append(_issue(
+                        "duplicate_value", ERROR,
+                        f"属性「{property_id}」（{label}）在同一披露位置重复记录：{value_text or '（空）'}",
+                        node=node, property_id=property_id, records=rows_here,
+                        suggestion="同一披露点重复输出，保留一条，其余撤回",
+                    ))
+            if len(same) > 1 and len(at_position) > 1:
                 issues.append(_issue(
-                    "duplicate_value", ERROR,
-                    f"属性「{property_id}」（{label}）有 {len(same)} 条记录值相同：{value_text or '（空）'}",
+                    "repeated_value", INFO,
+                    f"属性「{property_id}」（{label}）在 {len(at_position)} 个位置重申同一值："
+                    f"{value_text or '（空）'}",
                     node=node, property_id=property_id, records=same,
-                    suggestion="同一披露点重复记录，保留一条，其余撤回",
+                    suggestion="重申是允许的；只有位置也重复才算重叠",
                 ))
 
         if len(seen) > 1:
