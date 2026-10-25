@@ -382,11 +382,20 @@ Item {
     }
 
     // 补录：人工写一条披露，仍然先成为候选。
+    function eventIndex(id) {
+        for (var i = 0; i < page.events.length; ++i)
+            if (page.events[i].id === id) return i
+        return -1
+    }
+
     function openAddProperty() {
         addPropertyField.text = ""
         addValueField.text = ""
         addQuoteField.text = ""
         addCategoryField.currentIndex = Math.max(0, page.vocabulary.indexOf("其他"))
+        // 停在某个阅读位置时，补的就是「此刻」：默认披露在这个事件，而不是第一个事件。
+        var here = page.cutEventId.length > 0 ? page.eventIndex(page.cutEventId) : -1
+        addEventField.currentIndex = here >= 0 ? here : 0
         addPropertyDialog.open()
     }
 
@@ -1267,11 +1276,23 @@ Item {
                     placeholderText: "照原文写"
                 }
                 Label { text: "披露事件"; color: t.muted; font.pixelSize: 11 }
-                ComboBox {
-                    id: addEventField
-                    objectName: "addEventField"
+                ColumnLayout {
                     Layout.fillWidth: true
-                    model: page.events.map(function (item) { return item.name })
+                    spacing: 2
+                    ComboBox {
+                        id: addEventField
+                        objectName: "addEventField"
+                        Layout.fillWidth: true
+                        model: page.events.map(function (item) { return item.name })
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        visible: page.cutEventId.length > 0
+                        wrapMode: Text.Wrap
+                        text: "默认是当前阅读位置「" + (page.cutName || "该事件") + "」"
+                        color: t.muted
+                        font.pixelSize: 9
+                    }
                 }
                 Label { text: "大类"; color: t.muted; font.pixelSize: 11 }
                 ComboBox {

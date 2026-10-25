@@ -744,3 +744,43 @@ def test_a_hand_written_disclosure_changes_the_state_from_its_own_event(
     assert before["value"] == "正常"
     assert before["invalid_count"] == 0
 
+
+
+def test_editing_at_a_reading_position_defaults_to_that_event(workspace) -> None:
+    """在当前事件视图里改，默认就落在这个时间点，而不是第一个事件。"""
+    app, _bridge, page, results, _errors = workspace
+
+    del results[:]
+    page.pickCut(2)  # 第二个场景，锚在事件 5
+    _pump(app, results, "browse")
+
+    # 补录：默认披露在事件 5（events 里的第 2 项），不是事件 4。
+    page.openAddProperty()
+    app.processEvents()
+    assert page.findChild(object, "addEventField").property("currentIndex") == 1
+    page.findChild(object, "addPropertyDialog").close()
+
+    # 更正：原记录在事件 4，但当前阅读位置是事件 5，默认跟着当前走。
+    editor = page.findChild(object, "nodeEditor")
+    del results[:]
+    editor.openFor("3")
+    _pump(app, results, "node_editor")
+    item = next(
+        entry for entry in _value(editor.property("properties"))
+        if entry["label"] == "持有者"
+    )
+    assert item["records"][-1]["event_name"] == "开场"
+    editor.startEdit(item, item["records"][-1])
+    assert editor.property("editEventIndex") == 1
+
+    # 回到「最新」：更正回到原记录自己的事件。
+    del results[:]
+    page.backToLatest()
+    _pump(app, results, "browse")
+    _pump(app, results, "node_editor")
+    item = next(
+        entry for entry in _value(editor.property("properties"))
+        if entry["label"] == "持有者"
+    )
+    editor.startEdit(item, item["records"][-1])
+    assert editor.property("editEventIndex") == 0

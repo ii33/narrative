@@ -12,8 +12,8 @@ Dialog {
     property var node: ({})
     property var properties: []
     property var events: []
-    // 阅读位置生效时：只列那一刻已经读到的记录，并且只读——编辑属于「最新」。
-    property bool readOnly: false
+    // 阅读位置生效时：只列那一刻已经读到的记录，新记录默认也落在这个时间点。
+    property bool atCut: false
     property string cutName: ""
     property int laterCount: 0
     // 上一次加载时用的切点，用来判断阅读位置是否变了。
@@ -63,7 +63,7 @@ Dialog {
         node = payload.node || ({})
         properties = payload.properties || []
         events = payload.events || []
-        readOnly = payload.read_only === true
+        atCut = payload.read_only === true
         cutName = payload.cut_name || ""
         laterCount = payload.later_count || 0
         cutEventId = payload.cut || ""
@@ -89,7 +89,10 @@ Dialog {
         editPropertyId = item.property_id
         editSourceId = record.disclosure ? (record.disclosure.source_id || "") : ""
         editValue = String(record.value === null || record.value === undefined ? "" : record.value)
-        editEventIndex = eventIndex(record.event_id)
+        // 停在某个阅读位置时，改的就是「此刻」：默认披露在这个事件；
+        // 没有切点时沿用原记录的事件，改的是它自己那一处说法。
+        var here = atCut ? eventIndex(cutEventId) : -1
+        editEventIndex = here >= 0 ? here : eventIndex(record.event_id)
         editQuote = record.evidence ? record.evidence.quote : ""
         editRetractOld = true
         retractTargets = []
@@ -221,7 +224,7 @@ Dialog {
         // 按阅读位置看历史时，这里只显示那一刻已经读到的记录。
         RowLayout {
             Layout.fillWidth: true
-            visible: editor.readOnly
+            visible: editor.atCut
             spacing: 8
             Label {
                 Layout.fillWidth: true
@@ -402,6 +405,15 @@ Dialog {
                                     currentIndex: editor.editEventIndex
                                     onActivated: editor.editEventIndex = currentIndex
                                 }
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                visible: editor.atCut
+                                wrapMode: Text.Wrap
+                                text: "默认披露在当前阅读位置「" + (editor.cutName || "该事件")
+                                    + "」；要改在原处，把事件选回原来那条。"
+                                color: t.muted
+                                font.pixelSize: 9
                             }
                             RowLayout {
                                 Layout.fillWidth: true
