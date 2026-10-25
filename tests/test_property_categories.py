@@ -516,3 +516,70 @@ def test_a_merge_needs_two_existing_names(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         ops.property_merge("nope", "cultivation")
 
+
+# -- 按阅读位置看状态 -------------------------------------------------------
+
+def _timeline(path: Path):
+    ops = create_graph_project(path)
+    ops.graph_accept(
+        ops.graph_propose(
+            [
+                {"kind": "node", "id": "1", "node_type": "person", "name": "林舟"},
+                {"kind": "node", "id": "2", "node_type": "event", "name": "初到"},
+                {"kind": "node", "id": "3", "node_type": "event", "name": "修炼"},
+                {"kind": "node", "id": "4", "node_type": "event", "name": "出关"},
+            ],
+            ops.graph_project_info()["revision"],
+        ),
+        1,
+    )
+    ops.property_accept(
+        ops.property_propose(
+            _definitions("cultivation") + [
+                _value("v1", "1", "cultivation", "辟谷期", event_id="2"),
+                _value("v2", "1", "cultivation", "灵寂期", event_id="3"),
+                _value("v3", "1", "cultivation", "元婴初期", event_id="4"),
+            ],
+            ops.graph_project_info()["revision"],
+            source="manual",
+        ),
+        1,
+    )
+    return ops
+
+
+def test_a_reading_cut_shows_the_state_at_that_event(tmp_path: Path) -> None:
+    ops = _timeline(tmp_path / "cut.sqlite3")
+
+    latest = ops.property_node_summary("1")
+    assert latest["cut"] is None
+    assert latest["properties"][0]["value"] == "元婴初期"
+    assert latest["later_count"] == 0
+
+    middle = ops.property_node_summary("1", cut="3")
+    assert middle["cut"] == "3"
+    item = middle["properties"][0]
+    # 读到「修炼」时只知道灵寂期，元婴初期还没披露。
+    assert item["value"] == "灵寂期"
+    assert [row["value"] for row in item["records"]] == ["辟谷期", "灵寂期"]
+    assert item["later_count"] == 1
+    assert middle["later_count"] == 1
+
+    first = ops.property_node_summary("1", cut="2")
+    assert first["properties"][0]["value"] == "辟谷期"
+    assert first["later_count"] == 2
+
+
+def test_a_cut_before_the_first_disclosure_shows_nothing(tmp_path: Path) -> None:
+    ops = _timeline(tmp_path / "cut-early.sqlite3")
+
+    # 「初到」这个事件还没有任何披露，读到这里就什么都不知道。
+    early = ops.property_node_summary("1", cut="2")
+    assert [row["value"] for row in early["properties"][0]["records"]] == ["辟谷期"]
+    assert early["later_count"] == 2
+
+    # 比第一个事件还早的位置：一条都不可见，条数仍然要说清楚。
+    nothing = ops.property_node_summary("1", cut="1.0.1")
+    assert nothing["properties"] == []
+    assert nothing["later_count"] == 3
+

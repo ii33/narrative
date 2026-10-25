@@ -53,6 +53,7 @@ class NativeBridge(QObject):
         self._query_visible: set[str] = set()
         self._detail_node = ""
         self._reading_cut: dict = {}
+        self._state_cut: str = ""
         self._closed = False
         self._workerDone.connect(self._on_worker_done)
 
@@ -226,6 +227,7 @@ class NativeBridge(QObject):
         """Return to the launcher: drop the open project and its cached reads."""
         self._epoch += 1
         self._reading_cut = {}
+        self._state_cut = ""
         self._project_path = None
         self._canvas.clear()
         self._query_canvas = None
@@ -242,6 +244,7 @@ class NativeBridge(QObject):
             return
         self._epoch += 1
         self._reading_cut = {}
+        self._state_cut = ""
         self._project_path = None
         self._canvas.clear()
         self._query_canvas = None
@@ -267,6 +270,7 @@ class NativeBridge(QObject):
             return
         self._epoch += 1
         self._reading_cut = {}
+        self._state_cut = ""
         self._project_path = None
         self._canvas.clear()
         self._query_canvas = None
@@ -430,9 +434,21 @@ class NativeBridge(QObject):
         """Every property of one node, read-only; used by the browsing detail pane."""
 
         def work(ops) -> dict:
-            return ops.property_node_summary(node_id)
+            return ops.property_node_summary(node_id, cut=self._state_cut or None)
 
         self._project_task("node_properties", work)
+
+    @Slot(str)
+    def setReadingCut(self, event_id: str) -> None:
+        """Move the reading position used by the property pane.
+
+        An empty id means "everything disclosed so far". The cut is an event, not
+        a story time: it says how far the reader has read, not when things happen.
+        """
+        self._state_cut = event_id.strip()
+        self.resultReady.emit(
+            "reading_cut", {"event_id": self._state_cut, "node_id": self._detail_node}
+        )
 
     @Slot()
     def loadPropertyCategories(self) -> None:

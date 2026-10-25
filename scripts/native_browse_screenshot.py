@@ -63,6 +63,7 @@ def main() -> int:
     parser.add_argument("node", help="节点编号，例如 3")
     parser.add_argument("--expand", default="", help="要展开的属性名，默认展开第一条有历史的")
     parser.add_argument("--height", type=int, default=0, help="窗口高度；属性多时调高，少滚一点")
+    parser.add_argument("--cut", default="", help="阅读位置：事件编号，只显示读到这里时已知的属性")
     args = parser.parse_args()
     project = args.project.resolve()
     if not project.is_file():
@@ -101,10 +102,23 @@ def main() -> int:
     try:
         bridge.openProject(str(project))
         wait_for("project")
+        # The event list for --cut comes from the loaded graph view.
+        wait_for("graph_view")
         results.clear()
         page = window.findChild(object, "browsePage")
         if page is None:
             raise RuntimeError("browse page not found")
+        if args.cut:
+            # Index 0 is "最新", so the cut sits one past the event's position.
+            options = page.property("eventOptions")
+            options = options.toVariant() if hasattr(options, "toVariant") else options
+            index = next(
+                (i for i, item in enumerate(options) if item["id"] == args.cut), None
+            )
+            if index is None:
+                raise RuntimeError(f"没有编号为 {args.cut} 的事件")
+            page.pickCut(index + 1)
+            app.processEvents()
         page.select(args.node)
         wait_for("node_properties")
         app.processEvents()

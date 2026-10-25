@@ -120,8 +120,10 @@ class GraphPropertyFacade:
     def history(self, node_id: str, property_id: str, **kwargs) -> list[dict]:
         return self.properties.history(node_id, property_id, **kwargs)
 
-    def node_properties(self, node_id: str, as_of_revision: int | None = None) -> dict:
-        return self.properties.node_properties(node_id, as_of_revision)
+    def node_properties(
+        self, node_id: str, as_of_revision: int | None = None, cut: object = None
+    ) -> dict:
+        return self.properties.node_properties(node_id, as_of_revision, cut)
 
     def audit(
         self, node_ids: set[str] | None = None, as_of_revision: int | None = None

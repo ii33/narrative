@@ -24,6 +24,14 @@ Item {
     })
     readonly property var typeKeys: ["person", "group", "item", "location", "event", "scene", "storyline", "other"]
 
+    // 「最新」+ 每个事件；编号即阅读顺序，所以顺序就是读者读到的顺序。
+    readonly property var cutLabels: {
+        var labels = ["最新（全部披露）"]
+        for (var i = 0; i < eventOptions.length; ++i)
+            labels.push(eventOptions[i].id + "  " + eventOptions[i].name)
+        return labels
+    }
+
     // 属性名由模型给出（identity / height / state…），这里只补常见的中文说法。
     readonly property var propertyLabels: ({
         identity: "身份", state: "状态", status: "状况", holder: "持有者",
@@ -53,6 +61,10 @@ Item {
     property var pickerTargets: []
     property var eventOptions: []
     property var mergeNames: []
+    // 阅读位置：选一个事件，属性区显示"读到这里时"的状态；空串表示看到最新。
+    property string cutEventId: ""
+    property string cutEventName: ""
+    property int cutLater: 0
 
     function load() {
         bridge.loadGraphView({view: "table", limit: 2000})
@@ -124,6 +136,21 @@ Item {
         rebuild()
     }
 
+    // 事件按编号排列（编号即阅读顺序），所以下拉里的事件顺序就是读者读到的顺序。
+    function pickCut(index) {
+        var event = index > 0 ? page.eventOptions[index - 1] : null
+        cutEventId = event ? event.id : ""
+        cutEventName = event ? event.name : ""
+        cutLater = 0
+        bridge.setReadingCut(cutEventId)
+        if (selectedId.length > 0) bridge.loadNodeProperties(selectedId)
+    }
+
+    function backToLatest() {
+        cutBox.currentIndex = 0
+        page.pickCut(0)
+    }
+
     function select(id) {
         selectedId = id
         detail = ({})
@@ -172,6 +199,8 @@ Item {
                 || (item.holder_id ? page.nameOf(item.holder_id) : ""),
             validFrom: item.current_retracted ? "" : ("起于 " + (item.current_from_event || "—")),
             historyText: item.history_count > 0 ? "另有 " + item.history_count + " 条历史" : "",
+            laterText: (item.later_count || 0) > 0
+                ? "此后还有 " + item.later_count + " 条披露" : "",
             records: records
         }
     }
@@ -195,6 +224,8 @@ Item {
         }
         vocabulary = payload.vocabulary || []
         inboundRows = payload.inbound || []
+        cutLater = payload.later_count || 0
+        if (payload.cut) cutEventName = page.nameOf(String(payload.cut))
         categoryGroups = built
         propertyRows = all
         expandedProps = ({})
@@ -323,6 +354,9 @@ Item {
                 categoryGroups = []
                 inboundRows = []
                 expandedProps = ({})
+                page.cutEventId = ""
+                page.cutEventName = ""
+                page.cutLater = 0
                 page.load()
             }
         }
@@ -389,6 +423,27 @@ Item {
                 font.pixelSize: 12
             }
             Item { Layout.fillWidth: true }
+            // 阅读位置：切到某个事件，右侧属性显示"读到这里时"的状态。
+            Label {
+                text: "阅读位置"
+                color: t.muted
+                font.pixelSize: 12
+            }
+            ComboBox {
+                id: cutBox
+                objectName: "browseCutBox"
+                Layout.preferredWidth: 280
+                model: page.cutLabels
+                enabled: page.eventOptions.length > 0
+                onActivated: page.pickCut(currentIndex)
+            }
+            Button {
+                objectName: "browseCutReset"
+                text: "最新"
+                flat: true
+                enabled: page.cutEventId.length > 0
+                onClicked: page.backToLatest()
+            }
             Button {
                 text: "刷新"
                 flat: true
@@ -609,6 +664,19 @@ Item {
                                 Layout.preferredHeight: 1
                                 Layout.topMargin: 4
                                 color: t.line
+                            }
+
+                            // 阅读位置生效时说明清楚：这是"读到这里"的状态，不是全部。
+                            Label {
+                                Layout.fillWidth: true
+                                Layout.topMargin: 2
+                                visible: page.cutEventId.length > 0
+                                wrapMode: Text.Wrap
+                                text: "读到「" + (page.cutEventName || page.cutEventId) + "」时的状态"
+                                    + (page.cutLater > 0
+                                        ? "；此后还有 " + page.cutLater + " 条披露未显示" : "")
+                                color: t.warn
+                                font.pixelSize: 11
                             }
 
                             RowLayout {

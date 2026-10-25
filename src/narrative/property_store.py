@@ -776,7 +776,12 @@ class PropertyStore:
             "target_id": target_id,
         }
 
-    def node_properties(self, node_id: str, as_of_revision: int | None = None) -> dict:
+    def node_properties(
+        self,
+        node_id: str,
+        as_of_revision: int | None = None,
+        cut: object = None,
+    ) -> dict:
         """Every property a node carries, grouped for reading.
 
         One record is one disclosure, so a property can hold several — a
@@ -860,9 +865,32 @@ class PropertyStore:
         for aspect, category in lines:
             aspect_categories.setdefault(aspect, set()).add(category)
 
+        # A reading cut turns the pane into "what was known at this point": the
+        # later disclosures are not wrong, they simply have not happened for the
+        # reader yet, so they are counted rather than shown.
+        cut_position = self._cut_position(cut) if cut else None
+
         items: list[dict] = []
+        hidden_total = 0
         for (aspect, category), line in lines.items():
             ordered = sorted(line, key=lambda entry: position(entry["record"]))
+            later = 0
+            if cut_position is not None:
+                visible = [
+                    entry for entry in ordered
+                    if position(entry["record"]) <= cut_position
+                ]
+                later = len(ordered) - len(visible)
+                hidden_total += later
+                visible_ids = {entry["record"].get("id") for entry in visible}
+                # A retraction whose target is not known yet says nothing.
+                ordered = [
+                    entry for entry in visible
+                    if entry["record"].get("kind") != "property_retraction"
+                    or entry["record"].get("target_id") in visible_ids
+                ]
+                if not ordered:
+                    continue
             property_ids = sorted({entry["property_id"] for entry in ordered})
             definition = definitions.get(ordered[-1]["property_id"]) or {}
             node_valued = definition.get("value_type") in {"node", "either"}
@@ -934,6 +962,9 @@ class PropertyStore:
                 "start": (latest.get("disclosure") or {}).get("start"),
                 "retracted": latest.get("kind") == "property_retraction",
                 "record_count": len(decorated),
+                # Disclosures after the cut: the pane says how many it is not
+                # showing instead of pretending this is everything.
+                "later_count": later,
                 "records": decorated,
             })
         ordered_categories = property_categories.order_categories(
@@ -1005,6 +1036,8 @@ class PropertyStore:
             ],
             "properties": items,
             "inbound": inbound,
+            "cut": cut,
+            "later_count": hidden_total,
         }
 
     @staticmethod

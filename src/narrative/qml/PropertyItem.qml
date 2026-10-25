@@ -113,7 +113,7 @@ Column {
             Label {
                 Layout.fillWidth: true
                 visible: item.row.validFrom.length > 0 || item.splitHint.length > 0
-                text: [item.row.validFrom, item.row.historyText, item.splitHint]
+                text: [item.row.validFrom, item.row.historyText, item.row.laterText, item.splitHint]
                     .filter(function (part) { return part.length > 0 }).join(" · ")
                 color: item.t.muted
                 font.pixelSize: 10

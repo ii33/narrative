@@ -400,9 +400,13 @@ class GraphOperations:
         """Read-only audit: overlaps, contradictions, stale values, gaps."""
         return self.properties.audit(node_ids)
 
-    def property_node_summary(self, node_id: str) -> dict:
-        """Read-only: every property of one node, with its disclosure sequence."""
-        return self.properties.node_properties(node_id)
+    def property_node_summary(self, node_id: str, cut: object = None) -> dict:
+        """Read-only: every property of one node, with its disclosure sequence.
+
+        ``cut`` is an event id: the projection then answers "what was known when
+        the reader reached that event" instead of "what is known now".
+        """
+        return self.properties.node_properties(node_id, cut=cut)
 
     def property_categories(self) -> dict[str, list[str]]:
         """Display categories per node type; loose groupings, editable at will."""

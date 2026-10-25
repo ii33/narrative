@@ -72,6 +72,7 @@ def _seed(path: Path) -> Path:
                 {"kind": "node", "id": "2", "node_type": "person", "name": "老周"},
                 {"kind": "node", "id": "3", "node_type": "item", "name": "铜钥匙"},
                 {"kind": "node", "id": "4", "node_type": "event", "name": "开场"},
+                {"kind": "node", "id": "5", "node_type": "event", "name": "后来又过了些日子"},
             ],
             ops.graph_project_info()["revision"],
         ),
@@ -99,6 +100,9 @@ def _seed(path: Path) -> Path:
                  "property_id": "cultivation", "value": "灵寂期", "event_id": "4"},
                 {"kind": "property_value", "id": "v5", "node_id": "2",
                  "property_id": "cultivation_stage", "value": "元婴初期", "event_id": "4"},
+                # 手镯的状态在更晚的事件才披露，用来验证阅读位置。
+                {"kind": "property_value", "id": "v6", "node_id": "3",
+                 "property_id": "state", "value": "完好无损", "event_id": "5"},
             ],
             ops.graph_project_info()["revision"],
             source="manual",
@@ -237,6 +241,57 @@ def test_editing_the_vocabulary_changes_the_grouping(workspace) -> None:
     assert _value(page.property("vocabulary"))[1] == "外形"
     groups = _value(page.property("categoryGroups"))
     assert [group["key"] for group in groups] == ["外形", "能力与身体状态"]
+
+
+def test_a_reading_cut_switches_the_state(tmp_path: Path) -> None:
+    """切到某个事件，右侧只显示读到这里时已经披露的内容。"""
+    app = QApplication.instance() or QApplication([])
+    project = _seed(tmp_path / "cut.sqlite3")
+    bridge = NativeBridge(tmp_path)
+    results: list[tuple[str, dict]] = []
+    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
+    engine = QQmlApplicationEngine()
+    engine.rootContext().setContextProperty("bridge", bridge)
+    try:
+        engine.load(QUrl.fromLocalFile(str(QML_PATH)))
+        window: Any = engine.rootObjects()[0]
+        bridge.openProject(str(project))
+        _pump(app, results, "project")
+        _pump(app, results, "graph_view")
+        page = window.findChild(object, "browsePage")
+        page.select("3")
+        _pump(app, results, "detail", "3")
+        _pump(app, results, "node_properties", "3")
+        app.processEvents()
+
+        latest = {row["label"] for row in _value(page.property("propertyRows"))}
+        assert latest == {"持有者", "状态"}
+
+        # 第 1 个选项是第一个事件「开场」，手镯的状态还没披露。
+        del results[:]
+        page.pickCut(1)
+        _pump(app, results, "node_properties", "3")
+        app.processEvents()
+
+        rows = _value(page.property("propertyRows"))
+        assert {row["label"] for row in rows} == {"持有者"}
+        assert page.property("cutEventId") == "4"
+        assert page.property("cutLater") == 1
+        assert _value(page.property("categoryGroups"))[0]["key"] == "归属与持有"
+
+        # 回到最新，状态又出现。
+        del results[:]
+        page.backToLatest()
+        _pump(app, results, "node_properties", "3")
+        app.processEvents()
+        assert {row["label"] for row in _value(page.property("propertyRows"))} == {
+            "持有者", "状态",
+        }
+        assert page.property("cutEventId") == ""
+    finally:
+        engine.deleteLater()
+        bridge.close()
+        app.processEvents()
 
 
 def test_the_pane_can_add_a_record(workspace) -> None:
