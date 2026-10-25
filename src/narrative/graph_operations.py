@@ -457,8 +457,14 @@ class GraphOperations:
         """Mark older values invalid from the disclosure that replaced them."""
         return self.properties.supersede(pairs, note)
 
-    def node_editor(self, node_id: str) -> dict:
-        """Everything the node editor needs: the node, its whole history, the events."""
+    def node_editor(self, node_id: str, cut: object = None) -> dict:
+        """Everything the node editor needs: the node, its history, the events.
+
+        With a reading cut the history is what the reader had met by then: later
+        disclosures are not shown, and a record invalidated after that point still
+        counts. That view is read-only — editing belongs to the present, and an
+        edit made while looking at the past would land outside the window.
+        """
         from .browse_view import steps
 
         snapshot = self.graph_snapshot()
@@ -467,15 +473,20 @@ class GraphOperations:
         )
         if node is None:
             raise ValueError("节点不存在")
-        summary = self.properties.node_properties(node_id, include_retracted=True)
+        summary = self.properties.node_properties(
+            node_id, cut=cut, include_retracted=True
+        )
+        names = {item["id"]: item.get("name") or item["id"] for item in snapshot["nodes"]}
         return {
             "node_id": node_id,
             "node": node,
-            # The editor edits the whole history, not the reading position the
-            # browse pane happens to be sitting at.
             "properties": summary["properties"],
             "events": steps(snapshot, "event"),
             "revision": summary["revision"],
+            "cut": summary.get("cut"),
+            "cut_name": names.get(str(summary.get("cut") or ""), ""),
+            "later_count": summary.get("later_count", 0),
+            "read_only": bool(cut),
         }
 
     def property_history(

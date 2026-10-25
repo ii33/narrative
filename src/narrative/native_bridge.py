@@ -731,8 +731,13 @@ class NativeBridge(QObject):
 
     @Slot(str)
     def loadNodeEditor(self, node_id: str) -> None:
-        """Everything the node editor needs: the node, its whole history, the events."""
-        self._project_task("node_editor", lambda ops: ops.node_editor(node_id))
+        """Everything the node editor needs, scoped to the reading position.
+
+        At a cut the editor shows what the reader had met by then and is read-only;
+        at 最新 it shows the whole history and can edit.
+        """
+        cut = self._state_cut or None
+        self._project_task("node_editor", lambda ops: ops.node_editor(node_id, cut=cut))
 
     @Slot(str, int)
     def acceptPropertyCandidate(self, candidate_id: str, version: int) -> None:

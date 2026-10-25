@@ -12,6 +12,12 @@ Dialog {
     property var node: ({})
     property var properties: []
     property var events: []
+    // 阅读位置生效时：只列那一刻已经读到的记录，并且只读——编辑属于「最新」。
+    property bool readOnly: false
+    property string cutName: ""
+    property int laterCount: 0
+    // 上一次加载时用的切点，用来判断阅读位置是否变了。
+    property string cutEventId: ""
 
     // 正在更正哪条记录；正在失效哪条属性。
     property string editRecordId: ""
@@ -57,6 +63,10 @@ Dialog {
         node = payload.node || ({})
         properties = payload.properties || []
         events = payload.events || []
+        readOnly = payload.read_only === true
+        cutName = payload.cut_name || ""
+        laterCount = payload.later_count || 0
+        cutEventId = payload.cut || ""
         nameField.text = node.name || ""
         aliasField.text = (node.aliases || []).join("、")
         noteField.text = node.identity_note || ""
@@ -131,6 +141,14 @@ Dialog {
         function onResultReady(kind, payload) {
             if (kind === "node_editor") {
                 editor.apply(payload)
+            } else if (kind === "browse") {
+                // 阅读位置变了，编辑器看到的那一段历史也跟着变。
+                var cut = (payload.cut || ({}))
+                var id = cut.event_id || ""
+                if (id !== editor.cutEventId) {
+                    editor.cutEventId = id
+                    if (editor.visible) editor.reload()
+                }
             } else if (kind === "property_correct" || kind === "property_retract"
                        || kind === "property_add") {
                 editor.reload()
@@ -190,7 +208,32 @@ Dialog {
             Button {
                 objectName: "editorSubmitNode"
                 text: "提交节点修订"
+                enabled: !editor.readOnly
                 onClicked: editor.submitNode()
+            }
+        }
+
+        // 按阅读位置看历史时，这里只显示那一刻已经读到的记录。
+        RowLayout {
+            Layout.fillWidth: true
+            visible: editor.readOnly
+            spacing: 8
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: "读到「" + (editor.cutName || "该事件") + "」时可见的属性"
+                    + (editor.laterCount > 0
+                        ? "；此后还有 " + editor.laterCount + " 条披露未显示" : "")
+                    + "。这是历史视图，只读。"
+                color: t.warn
+                font.pixelSize: 11
+            }
+            Button {
+                objectName: "editorBackToLatest"
+                text: "回到最新"
+                flat: true
+                font.pixelSize: 10
+                onClicked: editor.host.backToLatest()
             }
         }
 
@@ -223,6 +266,7 @@ Dialog {
                 objectName: "editorAddProperty"
                 text: "新增属性"
                 flat: true
+                enabled: !editor.readOnly
                 onClicked: editor.host.openAddProperty()
             }
         }
@@ -273,6 +317,7 @@ Dialog {
                                 text: "更正"
                                 flat: true
                                 font.pixelSize: 10
+                                enabled: !editor.readOnly
                                 onClicked: {
                                     var records = modelData.records || []
                                     var latest = null
@@ -286,6 +331,7 @@ Dialog {
                                 text: "失效"
                                 flat: true
                                 font.pixelSize: 10
+                                enabled: !editor.readOnly
                                 onClicked: editor.startRetract(modelData)
                             }
                         }

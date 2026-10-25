@@ -636,3 +636,35 @@ def test_the_node_editor_corrects_and_invalidates(workspace) -> None:
     assert all(not row["valid"] for row in item["records"])
     assert item["records"][0]["invalid_reason"] == "这条读错了"
 
+
+
+def test_the_node_editor_follows_the_reading_position(workspace) -> None:
+    """按阅读位置看时，编辑器只列那一刻已经读到的属性，并且只读。"""
+    app, _bridge, page, results, _errors = workspace
+    editor = page.findChild(object, "nodeEditor")
+
+    # 第一个场景锚在事件 4：手镯的「状态」在事件 5 才披露，此时还读不到。
+    # 先清空，否则 _pump 会立刻拿到上一次的 browse，切点还没写进桥接。
+    del results[:]
+    page.pickCut(1)
+    _pump(app, results, "browse")
+    editor.openFor("3")
+    payload = _pump(app, results, "node_editor")
+
+    assert payload["read_only"] is True
+    assert payload["cut_name"] == "开场"
+    assert payload["later_count"] == 1
+    assert {item["label"] for item in _value(editor.property("properties"))} == {"持有者"}
+    assert editor.findChild(object, "editorSubmitNode").property("enabled") is False
+    assert editor.findChild(object, "editorAddProperty").property("enabled") is False
+
+    # 回到最新：整份历史回来，编辑重新可用。
+    del results[:]
+    page.backToLatest()
+    _pump(app, results, "browse")
+    payload = _pump(app, results, "node_editor")
+    assert payload["read_only"] is False
+    assert {item["label"] for item in _value(editor.property("properties"))} == {
+        "持有者", "状态",
+    }
+    assert editor.findChild(object, "editorSubmitNode").property("enabled") is True
