@@ -165,3 +165,90 @@ def test_audit_can_be_limited_to_the_nodes_of_one_extraction(tmp_path: Path) -> 
     assert "duplicate_value" in _codes(whole)
     assert {item["node_id"] for item in limited["issues"]} == {"2"}
     assert limited["checked_records"] == 2
+
+
+def _retraction(rid: str, node_id: str, property_id: str, target: str, *,
+                event="9", start=900) -> dict:
+    return {
+        "kind": "property_retraction", "id": rid, "node_id": node_id,
+        "property_id": property_id, "target_id": target, "reason": "原文否定了这条",
+        "event_id": event, "disclosure": {"source_id": "s1", "start": start},
+    }
+
+
+def test_retraction_pointing_nowhere_is_an_error() -> None:
+    records = [
+        _definition("holder"),
+        _value("v1", "1", "holder", "7", start=0),
+        _retraction("r1", "1", "holder", "missing"),
+    ]
+    report = audit_properties(records, [_node("1", "火纹石", "item")])
+
+    issue = next(item for item in report["issues"] if item["code"] == "retraction_without_target")
+    assert issue["severity"] == "error"
+
+
+def test_retraction_must_target_the_same_property() -> None:
+    records = [
+        _definition("holder"),
+        _definition("state"),
+        _value("v1", "1", "state", "完好", start=0),
+        _retraction("r1", "1", "holder", "v1"),
+    ]
+    report = audit_properties(records, [_node("1", "火纹石", "item")])
+
+    issue = next(item for item in report["issues"] if item["code"] == "retraction_mismatch")
+    assert issue["severity"] == "error"
+
+
+def test_retraction_without_a_later_value_leaves_no_current_value() -> None:
+    records = [
+        _definition("holder"),
+        _value("v1", "1", "holder", "7", event="1", start=0),
+        _retraction("r1", "1", "holder", "v1", event="9", start=900),
+    ]
+    report = audit_properties(records, [_node("1", "火纹石", "item")])
+
+    issue = next(item for item in report["issues"] if item["code"] == "retracted_no_successor")
+    assert issue["severity"] == "warning"
+
+
+def test_value_after_retraction_is_allowed_and_noted() -> None:
+    records = [
+        _definition("holder"),
+        _value("v1", "1", "holder", "7", event="1", start=0),
+        _retraction("r1", "1", "holder", "v1", event="5", start=500),
+        _value("v2", "1", "holder", "8", event="9", start=900),
+    ]
+    report = audit_properties(records, [_node("1", "火纹石", "item")])
+
+    codes = _codes(report)
+    assert "value_after_retraction" in codes
+    assert "retracted_no_successor" not in codes
+    assert report["counts"]["error"] == 0
+
+
+def test_values_on_a_retracted_node_are_flagged() -> None:
+    node = _node("1", "火纹石", "item")
+    node["retracted"] = True
+    records = [
+        _definition("holder"),
+        _value("v1", "1", "holder", "7", start=0),
+    ]
+    report = audit_properties(records, [node])
+
+    issue = next(item for item in report["issues"] if item["code"] == "node_retracted_with_values")
+    assert issue["severity"] == "warning"
+
+
+def test_anchor_on_a_retracted_event_is_flagged() -> None:
+    event = _node("9", "被删掉的事件", "event")
+    event["retracted"] = True
+    records = [
+        _definition("holder"),
+        _value("v1", "1", "holder", "7", event="9", start=0),
+    ]
+    report = audit_properties(records, [_node("1", "火纹石", "item"), event])
+
+    issue = next(item for item in report["issues"] if item["code"] == "anchor_retracted")
+    assert issue["severity"] == "warning"

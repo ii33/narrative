@@ -15,6 +15,7 @@ Item {
     property var auditIssues: []
     property int auditErrors: 0
     property int auditWarnings: 0
+    property int auditInfos: 0
     property string auditScope: ""
 
     ListModel { id: candidateRows }
@@ -35,9 +36,11 @@ Item {
         auditIssues = issues
         auditErrors = 0
         auditWarnings = 0
+        auditInfos = 0
         for (var i = 0; i < issues.length; ++i) {
             if (issues[i].severity === "error") auditErrors += 1
             else if (issues[i].severity === "warning") auditWarnings += 1
+            else auditInfos += 1
         }
         auditScope = scope
     }
@@ -301,6 +304,7 @@ Item {
                         Label {
                             visible: page.auditIssues.length > 0
                             text: page.auditErrors + " 错误 · " + page.auditWarnings + " 待确认"
+                                + (page.auditInfos > 0 ? " · " + page.auditInfos + " 提示" : "")
                             color: page.auditErrors > 0 ? t.bad : t.warn
                             font.pixelSize: 11
                         }
@@ -328,7 +332,8 @@ Item {
                                 wrapMode: Text.Wrap
                                 color: modelData.severity === "error" ? t.bad
                                     : modelData.severity === "warning" ? t.warn : t.muted
-                                text: (modelData.severity === "error" ? "错误 " : "待确认 ")
+                                text: (modelData.severity === "error" ? "错误 "
+                                        : modelData.severity === "warning" ? "待确认 " : "提示 ")
                                     + (modelData.node_name || "") + " · " + (modelData.message || "")
                             }
                             Label {

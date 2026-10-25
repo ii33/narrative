@@ -85,6 +85,11 @@ def audit_properties(
         if record.get("kind") == "property_definition"
     }
 
+    retracted_nodes = {node["id"] for node in nodes if node.get("retracted")}
+    values_by_id = {
+        record["id"]: record for record in records
+        if record.get("kind") == "property_value"
+    }
     issues: list[dict] = []
     groups: dict[tuple, list[dict]] = defaultdict(list)
     per_node_names: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
@@ -124,12 +129,53 @@ def audit_properties(
                 node=node, property_id=property_id, records=[record],
                 suggestion="指定读者读到哪个事件时知道这件事",
             ))
+        if record.get("event_id") in retracted_nodes:
+            issues.append(_issue(
+                "anchor_retracted", WARNING,
+                f"属性「{property_id}」锚在已撤回的事件 {record.get('event_id')} 上，披露位置随之失效",
+                node=node, property_id=property_id, records=[record],
+                suggestion="改锚到仍然有效的事件，或连同这条记录一起撤回",
+            ))
         if scope != "world" and not record.get("holder_id"):
             issues.append(_issue(
                 "holder_missing", ERROR,
                 f"属性「{property_id}」标为{_SCOPE_LABELS.get(scope, scope)}，但没有持有人",
                 node=node, property_id=property_id, records=[record],
                 suggestion="补 holder，或把范围改回 world",
+            ))
+
+    retractions = [
+        record for record in records
+        if record.get("kind") == "property_retraction"
+        and (node_ids is None or record.get("node_id") in node_ids)
+    ]
+    retract_groups: dict[tuple, list[dict]] = defaultdict(list)
+    for record in retractions:
+        node_id = record.get("node_id")
+        property_id = record.get("property_id")
+        node = names.get(node_id or "", {"id": node_id, "name": node_id})
+        if not isinstance(node_id, str) or not isinstance(property_id, str):
+            issues.append(_issue(
+                "record_incomplete", ERROR,
+                "撤回记录缺少节点或属性名", records=[record],
+            ))
+            continue
+        retract_groups[(node_id, property_id, record.get("scope", "world"),
+                        record.get("holder_id"))].append(record)
+        target = values_by_id.get(record.get("target_id") or "")
+        if target is None:
+            issues.append(_issue(
+                "retraction_without_target", ERROR,
+                f"撤回记录指向的 {record.get('target_id') or '（空）'} 不存在，撤不掉任何东西",
+                node=node, property_id=property_id, records=[record],
+                suggestion="撤回必须指向一条已接受的取值记录",
+            ))
+        elif (target.get("node_id"), target.get("property_id")) != (node_id, property_id):
+            issues.append(_issue(
+                "retraction_mismatch", ERROR,
+                f"撤回记录指向的 {record.get('target_id')} 属于别的节点或属性",
+                node=node, property_id=property_id, records=[record, target],
+                suggestion="撤回只能作用于同一节点、同一属性的记录",
             ))
 
     for (node_id, property_id, scope, holder_id), rows in groups.items():
@@ -178,6 +224,25 @@ def audit_properties(
                            f"，早先的 {len(earlier)} 条保留为历史",
             ))
 
+        retr = retract_groups.get((node_id, property_id, scope, holder_id)) or []
+        if retr:
+            last_value = max(_position(row) for row in ordered)
+            last_retraction = max(_position(row) for row in retr)
+            if last_retraction > last_value:
+                issues.append(_issue(
+                    "retracted_no_successor", WARNING,
+                    f"属性「{property_id}」（{label}）最后一次披露是撤回，当前没有有效值",
+                    node=node, property_id=property_id, records=retr,
+                    suggestion="确认这是有意终止；若之后又有新说法，补一条取值记录",
+                ))
+            else:
+                issues.append(_issue(
+                    "value_after_retraction", INFO,
+                    f"属性「{property_id}」（{label}）在撤回之后又重新给出了值",
+                    node=node, property_id=property_id, records=ordered,
+                    suggestion="允许的转折；确认新值确实在撤回之后披露",
+                ))
+
         if holder_id and not names.get(holder_id):
             issues.append(_issue(
                 "holder_unknown", ERROR,
@@ -197,6 +262,19 @@ def audit_properties(
                     node=node, property_id=distinct[0],
                     suggestion=f"合并成一个属性名（建议用「{distinct[0]}」），否则同一个方面会被拆成两条线",
                 ))
+
+    value_nodes = {
+        str(record["node_id"]) for record in values if record.get("node_id")
+    }
+    for node_id in sorted(value_nodes):
+        if node_id in retracted_nodes:
+            node = names.get(node_id, {"id": node_id, "name": node_id})
+            issues.append(_issue(
+                "node_retracted_with_values", WARNING,
+                f"节点「{node.get('name')}」已撤回，但仍有属性记录，这些值随之失效",
+                node=node,
+                suggestion="节点撤回时一并撤回它的属性记录，或恢复该节点",
+            ))
 
     used = {record.get("property_id") for record in values}
     for property_id in definitions:
