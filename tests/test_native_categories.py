@@ -399,12 +399,13 @@ def test_related_only_keeps_the_nodes_of_this_step(workspace) -> None:
     _pump(app, results, "browse")
     app.processEvents()
 
-    # 第一个场景只有一个事件，参与者是林舟和手镯：列表只剩场景本身和这两个。
+    # 第一个场景只有一个事件（4），参与者是林舟和手镯：
+    # 列表是场景 + 它的事件 + 这两个参与者。
     ids = {node["id"] for node in _value(page.property("nodes"))}
-    assert ids == {"7", "1", "3"}
+    assert ids == {"7", "4", "1", "3"}
     assert page.property("relatedOnly") is True
     # 侧栏计数也要跟着收，否则数字和列表对不上。
-    assert page.property("counts") == {"item": 1, "person": 1, "scene": 1}
+    assert page.property("counts") == {"event": 1, "item": 1, "person": 1, "scene": 1}
 
     del results[:]
     page.toggleRelated()

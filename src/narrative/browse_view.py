@@ -99,24 +99,42 @@ def steps(snapshot: dict, granularity: str = "scene") -> list[dict]:
     ]
 
 
+def _members(nodes: dict[str, dict], node: dict) -> list[dict]:
+    """What a scene is made of, at any depth."""
+    out: list[dict] = []
+    for child_id in node.get("events") or []:
+        child = nodes.get(child_id)
+        if child is None:
+            continue
+        out.append(child)
+        if child.get("node_type") == "scene":
+            out.extend(_members(nodes, child))
+    return out
+
+
 def related_nodes(snapshot: dict, step_id: str) -> list[str]:
-    """Nodes the step is about: itself plus its participants.
+    """Nodes the step is about: itself, what it is made of, and who takes part.
 
     A scene has no participants of its own, so it takes the union over the events
-    it contains — "related to this scene" cannot mean the scene node alone.
+    it contains — and those events belong to it, so they are related too: reading
+    a scene means reading its events. An event is related to the scene that holds
+    it, for the same reason, so the two granularities agree about the same step.
     """
     nodes = _by_id(snapshot)
     node = nodes.get(step_id)
     if node is None:
         return []
-    targets = [node]
-    if node.get("node_type") == "scene":
-        targets = [
-            nodes[child] for child in node.get("events") or []
-            if child in nodes and nodes[child].get("node_type") == "event"
-        ] or [node]
     found = {step_id}
-    for item in targets:
+    members = _members(nodes, node) if node.get("node_type") == "scene" else []
+    found.update(member["id"] for member in members)
+    # The container is related too: an event belongs to its scene.
+    if node.get("node_type") == "event":
+        found.update(
+            scene["id"] for scene in snapshot.get("nodes", [])
+            if scene.get("node_type") == "scene"
+            and step_id in (scene.get("events") or [])
+        )
+    for item in members or [node]:
         found.update(
             participant for participant in item.get("participants") or []
             if participant in nodes

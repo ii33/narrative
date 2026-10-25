@@ -66,15 +66,16 @@ def test_a_scene_cuts_where_its_last_event_is(tmp_path: Path) -> None:
     assert cut_for(snapshot, "nope") is None
 
 
-def test_related_nodes_of_a_scene_are_its_events_participants(
+def test_related_nodes_of_a_scene_include_its_events(
     tmp_path: Path,
 ) -> None:
     _ops, snapshot = _project(tmp_path / "related.sqlite3")
 
-    # 场景自己 + 两个事件里出现过的人。
-    assert related_nodes(snapshot, "4") == ["1", "2", "4"]
-    # 单个事件：自己 + 参与者。
-    assert related_nodes(snapshot, "5") == ["1", "2", "5"]
+    # 场景自己 + 它包含的两个事件 + 两个事件里出现过的人。
+    # 事件属于场景，所以「只看这一步的相关节点」不能把它们筛掉。
+    assert related_nodes(snapshot, "4") == ["1", "2", "4", "5", "6"]
+    # 单个事件：自己 + 参与者 + 它所属的场景。
+    assert related_nodes(snapshot, "5") == ["1", "2", "4", "5"]
     assert related_nodes(snapshot, "nope") == []
 
 
@@ -103,8 +104,8 @@ def test_counts_follow_the_other_conditions_but_not_the_type_filter(
 
     # 相关节点把范围收到这一步，计数跟着收——否则数字会和列表对不上。
     related = browse_view(snapshot, cut_id="4", related_only=True)
-    assert {node["id"] for node in related["nodes"]} == {"1", "2", "4"}
-    assert related["counts"] == {"person": 2, "scene": 1}
+    assert {node["id"] for node in related["nodes"]} == {"1", "2", "4", "5", "6"}
+    assert related["counts"] == {"event": 2, "person": 2, "scene": 1}
 
     # 搜索也一样：计数说的是"这些条件之下有什么"。
     searched = browse_view(snapshot, query="曾")
