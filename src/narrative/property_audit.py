@@ -38,7 +38,7 @@ def _normalized_name(property_id: str) -> str:
     for suffix in ("_cm", "_kg", "_value", "_desc"):
         if name.endswith(suffix):
             name = name[: -len(suffix)]
-    if len(name) > 3 and name.endswith("s"):
+    if len(name) > 3 and name.endswith("s") and not name.endswith(("ss", "us", "is")):
         name = name[:-1]
     return name.replace("_", "")
 
@@ -120,7 +120,11 @@ def audit_properties(
         node = names.get(node_id, {"id": node_id, "name": node_id})
         scope = record.get("scope", "world")
         groups[(node_id, property_id, scope, record.get("holder_id"))].append(record)
-        per_node_names[node_id][_normalized_name(property_id)].append(property_id)
+        # Two names for one aspect (`cultivation`, `cultivation_stage`) are the
+        # same subject; the reader sees them on one line, so the check has to
+        # happen at that level too.
+        aspect = _normalized_name(property_categories.aspect_of(property_id))
+        per_node_names[node_id][aspect].append(property_id)
 
         if property_id not in definitions:
             issues.append(_issue(
@@ -312,9 +316,10 @@ def audit_properties(
             if len(distinct) > 1:
                 issues.append(_issue(
                     "name_variant", WARNING,
-                    f"同一节点上出现多个近义属性名：{'、'.join(distinct)}",
+                    f"同一节点上同一个方面用了多个属性名：{'、'.join(distinct)}",
                     node=node, property_id=distinct[0],
-                    suggestion=f"合并成一个属性名（建议用「{distinct[0]}」），否则同一个方面会被拆成两条线",
+                    suggestion=f"确认是同一个方面后合并成一个名字（建议用「{distinct[0]}」），"
+                               "否则每换一个名字就多出一条独立的“当前值”",
                 ))
 
     value_nodes = {

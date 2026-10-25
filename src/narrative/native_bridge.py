@@ -479,6 +479,18 @@ class NativeBridge(QObject):
 
         self._project_task("property_categorize", work)
 
+    @Slot(str, str)
+    def mergeProperties(self, alias_id: str, target_id: str) -> None:
+        """Read one property name as another; records keep their own name."""
+        if not alias_id.strip() or not target_id.strip():
+            self.errorOccurred.emit("property_merge", "请提供两个属性名")
+            return
+
+        def work(ops) -> dict:
+            return ops.property_merge(alias_id.strip(), target_id.strip())
+
+        self._project_task("property_merge", work)
+
     @Slot("QVariantMap")
     def addPropertyRecord(self, payload: dict) -> None:
         """Stage one hand-written disclosure. Acceptance still happens on the review page.

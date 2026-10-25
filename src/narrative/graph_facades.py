@@ -140,6 +140,9 @@ class GraphPropertyFacade:
     def categorize(self, targets: list[str], category: str, note: str = "") -> dict:
         return self.properties.categorize(targets, category, note)
 
+    def merge(self, alias_id: str, target_id: str, note: str = "") -> dict:
+        return self.properties.merge(alias_id, target_id, note)
+
 
 class GraphChangeFacade:
     """Unified mixed candidate: graph objects and property records together."""

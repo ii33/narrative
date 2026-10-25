@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import property_categories
+from . import property_categories, property_labels
 from .graph_store import GraphStore
 from .order_ids import order_key
 
@@ -51,6 +51,49 @@ def _categorization_overrides(records: list[dict]) -> dict[str, str]:
         if isinstance(target, str) and isinstance(category, str) and category.strip():
             overrides[target] = category.strip()
     return overrides
+
+
+def _merge_map(records: list[dict]) -> dict[str, str]:
+    """Alias → canonical property name, following chains.
+
+    A merge is a read-time alias: the records keep the name they were captured
+    under, so nothing has to be rewritten and a wrong merge is undone by
+    retracting one record.
+    """
+    direct = {
+        record["alias_id"]: record["target_id"]
+        for record in records
+        if record.get("kind") == "property_merge"
+        and isinstance(record.get("alias_id"), str)
+        and isinstance(record.get("target_id"), str)
+    }
+    resolved: dict[str, str] = {}
+    for alias in direct:
+        seen = {alias}
+        cursor = direct[alias]
+        while cursor in direct and cursor not in seen:
+            seen.add(cursor)
+            cursor = direct[cursor]
+        resolved[alias] = cursor
+    return resolved
+
+
+def _with_canonical_names(records: list[dict], merges: dict[str, str]) -> list[dict]:
+    """Read merged value records under their canonical name.
+
+    Copies only the records whose name was merged; everything else is passed
+    through, so callers keep working with the same objects they were given.
+    """
+    if not merges:
+        return records
+    result: list[dict] = []
+    for record in records:
+        if record.get("kind") == "property_value":
+            name = record.get("property_id")
+            if isinstance(name, str) and name in merges:
+                record = record | {"property_id": merges[name]}
+        result.append(record)
+    return result
 
 
 class PropertyStore:
@@ -505,11 +548,19 @@ class PropertyStore:
         """
         cut_position = cut
 
+        records = self.accepted_records()
+        merges = _merge_map(records)
+        wanted = merges.get(property_id, property_id)
+
+        def name_of(record: dict) -> str:
+            name = record.get("property_id")
+            return merges.get(name, name) if isinstance(name, str) else ""
+
         values = [
-            record for record in self.accepted_records()
+            record for record in records
             if record.get("kind") == "property_value"
             and record.get("node_id") == node_id
-            and record.get("property_id") == property_id
+            and name_of(record) == wanted
             and record.get("scope", "world") == scope
             and (scope == "world" or record.get("holder_id") == holder_id)
         ]
@@ -561,9 +612,9 @@ class PropertyStore:
             else {}
         )
         # History is the audit trail: retracted entries belong in it.
-        return _core().history(
-            self.accepted_records(include_retracted=True), node_id, property_id, **kwargs
-        )
+        records = self.accepted_records(include_retracted=True)
+        records = _with_canonical_names(records, _merge_map(records))
+        return _core().history(records, node_id, property_id, **kwargs)
 
     def audit(
         self,
@@ -574,8 +625,12 @@ class PropertyStore:
         from .property_audit import audit_properties
 
         snapshot = self.store.snapshot(as_of_revision)
+        records = self.accepted_records(snapshot["revision"])
+        # An alias that was merged is no longer a separate name: auditing it as
+        # one would keep reporting the split the human already resolved.
+        records = _with_canonical_names(records, _merge_map(records))
         return audit_properties(
-            self.accepted_records(snapshot["revision"]),
+            records,
             snapshot.get("nodes", []),
             node_ids=node_ids,
             categories=property_categories.load(self.store),
@@ -681,6 +736,46 @@ class PropertyStore:
         )
         return result | {"category": category}
 
+    def merge(self, alias_id: str, target_id: str, note: str = "") -> dict:
+        """Read `alias_id` as `target_id` from now on.
+
+        Nothing is rewritten: records keep the name they were captured under and
+        the alias stays a real definition, so its records still validate.
+        Retracting this record splits the names again.
+        """
+        from uuid import uuid4
+
+        alias_id = (alias_id or "").strip()
+        target_id = (target_id or "").strip()
+        if not alias_id or not target_id:
+            raise ValueError("请提供两个属性名")
+        if alias_id == target_id:
+            raise ValueError("合并的两个名字不能相同")
+        known = {
+            record["id"] for record in self.accepted_records()
+            if record.get("kind") == "property_definition"
+        }
+        for name in (alias_id, target_id):
+            if name not in known:
+                raise ValueError(f"属性定义不存在：{name}")
+        record = {
+            "kind": "property_merge",
+            "id": f"merge_{uuid4().hex[:12]}",
+            "alias_id": alias_id,
+            "target_id": target_id,
+            **({"note": note} if note else {}),
+        }
+        revision = self.store.revision
+        candidate = self.propose(
+            [record], revision, source="correction",
+            note=note or f"合并属性：{alias_id} → {target_id}",
+        )
+        return {
+            "revision": self.accept(candidate, 1),
+            "alias_id": alias_id,
+            "target_id": target_id,
+        }
+
     def node_properties(self, node_id: str, as_of_revision: int | None = None) -> dict:
         """Every property a node carries, grouped for reading.
 
@@ -689,11 +784,13 @@ class PropertyStore:
         (event number, own source position) and the last one is what the reader
         saw last, which is not the same as the last one written.
 
-        Grouping is by display category, resolved per record: a human move wins,
-        then the category the extractor wrote, then a name/value hint, then 其他.
-        A property whose disclosures fall into two categories is shown in both,
-        each slice carrying only its own records — the alternative would hide a
-        record under a heading it does not belong to.
+        Rows are one aspect inside one display category. The aspect is the first
+        token of the property name, so `cultivation` and `cultivation_stage` share
+        a line and their three realms read as one sequence with one current value
+        instead of three simultaneous truths. Category is resolved per record: a
+        human move wins, then what the extractor wrote, then a name/value hint,
+        then 其他; a record whose category differs from its neighbours is shown
+        under both headings, each carrying only its own records.
         """
         snapshot = self.store.snapshot(as_of_revision)
         records = self.accepted_records(snapshot["revision"])
@@ -706,11 +803,21 @@ class PropertyStore:
         # disclosure hangs on, and every node the record points at.
         nodes = {node["id"]: node for node in snapshot.get("nodes", [])}
         names = {node_id_: node.get("name") or node_id_ for node_id_, node in nodes.items()}
+        # The position alone is ambiguous once a property spans chapters: 3611 in
+        # chapter two and 3479 in chapter three are not comparable numbers.
+        source_titles = {
+            source["id"]: source.get("title") or source["id"]
+            for source in snapshot.get("sources", [])
+            if isinstance(source, dict) and isinstance(source.get("id"), str)
+        }
         node = nodes.get(node_id, {})
         node_type = node.get("node_type")
         # A move is one record pointing at one disclosure; the last accepted one
         # is the current grouping, so moving twice keeps the second answer.
         overrides = _categorization_overrides(records)
+        # A merged alias reads as its canonical name everywhere: one aspect, one
+        # line, one label, without rewriting the records that used the old name.
+        merges = _merge_map(records)
 
         def node_ref(value: object) -> dict | None:
             """A node-valued property stores an id; the reader wants the name."""
@@ -719,15 +826,6 @@ class PropertyStore:
             name = names.get(value)
             return {"id": value, "name": name} if name else None
 
-        groups: dict[tuple[str, str, str | None], list[dict]] = {}
-        for record in records:
-            if record.get("kind") not in {"property_value", "property_retraction"}:
-                continue
-            if record.get("node_id") != node_id:
-                continue
-            key = (record["property_id"], record.get("scope", "world"), record.get("holder_id"))
-            groups.setdefault(key, []).append(record)
-
         def position(record: dict) -> tuple:
             anchor = record.get("event_id")
             key = order_key(anchor) if isinstance(anchor, str) else None
@@ -735,18 +833,42 @@ class PropertyStore:
             offset = disclosure.get("start") if isinstance(disclosure, dict) else None
             return (key or (999,), offset if isinstance(offset, int) else 0)
 
+        # One line per aspect and category. The aspect is the first token of the
+        # property name, so `cultivation` and `cultivation_stage` share a line:
+        # they describe the same subject, and splitting them is what made three
+        # realms look like three simultaneous truths. Scope is a label on each
+        # record rather than a reason to split the line — a claim about the realm
+        # and the realm itself are the same subject, told differently.
+        lines: dict[tuple[str, str], list[dict]] = {}
+        for record in records:
+            if record.get("kind") not in {"property_value", "property_retraction"}:
+                continue
+            if record.get("node_id") != node_id:
+                continue
+            category, category_source = property_categories.resolve(
+                record, node_type, config, overrides
+            )
+            raw_name = record.get("property_id")
+            name = merges.get(raw_name, raw_name) if isinstance(raw_name, str) else ""
+            aspect = property_categories.aspect_of(name)
+            lines.setdefault((aspect, category), []).append({
+                "record": record,
+                "property_id": name,
+                "category_source": category_source,
+            })
+        aspect_categories: dict[str, set[str]] = {}
+        for aspect, category in lines:
+            aspect_categories.setdefault(aspect, set()).add(category)
+
         items: list[dict] = []
-        for (property_id, scope, holder_id), rows in groups.items():
-            ordered = sorted(rows, key=position)
-            definition = definitions.get(property_id) or {}
+        for (aspect, category), line in lines.items():
+            ordered = sorted(line, key=lambda entry: position(entry["record"]))
+            property_ids = sorted({entry["property_id"] for entry in ordered})
+            definition = definitions.get(ordered[-1]["property_id"]) or {}
             node_valued = definition.get("value_type") in {"node", "either"}
-            # Validity is a property of the whole sequence, so it is computed
-            # before the sequence is sliced by category.
             decorated: list[dict] = []
-            for index, row in enumerate(ordered):
-                category, category_source = property_categories.resolve(
-                    row, node_type, config, overrides
-                )
+            for index, entry in enumerate(ordered):
+                row = entry["record"]
                 decorated.append({
                     "id": row.get("id"),
                     "kind": row.get("kind"),
@@ -754,15 +876,20 @@ class PropertyStore:
                     "value_node": node_ref(row.get("value")) if node_valued else None,
                     "event_id": row.get("event_id"),
                     "event_name": names.get(row.get("event_id") or ""),
-                    # From this disclosure up to the next one; the last entry is
-                    # the current value and stays open.
+                    # From this disclosure up to the next one in the same line;
+                    # the last entry is the current value and stays open.
                     "is_current": index == len(ordered) - 1
                     and row.get("kind") != "property_retraction",
-                    "valid_to_event": names.get(ordered[index + 1].get("event_id") or "")
-                    if index + 1 < len(ordered) else None,
+                    "valid_to_event": names.get(
+                        ordered[index + 1]["record"].get("event_id") or ""
+                    ) if index + 1 < len(ordered) else None,
                     "disclosure": row.get("disclosure"),
+                    "source_title": source_titles.get(
+                        (row.get("disclosure") or {}).get("source_id") or ""
+                    ),
                     "source": row.get("source"),
                     "anchor_basis": row.get("anchor_basis"),
+                    "scope": row.get("scope", "world"),
                     "holder_id": row.get("holder_id"),
                     "holder_name": names.get(row.get("holder_id") or ""),
                     "related": [
@@ -770,39 +897,51 @@ class PropertyStore:
                         for related_id in (row.get("related_nodes") or [])
                     ],
                     "evidence": row.get("evidence"),
+                    "property_id": entry["property_id"],
+                    "property_label": property_labels.label_for(entry["property_id"]),
                     "category": category,
-                    "category_source": category_source,
+                    "category_source": entry["category_source"],
                 })
-            slices: dict[str, list[dict]] = {}
-            for entry in decorated:
-                slices.setdefault(entry["category"], []).append(entry)
-            for category, entries in slices.items():
-                latest = entries[-1]
-                values_only = [entry for entry in entries if entry.get("kind") == "property_value"]
-                items.append({
-                    "property_id": property_id,
-                    "category": category,
-                    "category_source": latest["category_source"],
-                    # The same property may sit in another category too; the
-                    # reader is told rather than shown a silently partial list.
-                    "other_categories": sorted(name for name in slices if name != category),
-                    "current_from_event": names.get(latest.get("event_id") or ""),
-                    "current_from_start": (latest.get("disclosure") or {}).get("start"),
-                    "current_retracted": latest.get("kind") == "property_retraction",
-                    "history_count": max(0, len(values_only) - 1),
-                    "value_node": node_ref(latest.get("value")) if node_valued else None,
-                    "scope": scope,
-                    "holder_id": holder_id,
-                    "holder_name": names.get(holder_id) if holder_id else None,
-                    "value_type": definition.get("value_type"),
-                    "value": latest.get("value"),
-                    "event_id": latest.get("event_id"),
-                    "start": (latest.get("disclosure") or {}).get("start"),
-                    "retracted": latest.get("kind") == "property_retraction",
-                    "record_count": len(entries),
-                    "records": entries,
-                })
-        items.sort(key=lambda item: (item["property_id"], item["scope"], item["holder_id"] or ""))
+            latest = decorated[-1]
+            values_only = [entry for entry in decorated if entry.get("kind") == "property_value"]
+            # The label names the aspect, not the newest spelling of it: a line
+            # holding `cultivation` and `cultivation_stage` is 修为.
+            label_id = aspect if aspect in property_ids else latest["property_id"]
+            items.append({
+                "property_id": latest["property_id"],
+                "property_ids": property_ids,
+                "aspect": aspect,
+                "label": property_labels.label_for(label_id),
+                "category": category,
+                "category_source": latest["category_source"],
+                # The same aspect may sit in another category too; the reader is
+                # told rather than shown a silently partial list.
+                "other_categories": sorted(
+                    name for name in aspect_categories[aspect] if name != category
+                ),
+                "current_from_event": names.get(latest.get("event_id") or ""),
+                "current_from_start": (latest.get("disclosure") or {}).get("start"),
+                "current_retracted": latest.get("kind") == "property_retraction",
+                "history_count": max(0, len(values_only) - 1),
+                "value_node": node_ref(latest.get("value")) if node_valued else None,
+                "scope": latest.get("scope"),
+                "scopes": sorted({entry["scope"] for entry in decorated}),
+                "holder_id": latest.get("holder_id"),
+                "holder_name": names.get(latest.get("holder_id") or ""),
+                "value_type": definition.get("value_type"),
+                "value": latest.get("value"),
+                "event_id": latest.get("event_id"),
+                "start": (latest.get("disclosure") or {}).get("start"),
+                "retracted": latest.get("kind") == "property_retraction",
+                "record_count": len(decorated),
+                "records": decorated,
+            })
+        ordered_categories = property_categories.order_categories(
+            sorted({item["category"] for item in items}), node_type, config
+        )
+        items.sort(key=lambda item: (
+            ordered_categories.index(item["category"]), item["label"], item["aspect"],
+        ))
         ordered_categories = property_categories.order_categories(
             sorted({item["category"] for item in items}), node_type, config
         )

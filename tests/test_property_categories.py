@@ -372,3 +372,147 @@ def test_a_move_that_points_nowhere_is_an_error(tmp_path: Path) -> None:
     }
     with pytest.raises(ValueError):
         ops.property_propose([dangling], revision, source="manual")
+
+
+# -- 一个方面一条线 ---------------------------------------------------------
+
+def test_aspect_is_the_first_token_of_the_name() -> None:
+    assert property_categories.aspect_of("cultivation_stage") == "cultivation"
+    assert property_categories.aspect_of("height") == "height"
+    # 长得像的名字不能因为前缀就被并到一起。
+    assert property_categories.aspect_of("state") == "state"
+    assert property_categories.aspect_of("status") == "status"
+    assert property_categories.aspect_of("statement") == "statement"
+
+
+def test_two_names_for_one_aspect_share_a_line(tmp_path: Path) -> None:
+    ops = _project(tmp_path / "aspect.sqlite3")
+    revision = ops.graph_project_info()["revision"]
+    ops.property_accept(
+        ops.property_propose(
+            _definitions("cultivation", "cultivation_stage") + [
+                _value("v1", "1", "cultivation", "灵寂期", scope="claim", holder_id="2"),
+                _value("v2", "1", "cultivation_stage", "辟谷期"),
+                _value("v3", "1", "cultivation_stage", "到了元婴初期",
+                       scope="cognition", holder_id="1"),
+            ],
+            revision,
+            source="manual",
+        ),
+        1,
+    )
+
+    summary = ops.property_node_summary("1")
+    assert len(summary["properties"]) == 1
+    item = summary["properties"][0]
+
+    # 同一方面一条线：三个境界不是三个当前值，而是一条披露序列。
+    assert item["aspect"] == "cultivation"
+    assert item["label"] == "修为"
+    assert item["property_ids"] == ["cultivation", "cultivation_stage"]
+    assert [row["scope"] for row in item["records"]] == ["claim", "world", "cognition"]
+    assert item["scopes"] == ["claim", "cognition", "world"]
+    assert item["value"] == "到了元婴初期"
+    assert [row["is_current"] for row in item["records"]] == [False, False, True]
+    # 每条记录仍带自己的属性名，读者能看出它来自哪个名字。
+    assert [row["property_label"] for row in item["records"]] == ["修为", "修为境界", "修为境界"]
+
+
+def test_property_labels_come_from_the_backend(tmp_path: Path) -> None:
+    ops = _project(tmp_path / "labels.sqlite3")
+    revision = ops.graph_project_info()["revision"]
+    ops.property_accept(
+        ops.property_propose(
+            _definitions("height", "quux_level") + [
+                _value("v1", "1", "height", "矮小"),
+                _value("v2", "1", "quux_level", "三层"),
+            ],
+            revision,
+            source="manual",
+        ),
+        1,
+    )
+
+    labels = {
+        item["property_id"]: item["label"]
+        for item in ops.property_node_summary("1")["properties"]
+    }
+    # 认识的属性名给中文，不认识的照原名显示，不猜。
+    assert labels["height"] == "身高"
+    assert labels["quux_level"] == "quux_level"
+
+
+# -- 归并属性名 -------------------------------------------------------------
+
+def _two_names(ops, revision: int) -> None:
+    ops.property_accept(
+        ops.property_propose(
+            _definitions("cultivation", "cultivation_stage") + [
+                _value("v1", "1", "cultivation", "灵寂期"),
+                _value("v2", "1", "cultivation_stage", "辟谷期"),
+                _value("v3", "1", "cultivation_stage", "到了元婴初期"),
+            ],
+            revision,
+            source="manual",
+        ),
+        1,
+    )
+
+
+def test_merging_two_names_reads_them_as_one(tmp_path: Path) -> None:
+    ops = _project(tmp_path / "merge.sqlite3")
+    _two_names(ops, ops.graph_project_info()["revision"])
+
+    merged = ops.property_merge("cultivation_stage", "cultivation")
+    assert merged["alias_id"] == "cultivation_stage"
+    assert merged["target_id"] == "cultivation"
+
+    item = ops.property_node_summary("1")["properties"][0]
+    # 归并后只剩一个名字，记录本身没有被改写。
+    assert item["property_ids"] == ["cultivation"]
+    assert item["label"] == "修为"
+    assert [row["value"] for row in item["records"]] == ["灵寂期", "辟谷期", "到了元婴初期"]
+    # 按合并后的名字查询，看到的是整条序列的当前值。
+    assert ops.property_state("1", "cultivation")["state"] == {
+        "kind": "known", "value": "到了元婴初期",
+    }
+    # 名字不再分裂，审计也就不再报近义名。
+    codes = [issue["code"] for issue in ops.property_audit()["issues"]]
+    assert "name_variant" not in codes
+
+    stored = [r for r in ops.property_records() if r["kind"] == "property_value"]
+    assert {r["property_id"] for r in stored} == {"cultivation", "cultivation_stage"}
+
+
+def test_retracting_a_merge_splits_the_names_again(tmp_path: Path) -> None:
+    ops = _project(tmp_path / "unmerge.sqlite3")
+    _two_names(ops, ops.graph_project_info()["revision"])
+    ops.property_merge("cultivation_stage", "cultivation")
+
+    merge_record = next(
+        r for r in ops.property_records() if r["kind"] == "property_merge"
+    )
+    revision = ops.graph_project_info()["revision"]
+    ops.property_accept(
+        ops.property_propose(
+            [{"kind": "property_retraction", "id": "undo-merge",
+              "target_id": merge_record["id"], "reason": "不是同一个方面"}],
+            revision,
+            source="manual",
+        ),
+        1,
+    )
+
+    names = ops.property_node_summary("1")["properties"][0]["property_ids"]
+    assert names == ["cultivation", "cultivation_stage"]
+
+
+def test_a_merge_needs_two_existing_names(tmp_path: Path) -> None:
+    ops = _project(tmp_path / "badmerge.sqlite3")
+    _two_names(ops, ops.graph_project_info()["revision"])
+
+    with pytest.raises(ValueError):
+        ops.property_merge("cultivation_stage", "cultivation_stage")
+    with pytest.raises(ValueError):
+        ops.property_merge("nope", "cultivation")
+

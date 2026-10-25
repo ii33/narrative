@@ -15,6 +15,7 @@ _KINDS = {
     "property_definition",
     "property_value",
     "property_categorization",
+    "property_merge",
     "property_retraction",
 }
 # "any" means the shape is not fixed: one property may hold a number, a
@@ -38,6 +39,9 @@ _FIELDS = {
     # record and says where to show it. No evidence — nothing here comes from
     # the source text.
     "property_categorization": _COMMON | {"target_id", "category", "note"},
+    # Two names for one aspect, merged: `alias_id` is read as `target_id`.
+    # Nothing is rewritten; the alias definition and its records stay as they are.
+    "property_merge": _COMMON | {"alias_id", "target_id", "note"},
     "property_retraction": _COMMON | {"target_id", "reason"},
 }
 
@@ -239,6 +243,7 @@ def validate_records(
             "property_definition": {"value_type", "cardinality", "persistence"},
             "property_value": {"node_id", "property_id", "value", "event_id"},
             "property_categorization": {"target_id", "category"},
+            "property_merge": {"alias_id", "target_id"},
             "property_retraction": {"target_id", "reason"},
         }[kind] - set(record)
         if extra:
@@ -320,6 +325,39 @@ def validate_records(
             note = record.get("note")
             if note is not None and not isinstance(note, str):
                 issues.append(_issue("CATEGORY", "note must be a string", rid))
+            continue
+        if kind == "property_merge":
+            alias_id = record.get("alias_id")
+            target_id = record.get("target_id")
+            if alias_id == target_id:
+                issues.append(_issue("MERGE", "merge needs two different names", rid))
+            for name in (alias_id, target_id):
+                definition = next(
+                    (item for item in combined
+                     if item.get("id") == name and item.get("kind") == "property_definition"),
+                    None,
+                )
+                if definition is None:
+                    issues.append(
+                        _issue("MERGE", "merge must reference two property definitions", rid)
+                    )
+            # A cycle would make the canonical name depend on reading order.
+            chained: set[str] = set()
+            cursor = target_id
+            while isinstance(cursor, str) and cursor not in chained:
+                chained.add(cursor)
+                cursor = next(
+                    (item.get("target_id") for item in combined
+                     if item.get("kind") == "property_merge"
+                     and item.get("alias_id") == cursor),
+                    None,
+                )
+                if cursor == alias_id:
+                    issues.append(_issue("MERGE", "merge would create a cycle", rid))
+                    break
+            note = record.get("note")
+            if note is not None and not isinstance(note, str):
+                issues.append(_issue("MERGE", "note must be a string", rid))
             continue
         if kind == "property_retraction":
             target_id = record.get("target_id")

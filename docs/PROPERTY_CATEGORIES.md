@@ -42,6 +42,28 @@
 推断依赖分类表本身：属性名推断出来的大类如果在当前表里已经不存在了，就退回「其他」，
 不会硬塞进别的大类。审计会汇总有多少条落在「其他」，一次给一条提示。
 
+## 一个方面一条线
+
+一个方面 = 属性名的第一段（`cultivation_stage` → `cultivation`）。同一个方面下的全部记录
+按披露顺序排在**一行**里，最后一条是当前值：
+
+```
+修为 · 到了元婴初期            声称/认知/世界   能力与身体状态
+  同一方面 cultivation / cultivation_stage
+  历史  修为      灵寂期      事件 老周告知林舟已到灵寂期 · 第二章 位置 3611
+  历史  修为境界   辟谷期      事件 林舟吃猪肉脯… · 第三章 位置 3479
+  当前  修为境界   到了元婴初期 事件 林舟睁眼发现满天星内甲缩入体内… · 第三章 位置 5004
+```
+
+- **作用域是记录上的标签，不是拆行的理由**。世界说辟谷期、老周说灵寂期、林舟自知元婴初期，
+  是同一件事的三次披露，不是三个同时成立的境界。
+- 换了属性名（`cultivation` / `cultivation_stage`）不会多出一行，但那一行会写明
+  「同一方面 cultivation / cultivation_stage」，每条记录也标出自己用的名字。
+  这仍然是要修的：审计报 `name_variant`，确认同义后合并成一个名字。
+- 前后值不同是**推进**，不是矛盾；只有同一名字、同一作用域、同一披露位置上的不同值
+  才算重复（`duplicate_value`）。
+- 位置数字跨章不可比，所以记录上带章节名（`source_title`）。
+
 ## 同一属性可以分在两个大类下
 
 `state` 这种宽泛名字本来就装着不同方面。同一条属性按记录分片显示：
@@ -84,11 +106,22 @@
 - **纠正**：节点类型、名称、别名、原文位置、撤回走「提交类型修订」，
   同样是候选，同样人工接受。改分类不是纠正——它不改内容。
 
+## 归并属性名
+
+同一个方面用了两个名字（`cultivation` / `cultivation_stage`）时，那一行会出现
+「合并…」入口：选一个保留，其余按它读。
+
+- 归并是**读时别名**（`property_merge` 记录：`alias_id` → `target_id`），记录本身不改名，
+  旧名字的定义也还在，所以旧记录仍然有效。
+- 归并只改“读作哪个方面”，不改取值、不改分类、不改披露顺序；撤回这条记录就恢复成两个名字。
+- 它和移动分类是两件事：一个改含义，一个只改位置。界面上也是两个入口。
+- 归并之后审计不再报 `name_variant`，同一方面的值差异按一条时间线解释。
+
 ## 不做的事
 
-- **不合并属性**。`identity` 与 `title`、`appearance` 与 `state` 是否同义，
-  要先确认含义相同，再单独做归并；分类宽松，归并要严。
-- **不改取值**。分类记录里没有值，也没有原文引文——它不是披露。
+- **不自动合并属性**。`identity` 与 `title`、`appearance` 与 `state` 是否同义，
+  要先确认含义相同再手动归并；分类宽松，归并要严。归并是单独的操作，可撤回。
+- **不改取值**。分类记录和归并记录里都没有值，也没有原文引文——它们不是披露。
 - **不因为分类而拆分属性**。`state = 衣服破烂` 和 `state = 身受重伤` 仍是同一个 `state`，
   只是显示在两个大类下。
 - **不要求每条记录都分对**。拿不准就留在「其他」，不影响取值、查询和披露顺序。
@@ -129,10 +162,13 @@
 
 ## 代码位置
 
-- `src/narrative/property_categories.py`：默认分类表、名字/取值推断、改名检测、配置读写。
-- `src/narrative/property_store.py`：`node_properties`（分片投影 + 反向引用）、
+- `src/narrative/property_categories.py`：默认分类表、名字/取值推断、方面（`aspect_of`）、
+  改名检测、配置读写。
+- `src/narrative/property_labels.py`：属性名的中文显示名（`height` → 身高）。
+  只影响显示，不改数据；不认识的属性名照原名显示。
+- `src/narrative/property_store.py`：`node_properties`（按方面 + 大类分行，记录带章节名）、
   `categorize`（移动）、`set_categories`（改表 + 迁移）。
 - `src/narrative/property_core.py`：`property_categorization` 记录的字段与校验。
-- `src/narrative/property_audit.py`：分类相关的三条审计。
+- `src/narrative/property_audit.py`：分类相关三条 + `name_variant`（同一方面多个名字）。
 - `src/narrative/extraction.py`：提示词带分类表和工程里已有的属性名，每条属性要求给 `category`。
 - `src/narrative/qml/PropertyItem.qml`、`BrowsePage.qml`：分组显示、分类标签、分类表对话框。

@@ -62,6 +62,7 @@ def main() -> int:
     parser.add_argument("output", type=Path)
     parser.add_argument("node", help="节点编号，例如 3")
     parser.add_argument("--expand", default="", help="要展开的属性名，默认展开第一条有历史的")
+    parser.add_argument("--height", type=int, default=0, help="窗口高度；属性多时调高，少滚一点")
     args = parser.parse_args()
     project = args.project.resolve()
     if not project.is_file():
@@ -81,6 +82,8 @@ def main() -> int:
     if not engine.rootObjects() or not isinstance(engine.rootObjects()[0], QQuickWindow):
         raise RuntimeError("native QML did not load")
     window = engine.rootObjects()[0]
+    if args.height:
+        window.setHeight(args.height)
     window.show()
 
     def wait_for(kind: str, *, timeout: float = 15) -> dict:

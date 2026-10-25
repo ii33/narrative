@@ -418,6 +418,10 @@ class GraphOperations:
         """Move disclosures to a category. Appends a record; never rewrites one."""
         return self.properties.categorize(targets, category, note)
 
+    def property_merge(self, alias_id: str, target_id: str, note: str = "") -> dict:
+        """Read one property name as another. A separate act from moving a category."""
+        return self.properties.merge(alias_id, target_id, note)
+
     def property_history(
         self,
         node_id: str,

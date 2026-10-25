@@ -766,7 +766,7 @@ def test_node_properties_orders_by_reading_not_write_order(tmp_path: Path) -> No
     assert item["records"][1]["valid_to_event"] is None
 
 
-def test_node_properties_separates_scopes_and_holders(tmp_path: Path) -> None:
+def test_node_properties_keeps_one_line_per_aspect(tmp_path: Path) -> None:
     ops = create_graph_project(tmp_path / "node-props-scope.sqlite3")
     ops.graph_accept(
         ops.graph_propose(
@@ -792,10 +792,16 @@ def test_node_properties_separates_scopes_and_holders(tmp_path: Path) -> None:
 
     items = ops.property_node_summary("1")["properties"]
 
-    assert {(item["property_id"], item["scope"], item["holder_id"]) for item in items} == {
-        ("realm", "world", None),
-        ("realm", "claim", "2"),
-    }
+    # 一个方面一条线：世界值和老周的说法是同一条时间线上的两条记录，
+    # 作用域是记录上的标签，不是把同一个人拆成两行的理由。
+    assert len(items) == 1
+    item = items[0]
+    assert item["aspect"] == "realm"
+    assert [row["scope"] for row in item["records"]] == ["world", "claim"]
+    assert item["scopes"] == ["claim", "world"]
+    # 当前值仍是披露顺序的最后一条。
+    assert item["value"] == "深不可测"
+    assert item["holder_id"] == "2"
 
 
 CATEGORY_TEXT = "林舟身穿一套黑色西装，脸色铁青。\n"

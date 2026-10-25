@@ -52,6 +52,7 @@ Item {
     property var expandedProps: ({})
     property var pickerTargets: []
     property var eventOptions: []
+    property var mergeNames: []
 
     function load() {
         bridge.loadGraphView({view: "table", limit: 2000})
@@ -145,18 +146,27 @@ Item {
         var records = item.records || []
         var ids = []
         for (var i = 0; i < records.length; ++i) ids.push(records[i].id)
+        var scopes = item.scopes || [item.scope || "world"]
+        var scopeText = ""
+        for (var s = 0; s < scopes.length; ++s) {
+            scopeText += (s > 0 ? "/" : "")
+                + (page.scopeLabels[scopes[s]] || scopes[s] || "世界")
+        }
         return {
-            // 同一属性可能分在两个大类里，key 必须带上分类，否则展开状态会串。
-            key: item.property_id + "|" + (item.scope || "world") + "|"
-                + (item.holder_id || "") + "|" + (item.category || ""),
-            label: page.propertyLabels[item.property_id] || item.property_id || "",
+            // 同一方面可能分在两个大类里，key 要带分类，否则展开状态会串。
+            key: (item.aspect || item.property_id) + "|" + (item.category || ""),
+            // 中文名由后端给（property_labels），未知属性名回退到原名。
+            label: item.label || page.propertyLabels[item.property_id] || item.property_id || "",
+            names: (item.property_ids || []).length > 1 ? item.property_ids.join(" / ") : "",
+            nameIds: item.property_ids || [],
             category: item.category || "其他",
             categorySource: item.category_source || "",
             otherCategories: item.other_categories || [],
             recordIds: ids,
             valueText: page.valueText(item),
             valueNodeId: item.value_node ? item.value_node.id : "",
-            scopeText: page.scopeLabels[item.scope] || item.scope || "世界",
+            scopeText: scopes.length > 1 ? scopeText : (page.scopeLabels[item.scope] || "世界"),
+            mixedScope: scopes.length > 1,
             holderId: item.holder_id || "",
             holderName: item.holder_name
                 || (item.holder_id ? page.nameOf(item.holder_id) : ""),
@@ -201,6 +211,20 @@ Item {
     function applyCategory(category) {
         if (pickerTargets.length === 0) return
         bridge.categorizeProperties(JSON.stringify(pickerTargets), category)
+    }
+
+    // 属性归并：一行里出现多个名字时，选一个保留，其余按它读。
+    // 归并和移动分类是两件事：一个改含义，一个只改位置。
+    function askMerge(names) {
+        if (!names || names.length < 2) return
+        mergeNames = names
+        mergeDialog.open()
+    }
+
+    function applyMerge(target) {
+        for (var i = 0; i < mergeNames.length; ++i)
+            if (mergeNames[i] !== target) bridge.mergeProperties(mergeNames[i], target)
+        mergeDialog.close()
     }
 
     function openSource(sourceId, start) {
@@ -319,6 +343,9 @@ Item {
                 page.applyProperties(payload)
             } else if (kind === "property_categorize") {
                 app.toast("已移到「" + (payload.category || "") + "」", false)
+                if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
+            } else if (kind === "property_merge") {
+                app.toast("已合并到「" + (payload.target_id || "") + "」", false)
                 if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
             } else if (kind === "property_add") {
                 if (payload.status === "pending") {
@@ -827,6 +854,44 @@ Item {
                 flat: true
                 text: "取消"
                 onClicked: categoryPicker.close()
+            }
+        }
+    }
+
+    // 归并属性名：同一个方面用了两个名字时，选一个保留。
+    Dialog {
+        id: mergeDialog
+        objectName: "mergeDialog"
+        title: "合并成一个名字"
+        modal: true
+        anchors.centerIn: parent
+        width: 340
+
+        contentItem: ColumnLayout {
+            spacing: 4
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: "选一个保留的名字。其余名字的记录照旧保存，只是按这个名字读；"
+                    + "撤回这次合并就恢复成两个名字。"
+                color: t.muted
+                font.pixelSize: 11
+            }
+            Repeater {
+                model: page.mergeNames
+                delegate: Button {
+                    required property string modelData
+                    Layout.fillWidth: true
+                    flat: true
+                    text: modelData
+                    onClicked: page.applyMerge(modelData)
+                }
+            }
+            Button {
+                Layout.fillWidth: true
+                flat: true
+                text: "取消"
+                onClicked: mergeDialog.close()
             }
         }
     }

@@ -15,6 +15,8 @@ Column {
     // 同一属性可能分在两个大类里，这时说明清楚，避免看起来像少了几条。
     readonly property string splitHint: (row.otherCategories || []).length > 0
         ? "也在「" + (row.otherCategories || []).join("」「") + "」中" : ""
+    // 一行里合了几个属性名时要说出来，否则读者不知道记录来自两个名字。
+    readonly property string nameHint: row.names.length > 0 ? "同一方面 " + row.names : ""
 
     spacing: 0
 
@@ -117,6 +119,31 @@ Column {
                 font.pixelSize: 10
                 elide: Text.ElideRight
             }
+            // 一行合了几个属性名时单独说：这是要合并的信号，不该被省略号吞掉。
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                visible: item.nameHint.length > 0
+
+                Label {
+                    Layout.fillWidth: true
+                    text: item.nameHint
+                    color: item.t.warn
+                    font.pixelSize: 10
+                    elide: Text.ElideRight
+                }
+                Label {
+                    text: "合并…"
+                    color: item.t.accent
+                    font.pixelSize: 10
+                    font.underline: true
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: item.host.askMerge(item.row.nameIds)
+                    }
+                }
+            }
         }
     }
 
@@ -144,6 +171,13 @@ Column {
                     font.pixelSize: 10
                     Layout.preferredWidth: 28
                 }
+                // 这一行合了多个属性名时，标出这条记录用的是哪个。
+                Label {
+                    visible: item.row.names.length > 0
+                    text: modelData.property_label || modelData.property_id
+                    color: item.t.muted
+                    font.pixelSize: 9
+                }
                 Label {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
@@ -165,6 +199,8 @@ Column {
                 }
                 // 单条记录移动：同一条 state 可以分到不同大类。
                 Rectangle {
+                    // 整组都是同一个大类时不必重复标；只有这条记录被单独挪过才显示。
+                    visible: modelData.category !== item.row.category
                     implicitWidth: recordCategoryLabel.implicitWidth + 10
                     implicitHeight: 15
                     radius: 7
@@ -196,29 +232,33 @@ Column {
                     font.pixelSize: 10
                 }
                 Label {
-                    text: modelData.event_name || modelData.event_id || "—"
+                    Layout.fillWidth: true
+                    text: (modelData.event_name || modelData.event_id || "—")
+                        + "  →  " + (modelData.valid_to_event || "至今")
                     color: modelData.event_name ? item.t.accent : item.t.muted
                     font.pixelSize: 10
                     font.underline: !!modelData.event_name
+                    elide: Text.ElideRight
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
                         onClicked: item.host.jumpTo(modelData.event_id)
                     }
                 }
-                Label {
-                    text: "→ " + (modelData.valid_to_event || "至今")
-                    color: item.t.muted
-                    font.pixelSize: 10
-                    elide: Text.ElideRight
-                }
+            }
+            RowLayout {
+                width: parent.width - parent.leftPadding
+                spacing: 4
+
                 Label {
                     Layout.fillWidth: true
-                    text: "· 位置 " + (modelData.disclosure ? modelData.disclosure.start : "—")
-                        + " · " + (modelData.source || "未标注来源")
+                    // 跨章时位置数字不可比，所以带上章节名。
+                    text: (modelData.source_title || "未标注章节")
+                        + " · 位置 " + (modelData.disclosure ? modelData.disclosure.start : "—")
+                        + (modelData.source ? " · " + modelData.source : "")
                     color: item.t.muted
                     font.pixelSize: 10
-                    elide: Text.ElideRight
+                    elide: Text.ElideMiddle
                 }
                 Label {
                     visible: !!(modelData.disclosure && modelData.disclosure.source_id)

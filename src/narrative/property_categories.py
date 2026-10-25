@@ -268,6 +268,19 @@ def resolve(
     return suggest(str(record.get("property_id") or ""), node_type, record.get("value"), config)
 
 
+def aspect_of(property_id: str) -> str:
+    """The aspect a property name points at.
+
+    `cultivation` and `cultivation_stage` are two names for one subject, and a
+    reader wants them on one line with one current value. The first token is the
+    aspect; `state`, `status` and `statement` stay apart because they share no
+    prefix. Grouping by aspect never renames anything — the merge is a decision
+    the audit still asks a human to make.
+    """
+    name = (property_id or "").strip().lower()
+    return name.split("_")[0] if name else ""
+
+
 def inverse_category(source_category: str, viewer_type: str | None, config: object = None) -> str:
     """Where the other end of a relation shows the same record."""
     mapped = _INVERSE_CATEGORY.get(viewer_type or "", {}).get(source_category, source_category)

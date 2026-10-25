@@ -252,3 +252,35 @@ def test_anchor_on_a_retracted_event_is_flagged() -> None:
 
     issue = next(item for item in report["issues"] if item["code"] == "anchor_retracted")
     assert issue["severity"] == "warning"
+
+
+def test_two_names_for_one_aspect_are_flagged() -> None:
+    records = [
+        _definition("cultivation"),
+        _definition("cultivation_stage"),
+        _value("v1", "1", "cultivation", "灵寂期"),
+        _value("v2", "1", "cultivation_stage", "辟谷期"),
+    ]
+    report = audit_properties(records, [_node("1", "林舟")])
+
+    issue = next(item for item in report["issues"] if item["code"] == "name_variant")
+    assert "cultivation" in issue["message"] and "cultivation_stage" in issue["message"]
+    # 换个名字就多一条“当前值”，所以这是要人合并的警告，不是错误。
+    assert issue["severity"] == "warning"
+
+
+def test_a_changing_value_is_a_progression_not_a_conflict() -> None:
+    """同一方面前后三个值不等于矛盾：这是一条时间线，只在同一名字同一作用域内比较。"""
+    records = [
+        _definition("cultivation"),
+        _value("v1", "1", "cultivation", "辟谷期", event="1", start=0),
+        _value("v2", "1", "cultivation", "灵寂期", event="2", start=0),
+        _value("v3", "1", "cultivation", "元婴初期", event="3", start=0),
+    ]
+    report = audit_properties(records, [_node("1", "林舟")])
+    codes = _codes(report)
+
+    assert "name_variant" not in codes
+    assert "conflicting_values" in codes
+    assert report["counts"]["error"] == 0
+

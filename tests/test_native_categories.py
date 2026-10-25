@@ -84,12 +84,21 @@ def _seed(path: Path) -> Path:
                  "cardinality": "one", "persistence": "until_changed"},
                 {"kind": "property_definition", "id": "holder", "value_type": "node",
                  "cardinality": "one", "persistence": "until_changed"},
+                {"kind": "property_definition", "id": "cultivation", "value_type": "string",
+                 "cardinality": "one", "persistence": "until_changed"},
+                {"kind": "property_definition", "id": "cultivation_stage",
+                 "value_type": "string", "cardinality": "one", "persistence": "until_changed"},
                 {"kind": "property_value", "id": "v1", "node_id": "1",
                  "property_id": "state", "value": "脸色铁青", "event_id": "4"},
                 {"kind": "property_value", "id": "v2", "node_id": "1",
                  "property_id": "state", "value": "身受重伤", "event_id": "4"},
                 {"kind": "property_value", "id": "v3", "node_id": "3",
                  "property_id": "holder", "value": "2", "event_id": "4"},
+                # 老周：同一方面两个名字，用来验证界面的归并入口。
+                {"kind": "property_value", "id": "v4", "node_id": "2",
+                 "property_id": "cultivation", "value": "灵寂期", "event_id": "4"},
+                {"kind": "property_value", "id": "v5", "node_id": "2",
+                 "property_id": "cultivation_stage", "value": "元婴初期", "event_id": "4"},
             ],
             ops.graph_project_info()["revision"],
             source="manual",
@@ -177,6 +186,34 @@ def test_moving_a_record_from_the_pane_regroups_it(workspace) -> None:
     assert {item["valueText"] for group in groups for item in group["items"]} == {
         "身受重伤", "脸色铁青",
     }
+
+
+def test_merging_two_names_from_the_pane(workspace) -> None:
+    app, _bridge, page, results, _errors = workspace
+    page.jumpTo("2")
+    _pump(app, results, "detail", "2")
+    _pump(app, results, "node_properties", "2")
+    app.processEvents()
+
+    rows = _value(page.property("propertyRows"))
+    item = next(row for row in rows if row["label"] == "修为")
+    # 同一方面两个名字：界面要说出来，并给出归并入口。
+    assert item["names"] == "cultivation / cultivation_stage"
+    assert item["nameIds"] == ["cultivation", "cultivation_stage"]
+
+    del results[:]
+    page.askMerge(item["nameIds"])
+    app.processEvents()
+    page.applyMerge("cultivation")
+    merged = _pump(app, results, "property_merge")
+    assert (merged["alias_id"], merged["target_id"]) == ("cultivation_stage", "cultivation")
+    _pump(app, results, "node_properties", "2")
+    app.processEvents()
+
+    rows = _value(page.property("propertyRows"))
+    item = next(row for row in rows if row["label"] == "修为")
+    assert item["names"] == ""
+    assert len(item["records"]) == 2
 
 
 def test_editing_the_vocabulary_changes_the_grouping(workspace) -> None:
