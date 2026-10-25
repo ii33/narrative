@@ -618,8 +618,16 @@ class PropertyStore:
             latest = ordered[-1]
             definition = definitions.get(property_id) or {}
             node_valued = definition.get("value_type") in {"node", "either"}
+            values_only = [row for row in ordered if row.get("kind") == "property_value"]
             items.append({
                 "property_id": property_id,
+                # A value is valid from the disclosure that states it until the
+                # next disclosure of the same property. That window is what makes
+                # the sequence a history rather than a pile of statements.
+                "current_from_event": names.get(latest.get("event_id") or ""),
+                "current_from_start": (latest.get("disclosure") or {}).get("start"),
+                "current_retracted": latest.get("kind") == "property_retraction",
+                "history_count": max(0, len(values_only) - 1),
                 "value_node": node_ref(latest.get("value")) if node_valued else None,
                 "scope": scope,
                 "holder_id": holder_id,
@@ -637,6 +645,12 @@ class PropertyStore:
                         "value_node": node_ref(row.get("value")) if node_valued else None,
                         "event_id": row.get("event_id"),
                         "event_name": names.get(row.get("event_id") or ""),
+                        # Validity: from this disclosure up to the next one. The
+                        # last entry is the current value and stays open.
+                        "is_current": index == len(ordered) - 1
+                        and row.get("kind") != "property_retraction",
+                        "valid_to_event": names.get(ordered[index + 1].get("event_id") or "")
+                        if index + 1 < len(ordered) else None,
                         "disclosure": row.get("disclosure"),
                         "source": row.get("source"),
                         "anchor_basis": row.get("anchor_basis"),
@@ -648,7 +662,7 @@ class PropertyStore:
                         ],
                         "evidence": row.get("evidence"),
                     }
-                    for row in ordered
+                    for index, row in enumerate(ordered)
                 ],
             })
         items.sort(key=lambda item: (item["property_id"], item["scope"], item["holder_id"] or ""))

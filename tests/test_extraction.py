@@ -758,6 +758,13 @@ def test_node_properties_orders_by_reading_not_write_order(tmp_path: Path) -> No
     assert item["records"][0]["event_name"] == "交代年龄"
     assert item["records"][0]["related"] == [{"id": "2", "name": "交代年龄"}]
 
+    # Validity window: the earlier value stops where the later one is disclosed.
+    assert item["history_count"] == 1
+    assert item["current_from_event"] == "交代年龄"
+    assert [row["is_current"] for row in item["records"]] == [False, True]
+    assert item["records"][0]["valid_to_event"] == "交代年龄"
+    assert item["records"][1]["valid_to_event"] is None
+
 
 def test_node_properties_separates_scopes_and_holders(tmp_path: Path) -> None:
     ops = create_graph_project(tmp_path / "node-props-scope.sqlite3")

@@ -140,6 +140,9 @@ Item {
                 holderId: item.holder_id || "",
                 holderName: item.holder_name
                     || (item.holder_id ? page.nameOf(item.holder_id) : ""),
+                validFrom: item.current_retracted ? "" : ("起于 " + (item.current_from_event || "—")),
+                historyText: item.history_count > 0
+                    ? "另有 " + item.history_count + " 条历史" : "",
                 countText: records.length > 1 ? records.length + " 条披露" : "",
                 records: records
             })
@@ -406,6 +409,7 @@ Item {
 
                     ScrollView {
                         id: detailScroll
+                        objectName: "browseDetailScroll"
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
@@ -492,7 +496,7 @@ Item {
 
                                     Rectangle {
                                         width: parent.width
-                                        height: 32
+                                        height: 46
                                         radius: 4
                                         color: propHover.hovered ? t.accentSoft : "transparent"
 
@@ -506,54 +510,67 @@ Item {
                                             onClicked: page.toggleProperty(modelData.key)
                                         }
 
-                                        RowLayout {
+                                        ColumnLayout {
                                             anchors.fill: parent
                                             anchors.leftMargin: 8
                                             anchors.rightMargin: 8
-                                            spacing: 8
-                                            Label {
-                                                text: (expanded ? "− " : "+ ") + modelData.label
-                                                color: t.ink
-                                                font.pixelSize: 12
-                                                Layout.preferredWidth: 96
-                                                elide: Text.ElideRight
-                                            }
-                                            Label {
-                                                text: modelData.valueText
-                                                color: modelData.valueNodeId.length > 0 ? t.accent : t.body
-                                                font.pixelSize: 12
-                                                font.underline: modelData.valueNodeId.length > 0
-                                                elide: Text.ElideRight
-                                                Layout.fillWidth: true
+                                            anchors.topMargin: 4
+                                            anchors.bottomMargin: 4
+                                            spacing: 0
 
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    enabled: modelData.valueNodeId.length > 0
-                                                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                                    onClicked: page.jumpTo(modelData.valueNodeId)
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 8
+                                                Label {
+                                                    text: (expanded ? "− " : "+ ") + modelData.label
+                                                    color: t.ink
+                                                    font.pixelSize: 12
+                                                    Layout.preferredWidth: 96
+                                                    elide: Text.ElideRight
+                                                }
+                                                Label {
+                                                    text: modelData.valueText
+                                                    color: modelData.valueNodeId.length > 0 ? t.accent : t.body
+                                                    font.pixelSize: 12
+                                                    font.underline: modelData.valueNodeId.length > 0
+                                                    elide: Text.ElideRight
+                                                    Layout.fillWidth: true
+
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        enabled: modelData.valueNodeId.length > 0
+                                                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                                        onClicked: page.jumpTo(modelData.valueNodeId)
+                                                    }
+                                                }
+                                                Label {
+                                                    text: modelData.scopeText
+                                                    color: t.accent
+                                                    font.pixelSize: 10
+                                                }
+                                                Label {
+                                                    visible: modelData.holderId.length > 0
+                                                    text: modelData.holderName
+                                                    color: t.accent
+                                                    font.pixelSize: 10
+                                                    font.underline: true
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        cursorShape: Qt.PointingHandCursor
+                                                        onClicked: page.jumpTo(modelData.holderId)
+                                                    }
                                                 }
                                             }
+
                                             Label {
-                                                text: modelData.countText
+                                                Layout.fillWidth: true
+                                                visible: modelData.validFrom.length > 0
+                                                text: modelData.validFrom
+                                                    + (modelData.historyText.length > 0
+                                                        ? " · " + modelData.historyText : "")
                                                 color: t.muted
                                                 font.pixelSize: 10
-                                            }
-                                            Label {
-                                                text: modelData.scopeText
-                                                color: t.accent
-                                                font.pixelSize: 10
-                                            }
-                                            Label {
-                                                visible: modelData.holderId.length > 0
-                                                text: modelData.holderName
-                                                color: t.accent
-                                                font.pixelSize: 10
-                                                font.underline: true
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    cursorShape: Qt.PointingHandCursor
-                                                    onClicked: page.jumpTo(modelData.holderId)
-                                                }
+                                                elide: Text.ElideRight
                                             }
                                         }
                                     }
@@ -570,23 +587,37 @@ Item {
                                             bottomPadding: 6
                                             spacing: 2
 
-                                            Label {
+                                            RowLayout {
                                                 width: parent.width - parent.leftPadding
-                                                wrapMode: Text.Wrap
-                                                text: "· " + (modelData.kind === "property_retraction"
-                                                    ? "撤回"
-                                                    : modelData.value_node ? modelData.value_node.name
-                                                    : String(modelData.value === null || modelData.value === undefined
-                                                        ? "（空）" : modelData.value))
-                                                color: modelData.value_node ? t.accent : t.body
-                                                font.pixelSize: 11
-                                                font.underline: !!modelData.value_node
+                                                spacing: 6
 
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    enabled: !!modelData.value_node
-                                                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                                    onClicked: page.jumpTo(modelData.value_node.id)
+                                                Label {
+                                                    text: modelData.kind === "property_retraction"
+                                                        ? "撤回"
+                                                        : modelData.is_current ? "当前" : "历史"
+                                                    color: modelData.is_current ? t.ok : t.muted
+                                                    font.pixelSize: 10
+                                                    Layout.preferredWidth: 28
+                                                }
+                                                Label {
+                                                    Layout.fillWidth: true
+                                                    wrapMode: Text.Wrap
+                                                    text: modelData.kind === "property_retraction"
+                                                        ? "该说法已撤回"
+                                                        : modelData.value_node ? modelData.value_node.name
+                                                        : String(modelData.value === null
+                                                            || modelData.value === undefined
+                                                            ? "（空）" : modelData.value)
+                                                    color: modelData.value_node ? t.accent : t.body
+                                                    font.pixelSize: 11
+                                                    font.underline: !!modelData.value_node
+
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        enabled: !!modelData.value_node
+                                                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                                        onClicked: page.jumpTo(modelData.value_node.id)
+                                                    }
                                                 }
                                             }
                                             RowLayout {
@@ -611,12 +642,19 @@ Item {
                                                     }
                                                 }
                                                 Label {
+                                                    text: "→ " + (modelData.valid_to_event || "至今")
+                                                    color: t.muted
+                                                    font.pixelSize: 10
+                                                    elide: Text.ElideRight
+                                                }
+                                                Label {
                                                     Layout.fillWidth: true
                                                     text: "· 位置 " + (modelData.disclosure
                                                         ? modelData.disclosure.start : "—")
                                                         + " · " + (modelData.source || "未标注来源")
                                                     color: t.muted
                                                     font.pixelSize: 10
+                                                    elide: Text.ElideRight
                                                 }
                                             }
 
