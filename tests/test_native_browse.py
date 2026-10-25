@@ -116,9 +116,17 @@ def test_workspace_opens_on_the_browse_page_with_categories(tmp_path: Path) -> N
         rows = page.property("propertyRows").toVariant()
         assert len(rows) == 1
         assert rows[0]["label"] == "身份"
-        assert rows[0]["countText"] == "2 条披露"
+        assert len(rows[0]["records"]) == 2
+        # identity 落在「身份与经历」，不是「其他」：分类由属性名推出来。
+        assert rows[0]["category"] == "身份与经历"
+        assert rows[0]["categorySource"] == "name"
         # A record names the event it hangs on instead of showing a bare id.
         assert rows[0]["records"][0]["event_name"] == "林舟出场"
+
+        # The same rows are grouped by category, in vocabulary order.
+        groups = page.property("categoryGroups").toVariant()
+        assert [group["key"] for group in groups] == ["身份与经历"]
+        assert groups[0]["count"] == 1
 
         # Clicking a linked node jumps to it and clears whatever filter hid it.
         page.pickType("item")

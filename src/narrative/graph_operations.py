@@ -404,6 +404,20 @@ class GraphOperations:
         """Read-only: every property of one node, with its disclosure sequence."""
         return self.properties.node_properties(node_id)
 
+    def property_categories(self) -> dict[str, list[str]]:
+        """Display categories per node type; loose groupings, editable at will."""
+        return self.properties.categories()
+
+    def set_property_categories(self, config: object) -> dict:
+        """Replace the vocabulary; renames migrate the records they renamed."""
+        return self.properties.set_categories(config)
+
+    def property_categorize(
+        self, targets: list[str], category: str, note: str = ""
+    ) -> dict:
+        """Move disclosures to a category. Appends a record; never rewrites one."""
+        return self.properties.categorize(targets, category, note)
+
     def property_history(
         self,
         node_id: str,

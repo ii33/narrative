@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from narrative.extraction import build_candidate, parse_nodes
+from narrative.extraction import build_candidate, build_prompt, known_properties, parse_nodes
 from narrative.project_catalog import create_graph_project
 
 TEXT = (
@@ -796,3 +796,73 @@ def test_node_properties_separates_scopes_and_holders(tmp_path: Path) -> None:
         ("realm", "world", None),
         ("realm", "claim", "2"),
     }
+
+
+CATEGORY_TEXT = "林舟身穿一套黑色西装，脸色铁青。\n"
+CATEGORY_RAW = """
+{"nodes": [
+  {"name": "林舟", "type": "person", "quotes": ["林舟身穿一套黑色西装"]},
+  {"name": "林舟出场", "type": "event", "quotes": ["林舟身穿一套黑色西装"],
+   "participants": ["林舟"]}
+],
+ "properties": [
+  {"node": "林舟", "property": "clothing", "value": "一套黑色西装", "value_type": "string",
+   "category": "外貌", "quotes": ["林舟身穿一套黑色西装"], "scope": "world",
+   "at_event": "林舟出场"}
+]}
+"""
+
+
+def test_parse_keeps_the_category_the_model_chose() -> None:
+    result = parse_nodes(CATEGORY_RAW, CATEGORY_TEXT)
+    assert result["properties"][0]["category"] == "外貌"
+    # 没给分类不报错：解析层只管收下，落不到大类时由投影兜到「其他」。
+    plain = parse_nodes(PROP_RAW, PROP_TEXT)
+    assert all(item["category"] == "" for item in plain["properties"])
+
+
+def test_build_candidate_writes_the_category_on_the_disclosure(tmp_path: Path) -> None:
+    ops = create_graph_project(tmp_path / "category.sqlite3")
+    source_id = ops.import_source("第一章", CATEGORY_TEXT)
+    data = parse_nodes(CATEGORY_RAW, CATEGORY_TEXT) | {"source_id": source_id}
+
+    built = build_candidate(ops, data)
+    value = next(
+        record for record in built["property_records"] if record["kind"] == "property_value"
+    )
+    assert value["category"] == "外貌"
+
+    ops.change_accept(
+        ops.change_propose(
+            built["objects"], built["property_records"], built["revision"], source="model"
+        ),
+        1,
+    )
+    item = ops.property_node_summary(value["node_id"])["properties"][0]
+    assert (item["category"], item["category_source"]) == ("外貌", "extraction")
+
+
+def test_the_prompt_lists_categories_and_the_names_already_in_use(tmp_path: Path) -> None:
+    ops = create_graph_project(tmp_path / "prompt.sqlite3")
+    source_id = ops.import_source("第一章", PROP_TEXT)
+    data = parse_nodes(PROP_RAW, PROP_TEXT) | {"source_id": source_id}
+    built = build_candidate(ops, data)
+    ops.change_accept(
+        ops.change_propose(
+            built["objects"], built["property_records"], built["revision"], source="model"
+        ),
+        1,
+    )
+
+    known = known_properties(ops)
+    assert {(item["property"], item["node_type"], item["category"]) for item in known} == {
+        ("age", "person", "基本信息"),
+        ("skin", "person", "外貌"),
+    }
+
+    prompt = build_prompt("第一章", PROP_TEXT, known)
+    # 提示词自带分类表，并要求每条属性给一个 category。
+    assert "## 属性分类（展示用）" in prompt
+    assert "拿不准就写「其他」" in prompt
+    assert "`age`（人物 · 基本信息）" in prompt
+    assert "`skin`（人物 · 外貌）" in prompt

@@ -106,6 +106,41 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
   它是读者读到哪里才知道这件事的位置，**不要求这个事件导致属性变化**。
   一段对话里说出年龄，`at_event` 就是那段对话所在的事件；读者此前不知道，到这里才知道。
 
+## 属性分类（展示用）
+
+每条属性再给一个 `category`，从该节点类型的分类表里选一个；**拿不准就写「其他」**，
+照常保存，不影响取值。分类只决定这条记录显示在哪个大类下，不改变属性名，也不要求拆分属性。
+
+人物：基本信息 / 外貌 / 身份与经历 / 能力与身体状态 / 持有与使用 / 关系 / 心理与意图 / 其他
+- 基本信息：姓名、别名、性别、年龄、种族、籍贯
+- 外貌：身高、体型、肤色、面容、发型、穿着
+- 身份与经历：职业、职务、称号、组织身份、出身、教育经历
+- 能力与身体状态：修为、技能、天赋、体质、伤势、健康
+- 持有与使用：财物、装备、携带物、佩戴物
+- 关系：亲属、师徒、朋友、敌对、隶属
+- 心理与意图：情绪、愿望、计划、打算、态度
+
+物品：基本信息 / 外观与构造 / 功能与特性 / 状态 / 归属与持有 / 关联 / 其他
+- 基本信息：名称、别名、种类、来源
+- 外观与构造：颜色、形状、尺寸、材质、结构
+- 功能与特性：用途、效果、能力、使用条件、限制
+- 状态：完好、破损、耗尽、启动、封存
+- 归属与持有：所有者、持有人、使用者
+- 关联：组成、容纳、配套
+
+群体：基本信息 / 构成与规模 / 实力与资源 / 立场与关系 / 状态 / 其他
+地点：基本信息 / 环境与外观 / 位置与范围 / 势力与居住者 / 状态 / 其他
+事件：基本信息 / 参与者 / 过程与结果 / 其他
+场景：基本信息 / 内容 / 其他
+
+`state`、`status` 这种宽泛的名字也要给分类，**同一个属性名在不同记录里可以归不同大类**：
+`state = 衣服破烂` 归外貌，`state = 身受重伤` 归能力与身体状态，`state = 心情烦躁` 归心理与意图。
+拿不准就写「其他」，不要为了分类把一条记录拆成两条。
+
+## 已有属性名（优先沿用）
+
+{known}
+
 输出一个 JSON 对象，不要任何解释文字：
 
 {{"nodes": [
@@ -119,13 +154,16 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
 ],
  "properties": [
   {{"node": "林舟", "property": "age", "value": 29, "value_type": "number",
+    "category": "基本信息",
     "quotes": ["原文逐字引文"], "scope": "world", "holder": null,
     "source": "narration", "related_nodes": [], "at_event": "沈砚告知林舟陈总来电"}},
   {{"node": "铜钥匙", "property": "holder", "value": "林舟", "value_type": "node",
+    "category": "归属与持有",
     "quotes": ["原文逐字引文"], "scope": "world", "holder": null,
     "source": "narration", "related_nodes": ["老周"],
     "at_event": "老周赠送铜钥匙，林舟戴上试用"}},
   {{"node": "老周", "property": "state", "value": "赢了那场交战", "value_type": "string",
+    "category": "其他",
     "quotes": ["原文逐字引文"], "scope": "cognition", "holder": "林舟",
     "source": "thought", "related_nodes": ["苏娘"],
     "at_event": "苏娘施展落英阵，老周以铁尺破解"}}
@@ -137,8 +175,26 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
 """
 
 
-def build_prompt(title: str, text: str) -> str:
-    return PROMPT.format(title=title, chars=len(text), text=text)
+def _known_property_lines(known: list[dict] | None) -> str:
+    """The names already in the project, so a new chapter reuses them."""
+    if not known:
+        return "（本工程还没有属性名，这是第一批；命名时注意一个方面只用一个名字。）"
+    labels = {
+        "person": "人物", "group": "群体", "item": "物品",
+        "location": "地点", "event": "事件", "scene": "场景",
+    }
+    lines = []
+    for item in known:
+        node_type = labels.get(item.get("node_type") or "", item.get("node_type") or "未分类")
+        category = item.get("category") or "其他"
+        lines.append(f"- `{item['property']}`（{node_type} · {category}）")
+    return "\n".join(lines)
+
+
+def build_prompt(title: str, text: str, known: list[dict] | None = None) -> str:
+    return PROMPT.format(
+        title=title, chars=len(text), text=text, known=_known_property_lines(known)
+    )
 
 
 def _strip_fence(raw: str) -> str:
@@ -228,6 +284,8 @@ def _parse_properties(rows, text: str, names: set[str], rejected: list[dict]) ->
             "holder": str(row.get("holder") or "").strip(),
             "at_event": str(row.get("at_event") or "").strip(),
             "source": str(row.get("source") or "").strip(),
+            # A display grouping, not a fact. Empty is allowed and means 其他.
+            "category": str(row.get("category") or "").strip(),
             "related_nodes": [
                 str(item).strip()
                 for item in (row.get("related_nodes") or [])
@@ -309,6 +367,37 @@ def parse_nodes(raw: str, text: str) -> dict:
     }
 
 
+def known_properties(ops) -> list[dict]:
+    """Property names already in the project, with the type they are used on.
+
+    Handing these back to the model is what keeps one aspect from acquiring three
+    names across chapters. It is context, not a closed list: a new aspect still
+    gets a new name.
+    """
+    from . import property_categories
+
+    snapshot = ops.graph_snapshot()
+    nodes = {node["id"]: node for node in snapshot.get("nodes", [])}
+    config = ops.property_categories()
+    seen: dict[tuple[str, str], int] = {}
+    for record in ops.property_records():
+        if record.get("kind") != "property_value":
+            continue
+        node_type = (nodes.get(record.get("node_id")) or {}).get("node_type") or "other"
+        key = (record.get("property_id") or "", node_type)
+        seen[key] = seen.get(key, 0) + 1
+    return [
+        {
+            "property": property_id,
+            "node_type": node_type,
+            "category": property_categories.suggest(property_id, node_type, None, config)[0],
+            "count": count,
+        }
+        for (property_id, node_type), count in sorted(seen.items())
+        if property_id
+    ]
+
+
 def extract_chapter(
     title: str,
     text: str,
@@ -325,9 +414,10 @@ def extract_chapter(
     which are genuinely new; extra rounds are allowed if it asks for more.
     """
     runner = HarnessRunner(settings, api_key, workdir)
+    known = known_properties(ops) if ops is not None else None
     try:
         reply: HarnessReply = runner.agent_turn(
-            build_prompt(title, text), f"extract-{uuid4().hex}"
+            build_prompt(title, text, known), f"extract-{uuid4().hex}"
         )
     finally:
         runner.close()
@@ -677,6 +767,10 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
         record["anchor_basis"] = "model" if prop.get("at_event") else "nearest"
         if prop.get("source"):
             record["source"] = str(prop["source"])
+        # The category the model chose. It is a suggestion: a human can move the
+        # record later, and an absent one simply resolves to 其他.
+        if prop.get("category"):
+            record["category"] = prop["category"]
         # Who else the sentence involves. Resolved to ids; unknown names drop out
         # rather than becoming dangling references.
         related: list[str] = []

@@ -1,0 +1,151 @@
+"""Capture the browsing page for one node, properties grouped by category.
+
+Usage:
+    python scripts/native_browse_screenshot.py PROJECT.sqlite3 OUTPUT.png NODE_ID
+
+Runs offscreen-safe: the window is shown but never needs a desktop session, and a
+CJK font is registered so the capture is not full of empty boxes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from pathlib import Path
+
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QPainter, QPalette
+from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtQuick import QQuickWindow
+from PySide6.QtQuickControls2 import QQuickStyle
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QStyleFactory
+
+from narrative.native_app import QML_PATH
+from narrative.native_bridge import NativeBridge
+
+FONTS = ("C:/Windows/Fonts/NotoSansSC-VF.ttf", "C:/Windows/Fonts/msyh.ttc")
+PALETTE = (
+    (QPalette.ColorRole.Window, "#f4f7fb"),
+    (QPalette.ColorRole.Base, "#ffffff"),
+    (QPalette.ColorRole.AlternateBase, "#f4f7fb"),
+    (QPalette.ColorRole.Button, "#ffffff"),
+    (QPalette.ColorRole.Text, "#16233a"),
+    (QPalette.ColorRole.WindowText, "#16233a"),
+    (QPalette.ColorRole.ButtonText, "#16233a"),
+    (QPalette.ColorRole.Highlight, "#2b5cd9"),
+    (QPalette.ColorRole.HighlightedText, "#ffffff"),
+)
+
+
+def _apply_style(app: QApplication) -> None:
+    """Match the real window: without Fusion the controls render as black blocks."""
+    app.setStyle(QStyleFactory.create("Fusion"))
+    QQuickStyle.setStyle("Fusion")
+    palette = app.palette()
+    for role, color in PALETTE:
+        palette.setColor(role, QColor(color))
+    app.setPalette(palette)
+    for path in FONTS:
+        if Path(path).is_file():
+            font_id = QFontDatabase.addApplicationFont(path)
+            families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
+            if families:
+                app.setFont(QFont(families[0]))
+                break
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("project", type=Path)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("node", help="节点编号，例如 3")
+    parser.add_argument("--expand", default="", help="要展开的属性名，默认展开第一条有历史的")
+    args = parser.parse_args()
+    project = args.project.resolve()
+    if not project.is_file():
+        parser.error("project file does not exist")
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    _apply_style(app)
+
+    bridge = NativeBridge(project.parent)
+    results: list[tuple[str, dict]] = []
+    errors: list[tuple[str, str]] = []
+    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
+    bridge.errorOccurred.connect(lambda kind, message: errors.append((kind, message)))
+    engine = QQmlApplicationEngine()
+    engine.rootContext().setContextProperty("bridge", bridge)
+    engine.load(QUrl.fromLocalFile(str(QML_PATH)))
+    if not engine.rootObjects() or not isinstance(engine.rootObjects()[0], QQuickWindow):
+        raise RuntimeError("native QML did not load")
+    window = engine.rootObjects()[0]
+    window.show()
+
+    def wait_for(kind: str, *, timeout: float = 15) -> dict:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            app.processEvents()
+            if errors:
+                raise RuntimeError(f"{errors[-1][0]}: {errors[-1][1]}")
+            for found_kind, payload in reversed(results):
+                if found_kind == kind:
+                    return payload
+            QTest.qWait(20)
+        raise TimeoutError(f"native {kind} did not complete")
+
+    try:
+        bridge.openProject(str(project))
+        wait_for("project")
+        results.clear()
+        page = window.findChild(object, "browsePage")
+        if page is None:
+            raise RuntimeError("browse page not found")
+        page.select(args.node)
+        wait_for("node_properties")
+        app.processEvents()
+
+        rows = page.property("propertyRows")
+        rows = rows.toVariant() if hasattr(rows, "toVariant") else rows
+        target = next(
+            (row for row in rows if row["label"].startswith(args.expand)), None
+        ) if args.expand else None
+        target = target or next((row for row in rows if len(row["records"]) > 1), None)
+        if target is not None:
+            page.toggleProperty(target["key"])
+        QTest.qWait(400)
+
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        grab = window.contentItem().grabToImage()
+        deadline = time.monotonic() + 10
+        while grab.image().isNull() and time.monotonic() < deadline:
+            app.processEvents()
+            QTest.qWait(20)
+        if grab.image().isNull():
+            raise RuntimeError("screenshot timed out")
+        # The window background is not part of the grabbed item, so the page
+        # margins come back transparent; flatten onto paper instead of letting a
+        # viewer show them as black.
+        image = grab.image()
+        canvas = QImage(image.size(), QImage.Format.Format_RGB32)
+        canvas.fill(QColor("#f4f7fb"))
+        painter = QPainter(canvas)
+        painter.drawImage(0, 0, image)
+        painter.end()
+        if not canvas.save(str(args.output)):
+            raise RuntimeError("screenshot could not be saved")
+        groups = page.property("categoryGroups")
+        groups = groups.toVariant() if hasattr(groups, "toVariant") else groups
+        print(
+            f"saved {args.output} | node={args.node} | "
+            f"groups={[group['key'] for group in groups]}"
+        )
+        return 0
+    finally:
+        window.close()
+        bridge.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

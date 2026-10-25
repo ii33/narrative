@@ -66,14 +66,15 @@ def _markdown(result: dict) -> str:
     properties = result.get("properties") or []
     if properties:
         lines += ["", f"## 属性（{len(properties)}）", "",
-                  "| 位置 | 节点 | 属性 | 值 | 范围 | 引文 |", "| ---: | --- | --- | --- | --- | --- |"]
+                  "| 位置 | 节点 | 属性 | 值 | 分类 | 范围 | 引文 |",
+                  "| ---: | --- | --- | --- | --- | --- | --- |"]
         for item in properties:
             quote = item["quotes"][0].replace("|", "\\|")
             quote = quote[:32] + "…" if len(quote) > 32 else quote
             scope = item["scope"] + (f"（{item['holder']}）" if item["holder"] else "")
             lines.append(
                 f"| {item['start']} | {item['node']} | {item['property']} | {item['value']} "
-                f"| {scope} | {quote} |"
+                f"| {item.get('category') or '其他'} | {scope} | {quote} |"
             )
     review = result.get("review") or {}
     if review.get("dropped") or review.get("unresolved"):

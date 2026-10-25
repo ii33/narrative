@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
+from . import property_categories
 from .order_ids import order_key
 
 ERROR = "error"
@@ -68,6 +69,7 @@ def audit_properties(
     nodes: list[dict],
     *,
     node_ids: set[str] | None = None,
+    categories: dict | None = None,
 ) -> dict:
     """Audit property records, optionally limited to the given nodes.
 
@@ -84,6 +86,15 @@ def audit_properties(
         record["id"]: record for record in records
         if record.get("kind") == "property_definition"
     }
+    # A category move is one record pointing at one disclosure; the last accepted
+    # one is the grouping a reader sees.
+    overrides: dict[str, str] = {}
+    for record in records:
+        if record.get("kind") != "property_categorization":
+            continue
+        target, category = record.get("target_id"), record.get("category")
+        if isinstance(target, str) and isinstance(category, str) and category.strip():
+            overrides[target] = category.strip()
 
     retracted_nodes = {node["id"] for node in nodes if node.get("retracted")}
     values_by_id = {
@@ -93,6 +104,9 @@ def audit_properties(
     issues: list[dict] = []
     groups: dict[tuple, list[dict]] = defaultdict(list)
     per_node_names: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+    # Records nobody has classified yet, counted per node: one line per node is
+    # more useful than one line per record.
+    unclassified: dict[str, int] = defaultdict(int)
 
     for record in values:
         node_id = record.get("node_id")
@@ -143,6 +157,46 @@ def audit_properties(
                 node=node, property_id=property_id, records=[record],
                 suggestion="补 holder，或把范围改回 world",
             ))
+
+        # Categories are a display grouping: a wrong one is worth fixing but
+        # never blocks the record, so the worst case here is a warning.
+        node_type = node.get("node_type")
+        category, category_source = property_categories.resolve(
+            record, node_type, categories, overrides
+        )
+        if category_source == "fallback":
+            unclassified[node_id] += 1
+        elif category not in property_categories.vocabulary_for(node_type, categories):
+            issues.append(_issue(
+                "category_unknown", WARNING,
+                f"属性「{property_id}」的分类「{category}」不在该节点类型的分类表里",
+                node=node, property_id=property_id, records=[record],
+                suggestion="改成一个已有大类，或把它加进分类表；也可以留着，不影响取值",
+            ))
+
+    value_ids = {
+        record["id"] for record in records
+        if record.get("kind") == "property_value" and isinstance(record.get("id"), str)
+    }
+    for record in records:
+        if record.get("kind") != "property_categorization":
+            continue
+        if record.get("target_id") not in value_ids:
+            issues.append(_issue(
+                "categorization_target_missing", ERROR,
+                f"分类记录指向的 {record.get('target_id') or '（空）'} 不是已有的取值记录",
+                property_id=None, records=[record],
+                suggestion="分类只能指向一条已接受的取值记录",
+            ))
+
+    if unclassified:
+        total = sum(unclassified.values())
+        issues.append(_issue(
+            "category_unassigned", INFO,
+            f"有 {total} 条属性暂时归入「其他」，分布在 {len(unclassified)} 个节点",
+            records=None,
+            suggestion="在浏览页把它们移到合适的大类；拿不准就留在「其他」，不影响取值",
+        ))
 
     retractions = [
         record for record in records
@@ -325,4 +379,6 @@ def audit_candidate(ops: Any, built: dict) -> dict:
         obj["id"] for obj in built.get("objects", [])
         if obj.get("kind") == "node"
     }
-    return audit_properties(records, nodes, node_ids=node_ids)
+    return audit_properties(
+        records, nodes, node_ids=node_ids, categories=ops.property_categories()
+    )

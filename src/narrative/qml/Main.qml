@@ -20,6 +20,10 @@ ApplicationWindow {
         ? project.title + " · 叙事图工作台" : "叙事图工作台"
     color: themeTokens.paper
 
+    // 显式背景：窗口清屏色不进 scene graph，页面之间的空隙会露出未绘制的底，
+    // 截图和离屏渲染都会变成黑块。
+    background: Rectangle { color: themeTokens.paper }
+
     // -- design tokens -------------------------------------------------
     readonly property QtObject theme: themeTokens
 
@@ -59,6 +63,13 @@ ApplicationWindow {
 
     function goTo(key) {
         currentPage = key
+    }
+
+    // 从节点/属性跳回原文：切到原文页并把引文位置滚到眼前。
+    function openSource(sourceId, start) {
+        if (!sourceId) return
+        currentPage = "source"
+        sourcePage.load(sourceId, start)
     }
 
     function toast(message, isError) {
@@ -266,7 +277,7 @@ ApplicationWindow {
                         }
 
                         BrowsePage { app: app }
-                        SourcePage { app: app }
+                        SourcePage { id: sourcePage; app: app }
                         ExtractPage { app: app }
                         PropertyPage { app: app }
                         ReviewPage { app: app }

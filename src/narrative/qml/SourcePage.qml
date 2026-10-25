@@ -11,12 +11,25 @@ Item {
     property var sources: []
     property string selectedId: ""
     property var current: ({})
+    // 从节点或属性跳过来时要滚到的原文位置；-1 表示普通打开。
+    property int pendingStart: -1
 
     ListModel { id: sourceRows }
 
-    function load(id) {
+    function load(id, start) {
         selectedId = id
+        pendingStart = (start === undefined || start === null) ? -1 : start
         bridge.sourceText(id)
+    }
+
+    function reveal(start) {
+        var text = current.text || ""
+        if (start < 0 || start > text.length) return
+        body.select(start, Math.min(text.length, start + 80))
+        var rect = body.positionToRectangle(start)
+        var flick = sourceScroll.contentItem
+        if (flick && flick.contentY !== undefined)
+            flick.contentY = Math.max(0, rect.y - 60)
     }
 
     // Loads only once a project is open; the launcher has no project yet.
@@ -44,6 +57,10 @@ Item {
                 if (!selectedId && sourceRows.count > 0) page.load(sourceRows.get(0).id)
             } else if (kind === "source") {
                 current = payload
+                if (page.pendingStart >= 0) {
+                    page.reveal(page.pendingStart)
+                    page.pendingStart = -1
+                }
             } else if (kind === "source_imported") {
                 bridge.loadSources()
             }
@@ -145,6 +162,7 @@ Item {
                 }
 
                 ScrollView {
+                    id: sourceScroll
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true

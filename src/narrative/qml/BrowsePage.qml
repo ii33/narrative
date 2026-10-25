@@ -44,8 +44,14 @@ Item {
 
     // Plain JS arrays, not ListModel: a record carries nested arrays (related
     // nodes) and ListModel drops those on the way in.
-    property var propertyRows: []
+    property var propertyRows: []      // 扁平列表，「全部」视图用
+    property var categoryGroups: []    // 按大类分组
+    property var inboundRows: []       // 别的节点指向本节点的记录
+    property var vocabulary: []        // 当前节点类型的分类表
+    property bool groupByCategory: true
     property var expandedProps: ({})
+    property var pickerTargets: []
+    property var eventOptions: []
 
     function load() {
         bridge.loadGraphView({view: "table", limit: 2000})
@@ -62,10 +68,13 @@ Item {
         var tally = {}
         for (var k = 0; k < page.typeKeys.length; ++k)
             tally[page.typeKeys[k]] = 0
+        var events = []
         for (var i = 0; i < allNodes.length; ++i) {
             var kind = allNodes[i].node_type || "other"
             tally[kind] = (tally[kind] || 0) + 1
+            if (kind === "event") events.push({id: allNodes[i].id, name: allNodes[i].name || allNodes[i].id})
         }
+        eventOptions = events
         counts = tally
         rebuildCategories()
         rebuild()
@@ -118,37 +127,133 @@ Item {
         selectedId = id
         detail = ({})
         propertyRows = []
+        categoryGroups = []
+        inboundRows = []
         expandedProps = ({})
         bridge.nodeDetail(id)
         bridge.loadNodeProperties(id)
     }
 
+    function valueText(item) {
+        if (item.retracted) return "（已撤回）"
+        if (item.value_node) return item.value_node.name
+        if (item.value === null || item.value === undefined) return "（空）"
+        return String(item.value)
+    }
+
+    function buildItem(item) {
+        var records = item.records || []
+        var ids = []
+        for (var i = 0; i < records.length; ++i) ids.push(records[i].id)
+        return {
+            // 同一属性可能分在两个大类里，key 必须带上分类，否则展开状态会串。
+            key: item.property_id + "|" + (item.scope || "world") + "|"
+                + (item.holder_id || "") + "|" + (item.category || ""),
+            label: page.propertyLabels[item.property_id] || item.property_id || "",
+            category: item.category || "其他",
+            categorySource: item.category_source || "",
+            otherCategories: item.other_categories || [],
+            recordIds: ids,
+            valueText: page.valueText(item),
+            valueNodeId: item.value_node ? item.value_node.id : "",
+            scopeText: page.scopeLabels[item.scope] || item.scope || "世界",
+            holderId: item.holder_id || "",
+            holderName: item.holder_name
+                || (item.holder_id ? page.nameOf(item.holder_id) : ""),
+            validFrom: item.current_retracted ? "" : ("起于 " + (item.current_from_event || "—")),
+            historyText: item.history_count > 0 ? "另有 " + item.history_count + " 条历史" : "",
+            records: records
+        }
+    }
+
     function applyProperties(payload) {
-        var list = payload.properties || []
+        var groups = payload.categories || []
         var built = []
-        for (var i = 0; i < list.length; ++i) {
-            var item = list[i]
-            var records = item.records || []
+        var all = []
+        for (var g = 0; g < groups.length; ++g) {
+            var items = []
+            var source = groups[g].items || []
+            for (var i = 0; i < source.length; ++i) {
+                var row = page.buildItem(source[i])
+                items.push(row)
+                all.push(row)
+            }
             built.push({
-                key: item.property_id + "|" + (item.scope || "world") + "|" + (item.holder_id || ""),
-                label: page.propertyLabels[item.property_id] || item.property_id || "",
-                valueText: item.retracted ? "（已撤回）"
-                    : item.value_node ? item.value_node.name
-                    : (item.value === null || item.value === undefined ? "（空）" : String(item.value)),
-                valueNodeId: item.value_node ? item.value_node.id : "",
-                scopeText: page.scopeLabels[item.scope] || item.scope || "世界",
-                holderId: item.holder_id || "",
-                holderName: item.holder_name
-                    || (item.holder_id ? page.nameOf(item.holder_id) : ""),
-                validFrom: item.current_retracted ? "" : ("起于 " + (item.current_from_event || "—")),
-                historyText: item.history_count > 0
-                    ? "另有 " + item.history_count + " 条历史" : "",
-                countText: records.length > 1 ? records.length + " 条披露" : "",
-                records: records
+                key: groups[g].key, label: groups[g].key,
+                count: groups[g].count || items.length, items: items
             })
         }
+        vocabulary = payload.vocabulary || []
+        inboundRows = payload.inbound || []
+        categoryGroups = built
+        propertyRows = all
         expandedProps = ({})
-        propertyRows = built
+    }
+
+    // 移动分类：只改整理位置，取值和披露顺序都不动。
+    function askCategory(current, targets) {
+        if (!targets || targets.length === 0) return
+        pickerTargets = targets
+        categoryPicker.current = current
+        categoryPicker.open()
+    }
+
+    function applyCategory(category) {
+        if (pickerTargets.length === 0) return
+        bridge.categorizeProperties(JSON.stringify(pickerTargets), category)
+    }
+
+    function openSource(sourceId, start) {
+        app.openSource(sourceId, start)
+    }
+
+    function openCategorySettings() {
+        categoryEditor.text = page.vocabulary.join("\n")
+        categoryDialog.open()
+    }
+
+    // 补录：人工写一条披露，仍然先成为候选。
+    function openAddProperty() {
+        addPropertyField.text = ""
+        addValueField.text = ""
+        addQuoteField.text = ""
+        addCategoryField.currentIndex = Math.max(0, page.vocabulary.indexOf("其他"))
+        addPropertyDialog.open()
+    }
+
+    function submitAddProperty() {
+        var event = page.eventOptions[addEventField.currentIndex] || ({})
+        var node = page.detail.node || ({})
+        var sourceId = node.evidence ? node.evidence.source_id
+            : (node.disclosure ? node.disclosure.source_id : "")
+        bridge.addPropertyRecord({
+            node_id: page.selectedId,
+            property_id: addPropertyField.text,
+            value: addValueField.text,
+            event_id: event.id || "",
+            category: addCategoryField.currentText,
+            source: addSourceField.currentText,
+            quote: addQuoteField.text,
+            source_id: sourceId || ""
+        })
+        addPropertyDialog.close()
+    }
+
+    function saveCategorySettings() {
+        var lines = categoryEditor.text.split("\n")
+        var names = []
+        for (var i = 0; i < lines.length; ++i) {
+            var name = lines[i].trim()
+            if (name.length > 0 && name !== "其他" && names.indexOf(name) < 0) names.push(name)
+        }
+        if (names.length === 0) {
+            app.toast("至少要保留一个大类", true)
+            return
+        }
+        var config = {}
+        config[detail.node ? detail.node.node_type : "other"] = names
+        bridge.savePropertyCategories(JSON.stringify(config))
+        categoryDialog.close()
     }
 
     function jumpTo(id) {
@@ -191,6 +296,8 @@ Item {
                 page.query = ""
                 searchField.text = ""
                 propertyRows = []
+                categoryGroups = []
+                inboundRows = []
                 expandedProps = ({})
                 page.load()
             }
@@ -210,6 +317,23 @@ Item {
                 kindEditor.currentIndex = index >= 0 ? index : 0
             } else if (kind === "node_properties") {
                 page.applyProperties(payload)
+            } else if (kind === "property_categorize") {
+                app.toast("已移到「" + (payload.category || "") + "」", false)
+                if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
+            } else if (kind === "property_add") {
+                if (payload.status === "pending") {
+                    app.toast("已提交补录，去「审核」接受后生效", false)
+                } else {
+                    var first = (payload.diagnostics || [])[0] || ({})
+                    app.toast("补录未通过预检：" + (first.message || "未知原因"), true)
+                }
+            } else if (kind === "property_categories") {
+                var nodeType = page.detail.node ? page.detail.node.node_type : "other"
+                page.vocabulary = (payload.vocabulary || ({}) )[nodeType] || page.vocabulary
+                if (payload.saved) {
+                    app.toast("分类表已保存", false)
+                    if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
+                }
             } else if (kind === "node_edit") {
                 app.toast("已提交修订，等待审核", false)
             }
@@ -475,237 +599,157 @@ Item {
                                     font.pixelSize: 11
                                 }
                                 Item { Layout.fillWidth: true }
-                                Label {
-                                    text: "点开看披露序列"
-                                    color: t.muted
+                                Button {
+                                    objectName: "categoryModeButton"
+                                    text: page.groupByCategory ? "按大类" : "全部"
+                                    flat: true
                                     font.pixelSize: 10
-                                    visible: propertyRows.length > 0
+                                    onClicked: page.groupByCategory = !page.groupByCategory
+                                }
+                                Button {
+                                    objectName: "categorySettingsButton"
+                                    text: "分类表"
+                                    flat: true
+                                    font.pixelSize: 10
+                                    enabled: detail.node !== undefined && detail.node !== null
+                                    onClicked: page.openCategorySettings()
+                                }
+                                Button {
+                                    objectName: "addPropertyButton"
+                                    text: "补录"
+                                    flat: true
+                                    font.pixelSize: 10
+                                    enabled: page.selectedId.length > 0 && page.eventOptions.length > 0
+                                    onClicked: page.openAddProperty()
                                 }
                             }
 
+                            // 按大类：一个大类一行标题，下面是它底下的属性。
+                            // 分类只是整理位置，取值和披露顺序都不受影响。
                             Repeater {
-                                model: propertyRows
+                                objectName: "browseCategoryGroups"
+                                model: page.groupByCategory ? page.categoryGroups : []
 
                                 delegate: Column {
                                     required property var modelData
 
-                                    readonly property bool expanded: page.expandedProps[modelData.key] === true
-
                                     Layout.fillWidth: true
+                                    Layout.topMargin: 2
                                     spacing: 0
+                                    visible: modelData.items.length > 0
 
-                                    Rectangle {
+                                    RowLayout {
                                         width: parent.width
-                                        height: 46
-                                        radius: 4
-                                        color: propHover.hovered ? t.accentSoft : "transparent"
-
-                                        HoverHandler { id: propHover }
-
-                                        // Declared first so the labels above it win the click;
-                                        // the holder name is its own target.
-                                        MouseArea {
-                                            anchors.fill: parent
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: page.toggleProperty(modelData.key)
+                                        spacing: 6
+                                        Label {
+                                            text: modelData.label
+                                            color: t.muted
+                                            font.pixelSize: 11
+                                            font.weight: Font.DemiBold
                                         }
-
-                                        ColumnLayout {
-                                            anchors.fill: parent
-                                            anchors.leftMargin: 8
-                                            anchors.rightMargin: 8
-                                            anchors.topMargin: 4
-                                            anchors.bottomMargin: 4
-                                            spacing: 0
-
-                                            RowLayout {
-                                                Layout.fillWidth: true
-                                                spacing: 8
-                                                Label {
-                                                    text: (expanded ? "− " : "+ ") + modelData.label
-                                                    color: t.ink
-                                                    font.pixelSize: 12
-                                                    Layout.preferredWidth: 96
-                                                    elide: Text.ElideRight
-                                                }
-                                                Label {
-                                                    text: modelData.valueText
-                                                    color: modelData.valueNodeId.length > 0 ? t.accent : t.body
-                                                    font.pixelSize: 12
-                                                    font.underline: modelData.valueNodeId.length > 0
-                                                    elide: Text.ElideRight
-                                                    Layout.fillWidth: true
-
-                                                    MouseArea {
-                                                        anchors.fill: parent
-                                                        enabled: modelData.valueNodeId.length > 0
-                                                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                                        onClicked: page.jumpTo(modelData.valueNodeId)
-                                                    }
-                                                }
-                                                Label {
-                                                    text: modelData.scopeText
-                                                    color: t.accent
-                                                    font.pixelSize: 10
-                                                }
-                                                Label {
-                                                    visible: modelData.holderId.length > 0
-                                                    text: modelData.holderName
-                                                    color: t.accent
-                                                    font.pixelSize: 10
-                                                    font.underline: true
-                                                    MouseArea {
-                                                        anchors.fill: parent
-                                                        cursorShape: Qt.PointingHandCursor
-                                                        onClicked: page.jumpTo(modelData.holderId)
-                                                    }
-                                                }
-                                            }
-
-                                            Label {
-                                                Layout.fillWidth: true
-                                                visible: modelData.validFrom.length > 0
-                                                text: modelData.validFrom
-                                                    + (modelData.historyText.length > 0
-                                                        ? " · " + modelData.historyText : "")
-                                                color: t.muted
-                                                font.pixelSize: 10
-                                                elide: Text.ElideRight
-                                            }
+                                        Label {
+                                            text: modelData.count
+                                            color: t.muted
+                                            font.pixelSize: 10
+                                        }
+                                        Rectangle {
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: 1
+                                            color: t.line
                                         }
                                     }
-
                                     Repeater {
-                                        model: expanded ? modelData.records : []
+                                        model: modelData.items
 
-                                        delegate: Column {
+                                        delegate: PropertyItem {
                                             required property var modelData
-
                                             width: parent.width
-                                            leftPadding: 18
-                                            topPadding: 2
-                                            bottomPadding: 6
-                                            spacing: 2
-
-                                            RowLayout {
-                                                width: parent.width - parent.leftPadding
-                                                spacing: 6
-
-                                                Label {
-                                                    text: modelData.kind === "property_retraction"
-                                                        ? "撤回"
-                                                        : modelData.is_current ? "当前" : "历史"
-                                                    color: modelData.is_current ? t.ok : t.muted
-                                                    font.pixelSize: 10
-                                                    Layout.preferredWidth: 28
-                                                }
-                                                Label {
-                                                    Layout.fillWidth: true
-                                                    wrapMode: Text.Wrap
-                                                    text: modelData.kind === "property_retraction"
-                                                        ? "该说法已撤回"
-                                                        : modelData.value_node ? modelData.value_node.name
-                                                        : String(modelData.value === null
-                                                            || modelData.value === undefined
-                                                            ? "（空）" : modelData.value)
-                                                    color: modelData.value_node ? t.accent : t.body
-                                                    font.pixelSize: 11
-                                                    font.underline: !!modelData.value_node
-
-                                                    MouseArea {
-                                                        anchors.fill: parent
-                                                        enabled: !!modelData.value_node
-                                                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                                        onClicked: page.jumpTo(modelData.value_node.id)
-                                                    }
-                                                }
-                                            }
-                                            RowLayout {
-                                                width: parent.width - parent.leftPadding
-                                                spacing: 4
-
-                                                Label {
-                                                    text: "事件"
-                                                    color: t.muted
-                                                    font.pixelSize: 10
-                                                }
-                                                Label {
-                                                    text: modelData.event_name
-                                                        || modelData.event_id || "—"
-                                                    color: modelData.event_name ? t.accent : t.muted
-                                                    font.pixelSize: 10
-                                                    font.underline: !!modelData.event_name
-                                                    MouseArea {
-                                                        anchors.fill: parent
-                                                        cursorShape: Qt.PointingHandCursor
-                                                        onClicked: page.jumpTo(modelData.event_id)
-                                                    }
-                                                }
-                                                Label {
-                                                    text: "→ " + (modelData.valid_to_event || "至今")
-                                                    color: t.muted
-                                                    font.pixelSize: 10
-                                                    elide: Text.ElideRight
-                                                }
-                                                Label {
-                                                    Layout.fillWidth: true
-                                                    text: "· 位置 " + (modelData.disclosure
-                                                        ? modelData.disclosure.start : "—")
-                                                        + " · " + (modelData.source || "未标注来源")
-                                                    color: t.muted
-                                                    font.pixelSize: 10
-                                                    elide: Text.ElideRight
-                                                }
-                                            }
-
-                                            RowLayout {
-                                                width: parent.width - parent.leftPadding
-                                                spacing: 4
-                                                visible: (modelData.related || []).length > 0
-
-                                                Label {
-                                                    text: "关联"
-                                                    color: t.muted
-                                                    font.pixelSize: 10
-                                                }
-                                                Repeater {
-                                                    model: modelData.related || []
-
-                                                    delegate: Label {
-                                                        required property var modelData
-                                                        text: modelData.name
-                                                        color: t.accent
-                                                        font.pixelSize: 10
-                                                        font.underline: true
-                                                        MouseArea {
-                                                            anchors.fill: parent
-                                                            cursorShape: Qt.PointingHandCursor
-                                                            onClicked: page.jumpTo(modelData.id)
-                                                        }
-                                                    }
-                                                }
-                                                Item { Layout.fillWidth: true }
-                                            }
-                                            Label {
-                                                width: parent.width - parent.leftPadding
-                                                wrapMode: Text.Wrap
-                                                visible: !!modelData.evidence
-                                                text: modelData.evidence ? "「" + modelData.evidence.quote + "」" : ""
-                                                color: t.muted
-                                                font.pixelSize: 10
-                                            }
+                                            row: modelData
+                                            host: page
                                         }
                                     }
                                 }
                             }
 
-                            Label {
+                            // 全部：不分组，按属性名排。
+                            Repeater {
+                                model: page.groupByCategory ? [] : page.propertyRows
+
+                                delegate: PropertyItem {
+                                    required property var modelData
+                                    width: parent.width
+                                    row: modelData
+                                    host: page
+                                }
+                            }
+
+                            // 反向引用：别的节点上的记录指向本节点。同一份记录，
+                            // 第二个入口，不复制、不改披露位置。
+                            Column {
                                 Layout.fillWidth: true
-                                Layout.topMargin: 4
-                                visible: propertyRows.length === 0
-                                text: detail.node ? "这个节点没有属性记录。" : ""
-                                color: t.muted
-                                font.pixelSize: 11
+                                Layout.topMargin: 6
+                                spacing: 2
+                                visible: inboundRows.length > 0
+
+                                RowLayout {
+                                    width: parent.width
+                                    spacing: 6
+                                    Label {
+                                        text: "反向引用"
+                                        color: t.muted
+                                        font.pixelSize: 11
+                                        font.weight: Font.DemiBold
+                                    }
+                                    Label {
+                                        text: inboundRows.length
+                                        color: t.muted
+                                        font.pixelSize: 10
+                                    }
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: 1
+                                        color: t.line
+                                    }
+                                }
+                                Repeater {
+                                    objectName: "browseInboundRows"
+                                    model: inboundRows
+
+                                    delegate: RowLayout {
+                                        required property var modelData
+                                        width: parent.width
+                                        spacing: 6
+
+                                        Label {
+                                            text: modelData.category
+                                            color: t.muted
+                                            font.pixelSize: 10
+                                            Layout.preferredWidth: 76
+                                            elide: Text.ElideRight
+                                        }
+                                        Label {
+                                            text: modelData.node_name
+                                            color: t.accent
+                                            font.pixelSize: 11
+                                            font.underline: true
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: page.jumpTo(modelData.node_id)
+                                            }
+                                        }
+                                        Label {
+                                            text: "· " + (page.propertyLabels[modelData.property_id]
+                                                || modelData.property_id) + " = "
+                                                + (modelData.node_type ? "" : "")
+                                                + page.nameOf(modelData.value)
+                                            color: t.body
+                                            font.pixelSize: 11
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -740,6 +784,182 @@ Item {
                         enabled: page.selectedId.length > 0
                         onClicked: bridge.reviseNode(page.selectedId, {retracted: true})
                     }
+                }
+            }
+        }
+    }
+
+    // 移动分类：只改整理位置。取值、披露顺序、原文引文都不动。
+    Dialog {
+        id: categoryPicker
+        objectName: "categoryPicker"
+        property string current: ""
+        title: "移到哪个大类"
+        modal: true
+        anchors.centerIn: parent
+        width: 320
+
+        contentItem: ColumnLayout {
+            spacing: 4
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: "分类只决定显示位置，不改取值，也不改披露顺序。"
+                color: t.muted
+                font.pixelSize: 11
+            }
+            Repeater {
+                model: page.vocabulary
+                delegate: Button {
+                    required property string modelData
+                    Layout.fillWidth: true
+                    flat: true
+                    highlighted: modelData === categoryPicker.current
+                    text: modelData + (modelData === categoryPicker.current ? "  ·当前" : "")
+                    onClicked: {
+                        page.applyCategory(modelData)
+                        categoryPicker.close()
+                    }
+                }
+            }
+            Button {
+                Layout.fillWidth: true
+                flat: true
+                text: "取消"
+                onClicked: categoryPicker.close()
+            }
+        }
+    }
+
+    // 分类表：每行一个大类，顺序即显示顺序；「其他」固定在最后。
+    Dialog {
+        id: categoryDialog
+        objectName: "categoryDialog"
+        title: "分类表 · " + (detail.node
+            ? (page.typeLabels[detail.node.node_type] || detail.node.node_type) : "")
+        modal: true
+        anchors.centerIn: parent
+        width: 380
+
+        contentItem: ColumnLayout {
+            spacing: 6
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: "每行一个大类，顺序即显示顺序。「其他」始终在最后，不用写。"
+                color: t.muted
+                font.pixelSize: 11
+            }
+            ScrollView {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 220
+                TextArea {
+                    id: categoryEditor
+                    objectName: "categoryEditor"
+                    wrapMode: TextArea.NoWrap
+                    font.pixelSize: 13
+                    selectByMouse: true
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: "取消"
+                    flat: true
+                    onClicked: categoryDialog.close()
+                }
+                Button {
+                    objectName: "categorySaveButton"
+                    text: "保存"
+                    highlighted: true
+                    onClicked: page.saveCategorySettings()
+                }
+            }
+        }
+    }
+
+    // 补录：人工写一条披露。它仍然先成为候选，接受后才进正式资料。
+    Dialog {
+        id: addPropertyDialog
+        objectName: "addPropertyDialog"
+        title: "补一条属性"
+        modal: true
+        anchors.centerIn: parent
+        width: 460
+
+        contentItem: ColumnLayout {
+            spacing: 6
+
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: "补录也会先成为候选，到「审核」接受后才进正式资料。引文逐字复制，程序会核对。"
+                color: t.muted
+                font.pixelSize: 11
+            }
+            GridLayout {
+                Layout.fillWidth: true
+                columns: 2
+                columnSpacing: 8
+                rowSpacing: 6
+
+                Label { text: "属性名"; color: t.muted; font.pixelSize: 11 }
+                TextField {
+                    id: addPropertyField
+                    objectName: "addPropertyField"
+                    Layout.fillWidth: true
+                    placeholderText: "例如 state"
+                }
+                Label { text: "值"; color: t.muted; font.pixelSize: 11 }
+                TextField {
+                    id: addValueField
+                    objectName: "addValueField"
+                    Layout.fillWidth: true
+                    placeholderText: "照原文写"
+                }
+                Label { text: "披露事件"; color: t.muted; font.pixelSize: 11 }
+                ComboBox {
+                    id: addEventField
+                    objectName: "addEventField"
+                    Layout.fillWidth: true
+                    model: page.eventOptions.map(function (item) { return item.name })
+                }
+                Label { text: "大类"; color: t.muted; font.pixelSize: 11 }
+                ComboBox {
+                    id: addCategoryField
+                    objectName: "addCategoryField"
+                    Layout.fillWidth: true
+                    model: page.vocabulary
+                }
+                Label { text: "来源"; color: t.muted; font.pixelSize: 11 }
+                ComboBox {
+                    id: addSourceField
+                    objectName: "addSourceField"
+                    Layout.fillWidth: true
+                    model: ["narration", "speech", "thought", "observation", "document"]
+                }
+                Label { text: "原文引文"; color: t.muted; font.pixelSize: 11 }
+                TextField {
+                    id: addQuoteField
+                    objectName: "addQuoteField"
+                    Layout.fillWidth: true
+                    placeholderText: "逐字复制；可留空，但补上才能回查"
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: "取消"
+                    flat: true
+                    onClicked: addPropertyDialog.close()
+                }
+                Button {
+                    objectName: "addPropertySubmit"
+                    text: "提交补录"
+                    highlighted: true
+                    onClicked: page.submitAddProperty()
                 }
             }
         }

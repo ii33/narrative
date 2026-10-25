@@ -127,6 +127,21 @@ class GraphStore:
     def revision(self) -> int:
         return self.info()["revision"]
 
+    def meta(self, key: str) -> str | None:
+        """One meta value, or None. Config lives here, not in the revision chain."""
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Store a config value. Review revisions are untouched on purpose."""
+        with self.connect(write=True) as db:
+            db.execute(
+                "INSERT INTO meta(key,value) VALUES (?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )
+
     def sources(self, *, include_text: bool = False) -> list[dict]:
         fields = "*" if include_text else "id,title,hash,created_at,length(text) AS length"
         with self.connect() as db:

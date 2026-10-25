@@ -131,6 +131,15 @@ class GraphPropertyFacade:
     def world_state(self, at=None, as_of_revision: int | None = None) -> dict:
         return self.properties.world_state(at, as_of_revision=as_of_revision)
 
+    def categories(self) -> dict[str, list[str]]:
+        return self.properties.categories()
+
+    def set_categories(self, config: object) -> dict:
+        return self.properties.set_categories(config)
+
+    def categorize(self, targets: list[str], category: str, note: str = "") -> dict:
+        return self.properties.categorize(targets, category, note)
+
 
 class GraphChangeFacade:
     """Unified mixed candidate: graph objects and property records together."""

@@ -14,6 +14,7 @@ from . import dependency_core
 _KINDS = {
     "property_definition",
     "property_value",
+    "property_categorization",
     "property_retraction",
 }
 # "any" means the shape is not fixed: one property may hold a number, a
@@ -32,7 +33,11 @@ _FIELDS = {
     | {"value_type", "cardinality", "persistence", "owner_node_types", "target_node_types"},
     "property_value": _COMMON | _SCOPED_FIELDS | _DEPENDENCY_FIELDS
     | {"node_id", "property_id", "value", "event_id", "anchor_basis", "applies_to",
-       "source", "related_nodes"},
+       "source", "related_nodes", "category"},
+    # A category move is editorial, not a disclosure: it points at one value
+    # record and says where to show it. No evidence — nothing here comes from
+    # the source text.
+    "property_categorization": _COMMON | {"target_id", "category", "note"},
     "property_retraction": _COMMON | {"target_id", "reason"},
 }
 
@@ -233,6 +238,7 @@ def validate_records(
         missing = {
             "property_definition": {"value_type", "cardinality", "persistence"},
             "property_value": {"node_id", "property_id", "value", "event_id"},
+            "property_categorization": {"target_id", "category"},
             "property_retraction": {"target_id", "reason"},
         }[kind] - set(record)
         if extra:
@@ -299,6 +305,22 @@ def validate_records(
                     _issue("DEFINITION", "target_node_types only applies to node properties", rid)
                 )
             continue
+        if kind == "property_categorization":
+            target_id = record.get("target_id")
+            target = next((item for item in combined if item.get("id") == target_id), None)
+            if target is None or target.get("kind") not in {"property_value", "property_definition"}:
+                issues.append(
+                    _issue("CATEGORY_TARGET", "categorization must target a property record", rid)
+                )
+            category = record.get("category")
+            if not isinstance(category, str) or not category.strip():
+                issues.append(_issue("CATEGORY", "categorization requires a category", rid))
+            elif len(category.strip()) > 20:
+                issues.append(_issue("CATEGORY", "category name is too long", rid))
+            note = record.get("note")
+            if note is not None and not isinstance(note, str):
+                issues.append(_issue("CATEGORY", "note must be a string", rid))
+            continue
         if kind == "property_retraction":
             target_id = record.get("target_id")
             target = next((item for item in combined if item.get("id") == target_id), None)
@@ -355,6 +377,14 @@ def validate_records(
             source = record.get("source")
             if source is not None and not isinstance(source, str):
                 issues.append(_issue("SOURCE", "source must be a string", rid))
+            # A display grouping chosen at extraction time. It never has to be
+            # right: an unusable one is audited, not rejected, because the value
+            # itself is still correct.
+            category = record.get("category")
+            if category is not None and (
+                not isinstance(category, str) or not category.strip() or len(category) > 20
+            ):
+                issues.append(_issue("CATEGORY", "category must be a short non-empty string", rid))
             # Who else the sentence explicitly involves: observer, speaker,
             # blamed party, carrier document. Not the holder — that is scope.
             related = record.get("related_nodes")

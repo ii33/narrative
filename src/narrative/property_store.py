@@ -11,15 +11,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from . import property_categories
 from .graph_store import GraphStore
 from .order_ids import order_key
 
-PROPERTY_CONTRACT_VERSION = "property-state/5"
+PROPERTY_CONTRACT_VERSION = "property-state/6"
 PROPERTY_RECORD_KINDS = (
     "property_definition",
-    "property_initial",
-    "property_observation",
-    "event_change",
+    "property_value",
+    "property_categorization",
     "property_retraction",
 )
 PROPERTY_EFFECT_OPS = ("set", "add", "remove", "unknown", "absent")
@@ -39,6 +39,18 @@ def _issue(code: str, message: str, object_id: str | None = None, severity: str 
 
 # Sorts after every real offset inside one event.
 _AFTER_EVENT = 10**12
+
+
+def _categorization_overrides(records: list[dict]) -> dict[str, str]:
+    """Current category of each moved record: the last accepted move wins."""
+    overrides: dict[str, str] = {}
+    for record in records:
+        if record.get("kind") != "property_categorization":
+            continue
+        target, category = record.get("target_id"), record.get("category")
+        if isinstance(target, str) and isinstance(category, str) and category.strip():
+            overrides[target] = category.strip()
+    return overrides
 
 
 class PropertyStore:
@@ -566,28 +578,139 @@ class PropertyStore:
             self.accepted_records(snapshot["revision"]),
             snapshot.get("nodes", []),
             node_ids=node_ids,
+            categories=property_categories.load(self.store),
         )
 
+    # -- display categories --------------------------------------------
+    def categories(self) -> dict[str, list[str]]:
+        """The project's category vocabulary, one list per node type."""
+        return property_categories.load(self.store)
+
+    def set_categories(self, config: object) -> dict:
+        """Replace the vocabulary.
+
+        A rename is migrated: without it, every record whose category was derived
+        from the old name would quietly drop into 其他, which looks like the
+        rename lost data. Records are moved by appending categorization records,
+        exactly as a manual move does.
+        """
+        previous = property_categories.load(self.store)
+        vocabulary = property_categories.save(self.store, config)
+        renamed = property_categories.renames(previous, vocabulary)
+        moved: list[str] = []
+        if renamed:
+            records = self.accepted_records()
+            nodes = {node["id"]: node for node in self.store.snapshot().get("nodes", [])}
+            overrides = _categorization_overrides(records)
+            pairs = []
+            for record in records:
+                if record.get("kind") != "property_value":
+                    continue
+                node_type = (nodes.get(record.get("node_id")) or {}).get("node_type")
+                if not isinstance(node_type, str):
+                    continue
+                category, _ = property_categories.resolve(record, node_type, previous, overrides)
+                target = renamed.get((node_type, category))
+                if target:
+                    pairs.append((str(record.get("id")), target))
+            if pairs:
+                moved = self._apply_categorizations(pairs, "分类改名迁移")["moved"]
+        return {"vocabulary": vocabulary, "moved": moved}
+
+    def _apply_categorizations(self, pairs: list[tuple[str, str]], note: str) -> dict:
+        """Append one categorization record per pair, in a single revision."""
+        from uuid import uuid4
+
+        current = _categorization_overrides(self.accepted_records())
+        records = [
+            {
+                "kind": "property_categorization",
+                "id": f"cat_{uuid4().hex[:12]}",
+                "target_id": target,
+                "category": category,
+                **({"note": note} if note else {}),
+            }
+            for target, category in pairs
+            if current.get(target) != category
+        ]
+        if not records:
+            return {"revision": self.store.revision, "moved": [], "category": ""}
+        revision = self.store.revision
+        candidate = self.propose(
+            records, revision, source="correction", note=note or "移动分类"
+        )
+        return {
+            "revision": self.accept(candidate, 1),
+            "moved": [record["target_id"] for record in records],
+            "category": records[0]["category"],
+        }
+
+    def categorize(
+        self, targets: list[str], category: str, note: str = ""
+    ) -> dict:
+        """Move disclosures to a category.
+
+        Moving is a human editorial act, so it is applied immediately — but it is
+        still an append-only record, not a rewrite: the earlier grouping stays in
+        the history and the value itself is untouched.
+        """
+        category = (category or "").strip()
+        if not category:
+            raise ValueError("分类不能为空")
+        if len(category) > 20:
+            raise ValueError("分类名不能超过 20 字")
+        if not isinstance(targets, list) or not targets:
+            raise ValueError("请提供要移动的记录")
+        accepted = {
+            record["id"]: record
+            for record in self.accepted_records()
+            if isinstance(record.get("id"), str)
+        }
+        unknown = [target for target in targets if target not in accepted]
+        if unknown:
+            raise ValueError(f"记录不存在：{'、'.join(unknown[:3])}")
+        wrong = [
+            target for target in targets
+            if accepted[target].get("kind") != "property_value"
+        ]
+        if wrong:
+            raise ValueError("只有属性取值记录可以移动分类")
+        result = self._apply_categorizations(
+            [(target, category) for target in dict.fromkeys(targets)],
+            note or f"移动分类：{category}",
+        )
+        return result | {"category": category}
+
     def node_properties(self, node_id: str, as_of_revision: int | None = None) -> dict:
-        """Every property a node carries, with its full disclosure sequence.
+        """Every property a node carries, grouped for reading.
 
         One record is one disclosure, so a property can hold several — a
         restatement, a correction, a contradiction. Records are ordered by
         (event number, own source position) and the last one is what the reader
         saw last, which is not the same as the last one written.
+
+        Grouping is by display category, resolved per record: a human move wins,
+        then the category the extractor wrote, then a name/value hint, then 其他.
+        A property whose disclosures fall into two categories is shown in both,
+        each slice carrying only its own records — the alternative would hide a
+        record under a heading it does not belong to.
         """
         snapshot = self.store.snapshot(as_of_revision)
         records = self.accepted_records(snapshot["revision"])
+        config = property_categories.load(self.store)
         definitions = {
             record["id"]: record for record in records
             if record.get("kind") == "property_definition"
         }
         # Names are resolved here so a reader never sees a bare id: the event a
         # disclosure hangs on, and every node the record points at.
-        names = {
-            node["id"]: node.get("name") or node["id"]
-            for node in snapshot.get("nodes", [])
-        }
+        nodes = {node["id"]: node for node in snapshot.get("nodes", [])}
+        names = {node_id_: node.get("name") or node_id_ for node_id_, node in nodes.items()}
+        node = nodes.get(node_id, {})
+        node_type = node.get("node_type")
+        # A move is one record pointing at one disclosure; the last accepted one
+        # is the current grouping, so moving twice keeps the second answer.
+        overrides = _categorization_overrides(records)
 
         def node_ref(value: object) -> dict | None:
             """A node-valued property stores an id; the reader wants the name."""
@@ -615,58 +738,135 @@ class PropertyStore:
         items: list[dict] = []
         for (property_id, scope, holder_id), rows in groups.items():
             ordered = sorted(rows, key=position)
-            latest = ordered[-1]
             definition = definitions.get(property_id) or {}
             node_valued = definition.get("value_type") in {"node", "either"}
-            values_only = [row for row in ordered if row.get("kind") == "property_value"]
-            items.append({
-                "property_id": property_id,
-                # A value is valid from the disclosure that states it until the
-                # next disclosure of the same property. That window is what makes
-                # the sequence a history rather than a pile of statements.
-                "current_from_event": names.get(latest.get("event_id") or ""),
-                "current_from_start": (latest.get("disclosure") or {}).get("start"),
-                "current_retracted": latest.get("kind") == "property_retraction",
-                "history_count": max(0, len(values_only) - 1),
-                "value_node": node_ref(latest.get("value")) if node_valued else None,
-                "scope": scope,
-                "holder_id": holder_id,
-                "holder_name": names.get(holder_id) if holder_id else None,
-                "value_type": definition.get("value_type"),
-                "value": latest.get("value"),
-                "event_id": latest.get("event_id"),
-                "start": (latest.get("disclosure") or {}).get("start"),
-                "retracted": latest.get("kind") == "property_retraction",
-                "records": [
-                    {
-                        "id": row.get("id"),
-                        "kind": row.get("kind"),
-                        "value": row.get("value"),
-                        "value_node": node_ref(row.get("value")) if node_valued else None,
-                        "event_id": row.get("event_id"),
-                        "event_name": names.get(row.get("event_id") or ""),
-                        # Validity: from this disclosure up to the next one. The
-                        # last entry is the current value and stays open.
-                        "is_current": index == len(ordered) - 1
-                        and row.get("kind") != "property_retraction",
-                        "valid_to_event": names.get(ordered[index + 1].get("event_id") or "")
-                        if index + 1 < len(ordered) else None,
-                        "disclosure": row.get("disclosure"),
-                        "source": row.get("source"),
-                        "anchor_basis": row.get("anchor_basis"),
-                        "holder_id": row.get("holder_id"),
-                        "holder_name": names.get(row.get("holder_id") or ""),
-                        "related": [
-                            {"id": related_id, "name": names.get(related_id) or related_id}
-                            for related_id in (row.get("related_nodes") or [])
-                        ],
-                        "evidence": row.get("evidence"),
-                    }
-                    for index, row in enumerate(ordered)
-                ],
-            })
+            # Validity is a property of the whole sequence, so it is computed
+            # before the sequence is sliced by category.
+            decorated: list[dict] = []
+            for index, row in enumerate(ordered):
+                category, category_source = property_categories.resolve(
+                    row, node_type, config, overrides
+                )
+                decorated.append({
+                    "id": row.get("id"),
+                    "kind": row.get("kind"),
+                    "value": row.get("value"),
+                    "value_node": node_ref(row.get("value")) if node_valued else None,
+                    "event_id": row.get("event_id"),
+                    "event_name": names.get(row.get("event_id") or ""),
+                    # From this disclosure up to the next one; the last entry is
+                    # the current value and stays open.
+                    "is_current": index == len(ordered) - 1
+                    and row.get("kind") != "property_retraction",
+                    "valid_to_event": names.get(ordered[index + 1].get("event_id") or "")
+                    if index + 1 < len(ordered) else None,
+                    "disclosure": row.get("disclosure"),
+                    "source": row.get("source"),
+                    "anchor_basis": row.get("anchor_basis"),
+                    "holder_id": row.get("holder_id"),
+                    "holder_name": names.get(row.get("holder_id") or ""),
+                    "related": [
+                        {"id": related_id, "name": names.get(related_id) or related_id}
+                        for related_id in (row.get("related_nodes") or [])
+                    ],
+                    "evidence": row.get("evidence"),
+                    "category": category,
+                    "category_source": category_source,
+                })
+            slices: dict[str, list[dict]] = {}
+            for entry in decorated:
+                slices.setdefault(entry["category"], []).append(entry)
+            for category, entries in slices.items():
+                latest = entries[-1]
+                values_only = [entry for entry in entries if entry.get("kind") == "property_value"]
+                items.append({
+                    "property_id": property_id,
+                    "category": category,
+                    "category_source": latest["category_source"],
+                    # The same property may sit in another category too; the
+                    # reader is told rather than shown a silently partial list.
+                    "other_categories": sorted(name for name in slices if name != category),
+                    "current_from_event": names.get(latest.get("event_id") or ""),
+                    "current_from_start": (latest.get("disclosure") or {}).get("start"),
+                    "current_retracted": latest.get("kind") == "property_retraction",
+                    "history_count": max(0, len(values_only) - 1),
+                    "value_node": node_ref(latest.get("value")) if node_valued else None,
+                    "scope": scope,
+                    "holder_id": holder_id,
+                    "holder_name": names.get(holder_id) if holder_id else None,
+                    "value_type": definition.get("value_type"),
+                    "value": latest.get("value"),
+                    "event_id": latest.get("event_id"),
+                    "start": (latest.get("disclosure") or {}).get("start"),
+                    "retracted": latest.get("kind") == "property_retraction",
+                    "record_count": len(entries),
+                    "records": entries,
+                })
         items.sort(key=lambda item: (item["property_id"], item["scope"], item["holder_id"] or ""))
-        return {"node_id": node_id, "revision": snapshot["revision"], "properties": items}
+        ordered_categories = property_categories.order_categories(
+            sorted({item["category"] for item in items}), node_type, config
+        )
+        items.sort(key=lambda item: (
+            ordered_categories.index(item["category"]),
+            item["property_id"], item["scope"], item["holder_id"] or "",
+        ))
+
+        # The other end of a relation: a record stored on another node whose
+        # value points here. Same record, second entrance — nothing is copied.
+        inbound: list[dict] = []
+        for record in records:
+            if record.get("kind") != "property_value" or record.get("node_id") == node_id:
+                continue
+            value = record.get("value")
+            hit = value == node_id or (
+                isinstance(value, list) and node_id in value
+            )
+            if not hit or not record.get("node_id"):
+                continue
+            owner_type = nodes.get(record["node_id"], {}).get("node_type")
+            category, category_source = property_categories.resolve(
+                record, owner_type, config, overrides
+            )
+            inbound.append({
+                "record_id": record.get("id"),
+                "property_id": record.get("property_id"),
+                "category": property_categories.inverse_category(category, node_type, config),
+                "source_category": category,
+                "category_source": category_source,
+                "node_id": record["node_id"],
+                "node_name": names.get(record["node_id"]) or record["node_id"],
+                "node_type": owner_type,
+                "value": value,
+                "event_id": record.get("event_id"),
+                "event_name": names.get(record.get("event_id") or ""),
+                "start": (record.get("disclosure") or {}).get("start"),
+                "scope": record.get("scope", "world"),
+                "holder_id": record.get("holder_id"),
+                "holder_name": names.get(record.get("holder_id") or ""),
+                "source": record.get("source"),
+                "evidence": record.get("evidence"),
+            })
+        inbound.sort(key=lambda item: (item["category"], item["node_name"], item["property_id"]))
+
+        return {
+            "node_id": node_id,
+            "node_type": node_type,
+            "revision": snapshot["revision"],
+            "vocabulary": property_categories.vocabulary_for(node_type, config),
+            "categories": [
+                {
+                    "key": category,
+                    "count": sum(1 for item in items if item["category"] == category),
+                    "record_count": sum(
+                        item["record_count"] for item in items if item["category"] == category
+                    ),
+                    "items": [item for item in items if item["category"] == category],
+                }
+                for category in ordered_categories
+            ],
+            "properties": items,
+            "inbound": inbound,
+        }
 
     @staticmethod
     def _pairs(records: list[dict]) -> set[tuple[str, str]]:
@@ -730,3 +930,4 @@ class PropertyStore:
     property_disclosure_state = disclosure_state
     property_history = history
     property_world_state = world_state
+    property_categorize = categorize

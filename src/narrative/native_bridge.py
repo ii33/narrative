@@ -434,6 +434,139 @@ class NativeBridge(QObject):
 
         self._project_task("node_properties", work)
 
+    @Slot()
+    def loadPropertyCategories(self) -> None:
+        """The display vocabulary per node type, one list for each type."""
+
+        def work(ops) -> dict:
+            return {"vocabulary": ops.property_categories()}
+
+        self._project_task("property_categories", work)
+
+    @Slot(str)
+    def savePropertyCategories(self, config_json: str) -> None:
+        """Replace the vocabulary. Existing records keep their own category."""
+        try:
+            config = json.loads(config_json)
+        except json.JSONDecodeError as exc:
+            self.errorOccurred.emit("property_categories", f"分类配置 JSON 无效：{exc.msg}")
+            return
+
+        def work(ops) -> dict:
+            result = ops.set_property_categories(config)
+            return {
+                "vocabulary": result["vocabulary"],
+                "saved": True,
+                "moved": len(result.get("moved") or []),
+            }
+
+        self._project_task("property_categories", work)
+
+    @Slot(str, str)
+    def categorizeProperties(self, targets_json: str, category: str) -> None:
+        """Move disclosures to a category. Appends a record; nothing is rewritten."""
+        try:
+            targets = json.loads(targets_json)
+        except json.JSONDecodeError as exc:
+            self.errorOccurred.emit("property_categorize", f"记录 ID 列表无效：{exc.msg}")
+            return
+        if not isinstance(targets, list) or not all(isinstance(item, str) for item in targets):
+            self.errorOccurred.emit("property_categorize", "请提供记录 ID 数组")
+            return
+
+        def work(ops) -> dict:
+            return ops.property_categorize([str(item) for item in targets], category)
+
+        self._project_task("property_categorize", work)
+
+    @Slot("QVariantMap")
+    def addPropertyRecord(self, payload: dict) -> None:
+        """Stage one hand-written disclosure. Acceptance still happens on the review page.
+
+        The quote is optional but checked the same way as a model's: it has to be
+        an exact, unique substring of the source, or the precheck refuses it.
+        """
+        from uuid import uuid4
+
+        node_id = str(payload.get("node_id") or "").strip()
+        property_id = str(payload.get("property_id") or "").strip()
+        event_id = str(payload.get("event_id") or "").strip()
+        if not node_id or not property_id or not event_id:
+            self.errorOccurred.emit("property_add", "节点、属性名和披露事件都要填")
+            return
+        value = payload.get("value")
+        if value is None or (isinstance(value, str) and not value.strip()):
+            self.errorOccurred.emit("property_add", "值不能为空")
+            return
+        record: dict = {
+            "kind": "property_value",
+            "id": f"manual_{uuid4().hex[:12]}",
+            "node_id": node_id,
+            "property_id": property_id,
+            "value": value,
+            "event_id": event_id,
+            # A human picked the anchor, so it is stated rather than inferred.
+            "anchor_basis": "model",
+        }
+        quote = str(payload.get("quote") or "").strip()
+        source_id = str(payload.get("source_id") or "").strip()
+        start = payload.get("start")
+        start = start if isinstance(start, int) and start >= 0 else None
+        if quote and source_id:
+            record["evidence"] = {"source_id": source_id, "quote": quote}
+        source = str(payload.get("source") or "").strip()
+        if source:
+            record["source"] = source
+        category = str(payload.get("category") or "").strip()
+        if category:
+            record["category"] = category
+
+        def work(ops) -> dict:
+            revision = ops.graph_project_info()["revision"]
+            # Where the reader meets this sentence: the quote is the honest way
+            # to say it, so the offset is derived from it rather than typed.
+            if quote and source_id:
+                found = ops.locate(source_id, quote)
+                if len(found) == 1:
+                    record["disclosure"] = {
+                        "source_id": source_id, "start": found[0]["start"],
+                    }
+                elif len(found) > 1 and start is None:
+                    return {
+                        "status": "precheck_failed",
+                        "diagnostics": [{
+                            "code": "EVIDENCE", "severity": "error",
+                            "object_id": record["id"],
+                            "message": "这段引文在原文中出现多次，请写长一点以唯一定位",
+                        }],
+                    }
+            records: list[dict] = []
+            # A hand-written property may be the first use of its name; without a
+            # definition the value cannot be checked at all.
+            defined = any(
+                item.get("kind") == "property_definition" and item.get("id") == property_id
+                for item in ops.property_records()
+            )
+            if not defined:
+                records.append({
+                    "kind": "property_definition", "id": property_id,
+                    "value_type": "any", "cardinality": "one",
+                    "persistence": "until_changed",
+                })
+            records.append(record)
+            diagnostics = ops.property_precheck(records, revision)
+            if any(item.get("severity") == "error" for item in diagnostics):
+                return {"status": "precheck_failed", "diagnostics": diagnostics}
+            candidate = ops.property_propose(
+                records, revision, source="manual", note="人工补录"
+            )
+            return {
+                "status": "pending", "candidate_id": candidate,
+                "diagnostics": diagnostics,
+            }
+
+        self._project_task("property_add", work)
+
     @Slot(str, int)
     def acceptPropertyCandidate(self, candidate_id: str, version: int) -> None:
         """Accept a staged property candidate; the human action stays explicit."""

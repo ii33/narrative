@@ -127,9 +127,9 @@ v6 图项目。两层：来源、对象。对象之间不再有断言层——�
 现在图里只有节点、语境、时间轴、来源顺序和属性记录。场景与事件的包含关系用节点字段
 `events`——一条记录说清"这个场景里有哪些事"，不另建边。
 
-属性记录也只有三种：`property_definition`、`property_value`、`property_retraction`。
-旧的 `property_initial` / `property_observation` / `event_change` 已从代码中删除——
-包括校验、求值和示例。前期开发不保留兼容路径，留着只会让人误以为还能用。
+属性记录有四种：`property_definition`、`property_value`、`property_categorization`、
+`property_retraction`。旧的 `property_initial` / `property_observation` / `event_change`
+已从代码中删除——包括校验、求值和示例。前期开发不保留兼容路径，留着只会让人误以为还能用。
 
 ## 陈述层之二：属性记录
 
@@ -138,8 +138,12 @@ v6 图项目。两层：来源、对象。对象之间不再有断言层——�
 | 记录 | 作用 |
 | --- | --- |
 | `property_definition` | 值类型、基数、持续性 |
-| `property_value` | `node_id` + `property_id` + `value` + `event_id` + `anchor_basis` + 可选 `applies_to` / `source` / `related_nodes` / `scope` / `holder_id` + 证据 |
+| `property_value` | `node_id` + `property_id` + `value` + `event_id` + `anchor_basis` + 可选 `applies_to` / `source` / `related_nodes` / `scope` / `holder_id` / `category` + 证据 |
+| `property_categorization` | 把某条取值记录移到另一个显示大类：`target_id` + `category`。整理动作，不是披露，没有证据 |
 | `property_retraction` | 撤回序列里的某一条：行保留供审计，读取时过滤 |
+
+`category` 只管显示位置，与 `scope` 各管一件事；分片规则与移动方式见
+[`PROPERTY_CATEGORIES.md`](PROPERTY_CATEGORIES.md)。
 
 ### `event_id` 是什么
 
