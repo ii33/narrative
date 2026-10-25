@@ -73,6 +73,7 @@ def _seed(path: Path) -> Path:
                 {"kind": "node", "id": "3", "node_type": "item", "name": "铜钥匙"},
                 {"kind": "node", "id": "4", "node_type": "event", "name": "开场"},
                 {"kind": "node", "id": "5", "node_type": "event", "name": "后来又过了些日子"},
+                {"kind": "node", "id": "6", "node_type": "item", "name": "令牌"},
             ],
             ops.graph_project_info()["revision"],
         ),
@@ -103,6 +104,9 @@ def _seed(path: Path) -> Path:
                 # 手镯的状态在更晚的事件才披露，用来验证阅读位置。
                 {"kind": "property_value", "id": "v6", "node_id": "3",
                  "property_id": "state", "value": "完好无损", "event_id": "5"},
+                # 林舟在更晚的事件才拿到令牌：反向引用也要跟着阅读位置。
+                {"kind": "property_value", "id": "v7", "node_id": "6",
+                 "property_id": "holder", "value": "1", "event_id": "5"},
             ],
             ops.graph_project_info()["revision"],
             source="manual",
@@ -241,6 +245,54 @@ def test_editing_the_vocabulary_changes_the_grouping(workspace) -> None:
     assert _value(page.property("vocabulary"))[1] == "外形"
     groups = _value(page.property("categoryGroups"))
     assert [group["key"] for group in groups] == ["外形", "能力与身体状态"]
+
+
+def test_stepping_the_reading_position(workspace) -> None:
+    """上一个/下一个按事件走，两头分别接上「最新」和第一个事件。"""
+    app, _bridge, page, results, _errors = workspace
+    page.select("3")
+    _pump(app, results, "detail", "3")
+    _pump(app, results, "node_properties", "3")
+    app.processEvents()
+
+    # 从「最新」往回退一步，落在最后一个事件上。
+    page.stepCut(-1)
+    assert page.property("cutEventId") == "5"
+    _pump(app, results, "node_properties", "3")
+
+    page.stepCut(-1)
+    assert page.property("cutEventId") == "4"
+
+    # 已经是第一个事件，再往前不动。
+    page.stepCut(-1)
+    assert page.property("cutEventId") == "4"
+
+    page.stepCut(1)
+    assert page.property("cutEventId") == "5"
+
+    # 从最后一个事件再往后，回到「最新」。
+    page.stepCut(1)
+    assert page.property("cutEventId") == ""
+    assert page.property("cutLater") == 0
+
+
+def test_inbound_records_follow_the_reading_cut(workspace) -> None:
+    """还没读到的关系不该在对方页面上出现。"""
+    app, _bridge, page, results, _errors = workspace
+    del results[:]
+    page.jumpTo("1")
+    _pump(app, results, "detail", "1")
+    _pump(app, results, "node_properties", "1")
+    app.processEvents()
+    # 最新：令牌已经记在林舟名下。
+    assert [row["node_name"] for row in _value(page.property("inboundRows"))] == ["令牌"]
+
+    # 退到第一个事件：令牌还没出现，这条反向引用也不该显示。
+    del results[:]
+    page.pickCut(1)
+    _pump(app, results, "node_properties", "1")
+    app.processEvents()
+    assert _value(page.property("inboundRows")) == []
 
 
 def test_a_reading_cut_switches_the_state(tmp_path: Path) -> None:

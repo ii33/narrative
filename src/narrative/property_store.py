@@ -987,6 +987,10 @@ class PropertyStore:
         for record in records:
             if record.get("kind") != "property_value" or record.get("node_id") == node_id:
                 continue
+            # The other end of a relation follows the same reading position: a
+            # holder the reader has not met yet must not appear on this page.
+            if cut_position is not None and position(record) > cut_position:
+                continue
             value = record.get("value")
             hit = value == node_id or (
                 isinstance(value, list) and node_id in value

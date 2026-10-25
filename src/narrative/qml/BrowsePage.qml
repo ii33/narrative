@@ -138,6 +138,8 @@ Item {
 
     // 事件按编号排列（编号即阅读顺序），所以下拉里的事件顺序就是读者读到的顺序。
     function pickCut(index) {
+        // 让下拉显示和实际切点始终一致：按钮和外部调用都走这里。
+        if (cutBox.currentIndex !== index) cutBox.currentIndex = index
         var event = index > 0 ? page.eventOptions[index - 1] : null
         cutEventId = event ? event.id : ""
         cutEventName = event ? event.name : ""
@@ -149,6 +151,23 @@ Item {
     function backToLatest() {
         cutBox.currentIndex = 0
         page.pickCut(0)
+    }
+
+    // 上一个 / 下一个时间点。下拉里 0 是「最新」，1..N 是事件，
+    // 所以时间顺序是 1 → N → 最新(0)，两头各自接上。
+    function stepCut(delta) {
+        var total = page.eventOptions.length
+        if (total === 0) return
+        var index = cutBox.currentIndex
+        if (delta < 0) {
+            if (index === 0) index = total
+            else if (index > 1) index -= 1
+        } else {
+            if (index === 0) return
+            index = index < total ? index + 1 : 0
+        }
+        cutBox.currentIndex = index
+        page.pickCut(index)
     }
 
     function select(id) {
@@ -429,6 +448,15 @@ Item {
                 color: t.muted
                 font.pixelSize: 12
             }
+            Button {
+                objectName: "browseCutPrev"
+                text: "‹"
+                flat: true
+                font.pixelSize: 15
+                enabled: page.eventOptions.length > 0
+                    && (cutBox.currentIndex > 1 || cutBox.currentIndex === 0)
+                onClicked: page.stepCut(-1)
+            }
             ComboBox {
                 id: cutBox
                 objectName: "browseCutBox"
@@ -436,6 +464,14 @@ Item {
                 model: page.cutLabels
                 enabled: page.eventOptions.length > 0
                 onActivated: page.pickCut(currentIndex)
+            }
+            Button {
+                objectName: "browseCutNext"
+                text: "›"
+                flat: true
+                font.pixelSize: 15
+                enabled: page.eventOptions.length > 0 && cutBox.currentIndex !== 0
+                onClicked: page.stepCut(1)
             }
             Button {
                 objectName: "browseCutReset"
@@ -673,6 +709,9 @@ Item {
                                 visible: page.cutEventId.length > 0
                                 wrapMode: Text.Wrap
                                 text: "读到「" + (page.cutEventName || page.cutEventId) + "」时的状态"
+                                    + (cutBox.currentIndex > 0
+                                        ? "（第 " + cutBox.currentIndex + " / "
+                                            + page.eventOptions.length + " 个事件）" : "")
                                     + (page.cutLater > 0
                                         ? "；此后还有 " + page.cutLater + " 条披露未显示" : "")
                                 color: t.warn

@@ -583,3 +583,37 @@ def test_a_cut_before_the_first_disclosure_shows_nothing(tmp_path: Path) -> None
     assert nothing["properties"] == []
     assert nothing["later_count"] == 3
 
+
+def test_inbound_records_follow_the_reading_cut(tmp_path: Path) -> None:
+    """反向引用也是披露：还没读到的那一端不该出现。"""
+    ops = create_graph_project(tmp_path / "inbound-cut.sqlite3")
+    ops.graph_accept(
+        ops.graph_propose(
+            [
+                {"kind": "node", "id": "1", "node_type": "person", "name": "林舟"},
+                {"kind": "node", "id": "2", "node_type": "event", "name": "初到"},
+                {"kind": "node", "id": "3", "node_type": "event", "name": "得令牌"},
+                {"kind": "node", "id": "4", "node_type": "item", "name": "令牌"},
+            ],
+            ops.graph_project_info()["revision"],
+        ),
+        1,
+    )
+    ops.property_accept(
+        ops.property_propose(
+            _definitions("holder") + [
+                _value("v1", "4", "holder", "1", event_id="3"),
+            ],
+            ops.graph_project_info()["revision"],
+            source="manual",
+        ),
+        1,
+    )
+
+    assert [row["node_name"] for row in ops.property_node_summary("1")["inbound"]] == ["令牌"]
+    assert [row["node_name"] for row in ops.property_node_summary("1", cut="3")["inbound"]] == [
+        "令牌",
+    ]
+    # 读到「初到」时令牌还没出现，林舟页面上不该有这条反向引用。
+    assert ops.property_node_summary("1", cut="2")["inbound"] == []
+
