@@ -19,6 +19,7 @@ from .extraction import build_candidate, extract_chapter
 from .graph_operations import GraphOperations
 from .harness import HarnessSettings
 from .native_models import CanvasState, candidate_summary, node_detail, search_result
+from .property_audit import audit_candidate
 from .provider_store import ProviderStore
 
 _NODE_TYPES = {"person", "group", "item", "location", "event", "scene", "storyline", "other"}
@@ -419,6 +420,11 @@ class NativeBridge(QObject):
                     "diagnostics": diagnostics}
         self._project_task("property_stage", work)
 
+    @Slot()
+    def auditProperties(self) -> None:
+        """Whole-graph property audit; the review page shows the findings."""
+        self._project_task("property_audit", lambda ops: ops.property_audit())
+
     @Slot(str)
     def loadNodeProperties(self, node_id: str) -> None:
         """Every property of one node, read-only; used by the browsing detail pane."""
@@ -522,6 +528,9 @@ class NativeBridge(QObject):
                 return {"candidate": None, "empty": True, "diagnostics": []}
             if built["errors"]:
                 return {"diagnostics": built["diagnostics"], "candidate": None}
+            # Review round: audit the nodes this extraction touches before the
+            # candidate is accepted, so overlaps and contradictions surface now.
+            audit = audit_candidate(ops, built)
             candidate = ops.change_propose(
                 built["objects"], built["property_records"], built["revision"],
                 source="correction" if built.get("requires_correction") else "model",
@@ -532,6 +541,7 @@ class NativeBridge(QObject):
                 "diagnostics": built["diagnostics"],
                 "node_count": built["node_count"],
                 "scene_links": built["scene_links"],
+                "audit": audit,
             }
 
         self._project_task("extraction_commit", work)

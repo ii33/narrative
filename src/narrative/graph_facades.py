@@ -123,6 +123,11 @@ class GraphPropertyFacade:
     def node_properties(self, node_id: str, as_of_revision: int | None = None) -> dict:
         return self.properties.node_properties(node_id, as_of_revision)
 
+    def audit(
+        self, node_ids: set[str] | None = None, as_of_revision: int | None = None
+    ) -> dict:
+        return self.properties.audit(node_ids, as_of_revision)
+
     def world_state(self, at=None, as_of_revision: int | None = None) -> dict:
         return self.properties.world_state(at, as_of_revision=as_of_revision)
 

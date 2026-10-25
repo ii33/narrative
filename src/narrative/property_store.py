@@ -553,6 +553,21 @@ class PropertyStore:
             self.accepted_records(include_retracted=True), node_id, property_id, **kwargs
         )
 
+    def audit(
+        self,
+        node_ids: set[str] | None = None,
+        as_of_revision: int | None = None,
+    ) -> dict:
+        """Deterministic audit of accepted records; nothing is modified."""
+        from .property_audit import audit_properties
+
+        snapshot = self.store.snapshot(as_of_revision)
+        return audit_properties(
+            self.accepted_records(snapshot["revision"]),
+            snapshot.get("nodes", []),
+            node_ids=node_ids,
+        )
+
     def node_properties(self, node_id: str, as_of_revision: int | None = None) -> dict:
         """Every property a node carries, with its full disclosure sequence.
 

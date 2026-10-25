@@ -5,12 +5,17 @@ import QtQuick.Layouts
 // 审核：模型只能提案，人接受才进正式图。
 Item {
     id: page
+    objectName: "reviewPage"
     property var app
     readonly property var t: app.theme
 
     property string filter: "pending"
     property string selectedId: ""
     property var current: ({})
+    property var auditIssues: []
+    property int auditErrors: 0
+    property int auditWarnings: 0
+    property string auditScope: ""
 
     ListModel { id: candidateRows }
     ListModel { id: objectRows }
@@ -23,6 +28,18 @@ Item {
         selectedId = id
         current = ({})
         bridge.candidateDetail(id)
+    }
+
+    function applyAudit(report, scope) {
+        var issues = (report && report.issues) ? report.issues : []
+        auditIssues = issues
+        auditErrors = 0
+        auditWarnings = 0
+        for (var i = 0; i < issues.length; ++i) {
+            if (issues[i].severity === "error") auditErrors += 1
+            else if (issues[i].severity === "warning") auditWarnings += 1
+        }
+        auditScope = scope
     }
 
     function rebuildObjects() {
@@ -67,6 +84,17 @@ Item {
             } else if (kind === "candidate") {
                 current = payload
                 page.rebuildObjects()
+            } else if (kind === "property_audit") {
+                page.applyAudit(payload, "全部属性")
+                app.toast("审核完成：" + page.auditErrors + " 个错误 / "
+                          + page.auditWarnings + " 个待确认", page.auditErrors > 0)
+            } else if (kind === "extraction_commit") {
+                if (payload.audit) page.applyAudit(payload.audit, "本次提取")
+                app.toast(payload.audit
+                    ? "已生成候选；审核发现 " + page.auditErrors + " 个错误 / "
+                      + page.auditWarnings + " 个待确认"
+                    : "已生成候选", false)
+                page.load()
             } else if (kind === "review") {
                 app.toast("已处理，修订号 " + (payload.revision || ""), false)
                 page.load()
@@ -238,6 +266,86 @@ Item {
                                 color: t.muted
                                 font.pixelSize: 11
                             }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 190
+                color: t.card
+                border.color: t.line
+                radius: t.radius
+
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 10
+                    spacing: 6
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label {
+                            text: "属性审核"
+                            font.pixelSize: 13
+                            font.weight: Font.DemiBold
+                            color: t.ink
+                        }
+                        Label {
+                            visible: page.auditScope.length > 0
+                            text: page.auditScope
+                            color: t.muted
+                            font.pixelSize: 11
+                        }
+                        Item { Layout.fillWidth: true }
+                        Label {
+                            visible: page.auditIssues.length > 0
+                            text: page.auditErrors + " 错误 · " + page.auditWarnings + " 待确认"
+                            color: page.auditErrors > 0 ? t.bad : t.warn
+                            font.pixelSize: 11
+                        }
+                        Button {
+                            objectName: "auditPropertiesButton"
+                            text: "审核全部属性"
+                            flat: true
+                            onClicked: bridge.auditProperties()
+                        }
+                    }
+
+                    ListView {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        model: page.auditIssues
+                        spacing: 2
+                        delegate: Column {
+                            required property var modelData
+                            width: ListView.view.width
+                            spacing: 0
+                            Label {
+                                width: parent.width
+                                font.pixelSize: 11
+                                wrapMode: Text.Wrap
+                                color: modelData.severity === "error" ? t.bad
+                                    : modelData.severity === "warning" ? t.warn : t.muted
+                                text: (modelData.severity === "error" ? "错误 " : "待确认 ")
+                                    + (modelData.node_name || "") + " · " + (modelData.message || "")
+                            }
+                            Label {
+                                width: parent.width
+                                visible: (modelData.suggestion || "").length > 0
+                                font.pixelSize: 10
+                                color: t.muted
+                                wrapMode: Text.Wrap
+                                text: "→ " + (modelData.suggestion || "")
+                            }
+                        }
+                        Label {
+                            anchors.centerIn: parent
+                            visible: page.auditIssues.length === 0
+                            text: "点「审核全部属性」检查重叠、矛盾、过时与遗漏。"
+                            color: t.muted
+                            font.pixelSize: 11
                         }
                     }
                 }

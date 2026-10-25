@@ -396,6 +396,10 @@ class GraphOperations:
             node_id, property_id, disclosure_cut, scope=scope, holder_id=holder_id
         )
 
+    def property_audit(self, node_ids: set[str] | None = None) -> dict:
+        """Read-only audit: overlaps, contradictions, stale values, gaps."""
+        return self.properties.audit(node_ids)
+
     def property_node_summary(self, node_id: str) -> dict:
         """Read-only: every property of one node, with its disclosure sequence."""
         return self.properties.node_properties(node_id)
