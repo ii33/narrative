@@ -1,4 +1,4 @@
-"""Observable, Operations-only agent for isolated v4 graph projects.
+"""Observable, Operations-only agent for isolated v5 graph projects.
 
 The SDK supplies a persistent model session. All graph reads and candidate writes
 go through GraphOperations; model actions never receive database or file access.
@@ -16,10 +16,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from .graph_models import parse_objects
-from .harness import HarnessRunner, HarnessSettings, effective_runtime_config, resolve_key
-from .jobs import ProjectLease, is_capacity_finish
-from .narrative_agent import (
+from .agent_runtime import (
     Budget,
     _code_hash,
     _compact,
@@ -29,8 +26,11 @@ from .narrative_agent import (
     _save,
     _usage_totals,
 )
+from .graph_models import parse_objects
+from .harness import HarnessRunner, HarnessSettings, effective_runtime_config, resolve_key
+from .leases import ProjectLease, is_capacity_finish
 
-PROMPT_VERSION = "graph-agent/10"
+PROMPT_VERSION = "graph-agent/11"
 MAX_SOURCE_EXCERPT = 8000
 TOOL_CATALOG = {
     "graph_schema": ("图对象字段", "读取 Node、Assertion、Evidence 和时间字段合同"),
@@ -46,6 +46,8 @@ TOOL_CATALOG = {
     "evidence_excerpt": ("证据上下文", "复查已登记句柄附近原文"),
     "graph_precheck": ("整批预检", "预检当前私有工作集并返回诊断、修订号与内容哈希"),
     "graph_propose": ("提出待审候选", "仅在最新整批预检无错误时一次提交为待人工审核候选"),
+    "property_precheck": ("属性预检", "只读预检 property_* 追加记录并返回诊断"),
+    "property_propose": ("提出属性待审候选", "提交 property_* 记录为待人工审核候选；模型不得接受"),
 }
 
 
@@ -54,7 +56,7 @@ def capabilities() -> dict:
         "mode": "SDK Session + GraphOperations JSON工具桥接",
         "native_tools": False,
         "tools": [
-            {"name": name, "label": label, "purpose": purpose, "access": "write_pending" if name == "graph_propose" else "read_only"}
+            {"name": name, "label": label, "purpose": purpose, "access": "write_pending" if name in {"graph_propose", "property_propose"} else "read_only"}
             for name, (label, purpose) in TOOL_CATALOG.items()
         ],
         "private_actions": ["stage（私有草稿）", "remove_stage_ids（撤回私有草稿）"],
@@ -79,6 +81,47 @@ def status(operations, run_id: str) -> dict:
     return state
 
 
+def _estimate_prompt_tokens(text: str) -> int:
+    """Loose, deliberately conservative prompt-size estimate for pre-request reserves.
+
+    CJK characters count as one token each and other characters as one token per four.
+    The result is a reserve heuristic, not a provider guarantee: real usage can overshoot.
+    """
+    if not isinstance(text, str) or not text:
+        return 0
+    cjk = sum(
+        1
+        for char in text
+        if "\u2e80" <= char <= "\u9fff" or "\uac00" <= char <= "\ud7a3"
+    )
+    return cjk + max(0, len(text) - cjk) // 4
+
+
+def _request_reserve(request_input: str, output_cap: int | None) -> dict:
+    """Reserve estimated prompt tokens plus an explicit output cap before a request."""
+    estimated_prompt = _estimate_prompt_tokens(request_input)
+    reserved_output = output_cap if type(output_cap) is int and output_cap > 0 else 0
+    return {
+        "estimated_prompt_tokens": estimated_prompt,
+        "reserved_output_tokens": reserved_output,
+        "reserved_total_tokens": estimated_prompt + reserved_output,
+        "hard_token_guarantee": False,
+        "note": "请求前按输入估算与显式输出上限预留；供应商usage可能超出，非硬性token保证",
+    }
+
+
+def upstream_activity(operations, run_id: str) -> dict | None:
+    """Last ModelGateway upstream response-byte activity for the local worker, if any."""
+    _read(_file(operations, run_id))
+    key = (operations.graph_project_info()["path"], run_id)
+    with _lock:
+        worker = _jobs.get(key)
+    runner = getattr(worker, "runner", None)
+    snapshot = getattr(runner, "upstream_activity_snapshot", None)
+    result = snapshot() if callable(snapshot) else None
+    return result if isinstance(result, dict) else None
+
+
 def _prompt(sources: list[dict], revision: int, budget: Budget, context_policy: dict | None = None) -> str:
     return (
         "你是节点—断言—时序图分析代理。只用 GraphOperations 工具观察原文和已审核图，"
@@ -98,8 +141,16 @@ def _prompt(sources: list[dict], revision: int, budget: Budget, context_policy: 
         '{"kind":"evidence","id":"ev1","evidence_ref":"h1"}，'
         "应用仅把本次句柄展开成原文 source_id/hash/start/end/quote；不要手算偏移或手填证据内容。"
         "断言须由 evidence_link 连接证据对象；事件、人物、物品、地点、场景、故事线统一是 node。"
-        "参与者、地点、先后、属性、关系和父子组织只建 assertion，不输出独立 participation 或 temporal_constraint。"
-        "事件参与断言的 subject_id 是事件node，object_id是参与实体node，qualifiers.role说明角色。"
+        "断言只接受 temporal 与 containment 两种语义；属性、地点、关系、参与不得写成断言。"
+        "节点属性只用 property_definition、property_value、property_retraction JSON 记录，按披露顺序追加；"
+        "property_precheck 只读检查 records，property_propose 生成待人工审核候选；模型只能提出，不能接受、删除或原地改写记录。"
+        "属性记录须两阶段：先对图工作集 graph_precheck/graph_propose，并由人工接受图候选，之后属性分析才能对已接受图 precheck/propose；"
+        "属性记录不得引用本轮私有图草稿ID（node_id、event_id、事件边界时间引用或节点值状态/效果）；"
+        "若引用这些草稿ID，property_precheck/property_propose 返回 PENDING_GRAPH_REVIEW 且不创建属性候选，不要把它当普通引用错误或重复尝试。"
+        "属性 evidence 恰为 {\"source_id\":\"已接受来源ID\",\"quote\":\"在来源原文中恰好出现一次的精确子串\"}；不得引用图证据对象ID或私有证据句柄。"
+        "时序仍用 temporal 断言，阅读组织仍用 containment 断言；二者继续支持。"
+        "参与者、先后和父子组织按 v5 合同表达，不输出独立 participation 或 temporal_constraint。"
+        "事件参与不再使用 participation 断言；需要状态描述时提交有证据的 property_* 记录。"
         "先通读任务范围，识别具有目标、冲突或局部结果的主事件；按原文确有内部过程时，"
         "再将主事件拆为少量必要子事件，建立有证据的父子组织。核心事件数量依文本决定，不设固定数目。"
         "事件大小是当前阅读证据下的相对层级，不是永久等级：后文揭示更大事件时新增父事件，既有事件保持原ID成为其子事件；只重组归属，不改既有event的name、node_type、occurrence或ID，不用当前聚合事件名字覆盖旧事件。"
@@ -115,7 +166,7 @@ def _prompt(sources: list[dict], revision: int, budget: Budget, context_policy: 
         "可用非负 order_index 标记同父子节点的原文阅读顺序，该顺序不表示故事时间。"
         "父子组织不同于 semantic=temporal、temporal_relation=contains 的时间包含；仅原文支持时才另建时序约束。"
         "若需要检查现有组织，可调用只读 graph_hierarchy；默认看已审核图，仅可预览本轮候选或修订起点候选。"
-        "同一人物、物件在各层事件中复用节点引用；人物或物件状态与局部结果可表达为有据属性，"
+        "同一人物、物件在各层事件中复用节点引用；人物或物件状态与局部结果用有据 property_* 记录表达，"
         "不必每一处都造事件。未知因果与死亡时点保持未知，不凭阅读顺序推断。"
         "同一人物或动物在不同故事中若无同一性证据，应拆成独立node。"
         "若任务要求完整提取，或未限定局部分析范围，先用 source_excerpt 分段读完所选原文范围，"
@@ -292,6 +343,95 @@ def _register(matches: list[dict], state: dict) -> list[dict]:
     return output
 
 
+def _staged_graph_refs(records: list, workspace: dict) -> dict[str, list[str]]:
+    """Return staged graph-workspace ids referenced by property records.
+
+    Property validation intentionally sees only the accepted graph, so an id that
+    exists only in the agent's private graph workspace would surface as an
+    avalanche of NODE_REF/EVENT_REF/TIME_REF diagnostics.  Detecting the staged
+    dependency lets the tool answer with one PENDING_GRAPH_REVIEW diagnostic so the
+    model first proposes the graph and waits for human acceptance.
+    """
+    if not isinstance(workspace, dict) or not workspace:
+        return {}
+    staged_nodes = {
+        obj_id
+        for obj_id, obj in workspace.items()
+        if isinstance(obj, dict) and obj.get("kind") == "node"
+    }
+    if not staged_nodes:
+        return {}
+    refs: dict[str, set[str]] = {}
+
+    def note(obj_id: str, field: str) -> None:
+        refs.setdefault(obj_id, set()).add(field)
+
+    def note_node_value(value: object, field: str) -> None:
+        if isinstance(value, str):
+            if value in staged_nodes:
+                note(value, field)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, str) and item in staged_nodes:
+                    note(item, field)
+
+    def note_time_ref(ref: object, field: str) -> None:
+        if isinstance(ref, dict) and ref.get("form") == "event_boundary":
+            event_id = ref.get("event_id")
+            if isinstance(event_id, str) and event_id in staged_nodes:
+                note(event_id, field)
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        node_id = record.get("node_id")
+        if isinstance(node_id, str) and node_id in staged_nodes:
+            note(node_id, "node_id")
+        event_id = record.get("event_id")
+        if isinstance(event_id, str) and event_id in staged_nodes:
+            note(event_id, "event_id")
+        # A node-typed value is a reference to that node, so a draft node there
+        # blocks the property record just like node_id does.
+        note_node_value(record.get("value"), "value")
+        note_node_value(record.get("holder_id"), "holder_id")
+        applies_to = record.get("applies_to")
+        if isinstance(applies_to, str) and applies_to in staged_nodes:
+            note(applies_to, "applies_to")
+    return {obj_id: sorted(fields) for obj_id, fields in refs.items()}
+
+
+def _pending_graph_review(name: str, staged: dict[str, list[str]], revision: int) -> dict:
+    """One explicit two-stage gate diagnostic; no property candidate is created."""
+    references = "、".join(
+        f"{obj_id}（{', '.join(fields)}）" for obj_id, fields in sorted(staged.items())
+    )
+    message = (
+        "属性记录依赖本轮私有图草稿中尚未被人工接受的图对象：" + references
+        + "；属性预检/提出只针对已接受的正式图，不会自动合并私有草稿。"
+        "请先对图工作集调用 graph_precheck 与 graph_propose，并由人工接受该图候选，"
+        "再重新运行属性分析提交 property_* 记录；本轮未创建属性候选。"
+    )
+    return {
+        "status": "pending_graph_review",
+        "tool": name,
+        "passed": False,
+        "revision": revision,
+        "diagnostics": [
+            {
+                "code": "PENDING_GRAPH_REVIEW",
+                "severity": "error",
+                "object_id": None,
+                "message": message,
+            }
+        ],
+        "staged_refs": {obj_id: list(fields) for obj_id, fields in staged.items()},
+        "next_action": (
+            "先 graph_precheck 并 graph_propose 图工作集，由人工接受图候选；"
+            "接受后重新运行属性分析，再 property_precheck/property_propose"
+        ),
+    }
+
+
 def _tool(operations, source_ids: list[str], name: str, args: dict, state: dict):
     if name not in TOOL_CATALOG or not isinstance(args, dict):
         raise ValueError("未知工具或参数格式无效")
@@ -299,6 +439,54 @@ def _tool(operations, source_ids: list[str], name: str, args: dict, state: dict)
         if args:
             raise ValueError("graph_schema 不接受参数")
         return _compact(operations.graph_schema())
+    if name in {"property_precheck", "property_propose"}:
+        if set(args) - {"records", "expected_revision", "note", "source"}:
+            raise ValueError(
+                f"{name} 参数无效；允许 records、expected_revision、note（source 可省略，系统固定为 model）"
+            )
+        records = args.get("records")
+        if not isinstance(records, list) or not records:
+            raise ValueError("property_* 须提供非空 records 数组")
+        revision = args.get(
+            "expected_revision", operations.graph_project_info()["revision"]
+        )
+        staged = _staged_graph_refs(records, state.get("workspace") or {})
+        if staged:
+            # A staged id that is also human-accepted does not depend on the
+            # private draft; exclude it so normal accepted-graph operations pass.
+            accepted_ids = {
+                obj.get("id")
+                for obj in operations.graph_snapshot().get("objects", [])
+                if isinstance(obj, dict)
+            }
+            staged = {
+                obj_id: fields
+                for obj_id, fields in staged.items()
+                if obj_id not in accepted_ids
+            }
+        if staged:
+            return _pending_graph_review(name, staged, revision)
+        if name == "property_precheck":
+            diagnostics = operations.property_precheck(records, revision)
+            return {
+                "diagnostics": diagnostics,
+                "revision": revision,
+                "passed": not any(
+                    item.get("severity") == "error" for item in diagnostics
+                ),
+            }
+        candidate_id = operations.property_propose(
+            records, revision, source="model", note=args.get("note", "属性代理建议")
+        )
+        return {
+            "status": "pending",
+            "candidate_id": candidate_id,
+            "version": 1,
+            "expected_revision": revision,
+            "record_count": len(records),
+            "source": "model",
+            "next_action": "等待人工审核；模型不得接受或删除记录",
+        }
     if name == "graph_snapshot":
         if args:
             raise ValueError("graph_snapshot 不接受参数")
@@ -308,7 +496,7 @@ def _tool(operations, source_ids: list[str], name: str, args: dict, state: dict)
             raise ValueError("graph_event_index 参数无效")
         return _compact(operations.graph_event_index(**args))
     if name == "graph_query":
-        if set(args) - {"query", "node_id", "context_id", "story_cut", "disclosure_cut", "as_of_revision"}:
+        if set(args) - {"query", "node_id", "context_id", "disclosure_cut", "as_of_revision"}:
             raise ValueError("graph_query 参数无效")
         return _compact(operations.graph_query(**args))
     if name in {"graph_hierarchy", "graph_timeline", "graph_view"}:
@@ -456,8 +644,25 @@ class Job:
             "usage_incomplete": state["usage"].get("incomplete", False),
             "remaining_wall_seconds": None if deadline is None else max(0, int(deadline - time.monotonic())),
         }
+        # Reserve estimated prompt tokens and an explicit per-round output cap before
+        # the request. A provider may still overshoot, so this is advisory, not a
+        # hard token guarantee; incomplete usage is preserved in state["usage"].
+        output_cap = (
+            self.budget.max_tokens_per_round
+            if type(self.budget.max_tokens_per_round) is int
+            else None
+        )
+        reserve = _request_reserve(instruction, output_cap)
+        progress["reserve"] = reserve
         state["request_budget"] = progress
+        state["request_reserve"] = reserve
         instruction += "\n按剩余预算安排完整任务；保留独立预检与提交请求，预算不授权缩小原文范围或跳过审核。\n本次请求预算：" + _json(progress)
+        if (
+            self.budget.max_total_tokens is not None
+            and output_cap is not None
+            and used_tokens + reserve["reserved_total_tokens"] > self.budget.max_total_tokens
+        ):
+            raise ValueError("按输入估算与显式输出上限预留后将超过任务累计token预算；图分析未完成")
         _save(self.path, state)
         return instruction, pending
 

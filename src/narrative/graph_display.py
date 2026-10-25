@@ -16,7 +16,7 @@ _NODES = {
 
 
 def display_map(snapshot: dict, candidate: dict | None = None) -> dict:
-    objects = [*snapshot["objects"], *snapshot["evidence_links"]]
+    objects = list(snapshot["objects"])
     if candidate:
         replaced = {item["id"] for item in candidate["objects"]}
         objects = [item for item in objects if item["id"] not in replaced] + candidate["objects"]

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Synthetic Chinese narrative retrieval benchmark; no novel text or external embedding calls.",
+  "pass_condition": "For each query, all gold_chunk_ids appear in the top five retrieved chunks. Report Recall@5 by category and inspect false positives.",
+  "chunks": [
+    {"id": "c01", "scene": "harbor", "text": "港口的林舟把铜钥匙交给药师沈岚。同行的人只叫林舟阿舟。"},
+    {"id": "c02", "scene": "market", "text": "集市的林洲是一名木匠。他替城主修好了一只红木箱，从未去过港口。"},
+    {"id": "c03", "scene": "tower", "text": "次日，沈岚在塔楼用铜钥匙打开蓝柜，把账簿放入柜中。"},
+    {"id": "c04", "scene": "garden", "text": "阿舟在花园发现银铃，随后将银铃挂到榆树上。"},
+    {"id": "c05", "scene": "council", "text": "议事厅里，城主告诉木匠林洲，红木箱里原本没有账簿。"},
+    {"id": "c06", "scene": "tower_later", "text": "傍晚，沈岚从蓝柜取出账簿，交给守卫许澄。铜钥匙仍由沈岚保管。"},
+    {"id": "c07", "scene": "archive", "text": "档案记载：许澄曾用铁钥匙开过黑柜；铁钥匙与铜钥匙形状相似。"},
+    {"id": "c08", "scene": "garden_later", "text": "夜里风吹落银铃，许澄把银铃拾起并放入布袋。"}
+  ],
+  "queries": [
+    {"id": "alias_1", "category": "alias", "query": "阿舟在港口把什么交给沈岚？", "gold_chunk_ids": ["c01"]},
+    {"id": "alias_2", "category": "alias", "query": "林舟后来把银铃挂在哪里？", "gold_chunk_ids": ["c01", "c04"]},
+    {"id": "homonym_1", "category": "homonym", "query": "修红木箱的林洲去过港口吗？", "gold_chunk_ids": ["c02"]},
+    {"id": "homonym_2", "category": "homonym", "query": "城主在议事厅告诉哪位林姓人物红木箱的事？", "gold_chunk_ids": ["c05"]},
+    {"id": "cross_scene_1", "category": "cross_scene", "query": "港口交接的铜钥匙后来打开了什么？", "gold_chunk_ids": ["c01", "c03"]},
+    {"id": "cross_scene_2", "category": "cross_scene", "query": "从塔楼蓝柜取出的账簿最后交给了谁？", "gold_chunk_ids": ["c03", "c06"]},
+    {"id": "object_1", "category": "object", "query": "傍晚铜钥匙由谁保管？", "gold_chunk_ids": ["c06"]},
+    {"id": "object_2", "category": "object", "query": "花园银铃在夜里被放到哪里？", "gold_chunk_ids": ["c04", "c08"]},
+    {"id": "negative_1", "category": "negative", "query": "谁用铜钥匙打开了黑柜？", "gold_chunk_ids": ["c07"], "expected_answer": "无证据；档案只记载许澄用铁钥匙开过黑柜。"}
+  ]
+}

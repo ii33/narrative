@@ -13,6 +13,7 @@ import threading
 import time
 from contextlib import contextmanager
 from copy import deepcopy
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -91,6 +92,12 @@ class ModelGateway:
         self._blocked_generation_count = 0
         self._connections: set[http.client.HTTPConnection] = set()
         self.error: str | None = None
+        # Last upstream response-byte activity, recorded from the socket read
+        # itself. This is deliberately separate from any local heartbeat.
+        self._upstream_activity_utc: str | None = None
+        self._upstream_activity_monotonic: float | None = None
+        self._upstream_response_bytes = 0
+        self._upstream_response_events = 0
         gateway = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -188,6 +195,8 @@ class ModelGateway:
                         headers,
                     )
                     response = connection.getresponse()
+                    # A response header is the first upstream byte activity.
+                    gateway._note_upstream_activity()
                     # Never forward a redirect carrying the provider's credential.
                     status = response.status
                     if 300 <= status < 400:
@@ -201,6 +210,7 @@ class ModelGateway:
                     sent_headers = True
                     if status >= 400:
                         error = response.read(65536)
+                        gateway._note_upstream_activity(len(error))
                         if gateway._key:
                             error = error.replace(gateway._key.encode(), b"[REDACTED]")
                         with gateway._lock:
@@ -225,6 +235,7 @@ class ModelGateway:
                             if not chunk:
                                 break
                             observer.feed(chunk)
+                            gateway._note_upstream_activity(len(chunk))
                             if purpose == "compaction" and observer.finish_reason not in {
                                 None,
                                 "stop",
@@ -344,6 +355,30 @@ class ModelGateway:
     def usage_incomplete(self) -> bool:
         with self._lock:
             return any(not record["complete"] for record in self._usage_records)
+
+    def _note_upstream_activity(self, byte_count: int = 0) -> None:
+        """Record bytes received from upstream; never derived from a local timer."""
+        received_at = time.monotonic()
+        timestamp = datetime.now(UTC).isoformat()
+        with self._lock:
+            self._upstream_activity_monotonic = received_at
+            self._upstream_activity_utc = timestamp
+            self._upstream_response_bytes += max(0, int(byte_count))
+            self._upstream_response_events += 1
+
+    def upstream_activity_snapshot(self) -> dict:
+        """Last upstream response-byte activity, independent of local heartbeats."""
+        with self._lock:
+            last_monotonic = self._upstream_activity_monotonic
+            return {
+                "last_response_utc": self._upstream_activity_utc,
+                "last_response_age_seconds": None
+                if last_monotonic is None
+                else round(max(0.0, time.monotonic() - last_monotonic), 3),
+                "response_bytes": self._upstream_response_bytes,
+                "response_events": self._upstream_response_events,
+                "source": "model_gateway_upstream",
+            }
 
     def fail_compaction(self, detail: str):
         """Fail closed for this turn; the SDK may otherwise warn and continue generation."""

@@ -1,0 +1,34 @@
+{
+  "title": "The Key: reviewed property state",
+  "characters": ["Mira", "Jon"],
+  "item": {"id": "key", "name": "Brass key"},
+  "events": ["flashback", "handoff", "refused_attempt", "branch_a", "branch_b"],
+  "temporal_order": [
+    {"before": "flashback", "after": "handoff", "quote": "In the flashback, Mira still has the key before the handoff."},
+    {"before": "handoff", "after": "refused_attempt", "quote": "The refused attempt happens after the handoff."},
+    {"before": "handoff", "after": "branch_a", "quote": "Branch A follows the handoff."},
+    {"before": "handoff", "after": "branch_b", "quote": "Branch B follows the handoff."}
+  ],
+  "property_records": {
+    "baseline": [
+      {"id": "holder", "kind": "property_definition", "value_type": "node", "cardinality": "one", "persistence": "until_changed", "owner_node_types": ["item"], "target_node_types": ["person"]},
+      {"id": "holder-initial", "kind": "property_initial", "node_id": "key", "property_id": "holder", "state": {"kind": "known", "value": "mira"}}
+    ],
+    "flashback_observation": {"id": "holder-flashback-observation", "kind": "property_observation", "node_id": "key", "property_id": "holder", "at": {"timeline_id": "story", "form": "event_boundary", "event_id": "flashback", "boundary": "start"}, "state": {"kind": "known", "value": "mira"}},
+    "transfer": {"id": "handoff-change", "kind": "event_change", "event_id": "handoff", "boundary": "end", "effects": [{"node_id": "key", "property_id": "holder", "op": "set", "value": "jon", "expected": {"kind": "known", "value": "mira"}}]},
+    "failed_transfer": {"id": "refused-change", "kind": "event_change", "event_id": "refused_attempt", "boundary": "end", "effects": [{"node_id": "key", "property_id": "holder", "op": "set", "value": "mira", "expected": {"kind": "known", "value": "mira"}}]},
+    "branches": [
+      {"id": "branch-a-change", "kind": "event_change", "event_id": "branch_a", "boundary": "end", "effects": [{"node_id": "key", "property_id": "holder", "op": "set", "value": "mira"}]},
+      {"id": "branch-b-change", "kind": "event_change", "event_id": "branch_b", "boundary": "end", "effects": [{"node_id": "key", "property_id": "holder", "op": "set", "value": "jon"}]}
+    ],
+    "retraction": {"id": "retract-branch-b", "kind": "property_retraction", "target_id": "branch-b-change", "reason": "Branch B's property update was superseded by the reviewed correction."}
+  },
+  "cases": [
+    "Initial holder: Mira owns the key at the local origin.",
+    "Transfer: handoff atomically changes holder from Mira to Jon with an expected-old-state check.",
+    "Failed transfer: the refused attempt expects Mira after the handoff changed the holder to Jon; precheck rejects it and state remains Jon.",
+    "Observation: the flashback records Mira as the observed holder at that anchor and does not create a property-changing event.",
+    "Flashback: the reviewed temporal edge places the observation anchor before the handoff, so history can answer at the earlier boundary.",
+    "Branch conflict and retraction: unordered branch updates produce conflict; a reviewed retraction removes branch B from the rebuilt projection while retaining its history."
+  ]
+}

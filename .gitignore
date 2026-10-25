@@ -34,6 +34,9 @@ id_ed25519
 .mypy_cache/
 .hypothesis/
 .uv-cache/
+.venv-graphrag/
+.uv-cache-graphrag/
+.tiktoken-cache-graphrag/
 .tmp/
 .test-tmp*/
 *.egg-info/
@@ -68,3 +71,6 @@ examples/harness_events_result.json
 # Local agent configuration
 .agents/
 .codex/
+
+# Assistant working memory (local only)
+.workbuddy-ai/

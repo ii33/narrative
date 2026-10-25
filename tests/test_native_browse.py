@@ -1,0 +1,135 @@
+"""数据浏览主页：进入工程后按分类列出节点。"""
+
+from __future__ import annotations
+
+import os
+import time
+from pathlib import Path
+from typing import Any
+
+import pytest
+from PySide6.QtCore import QUrl
+from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtWidgets import QApplication
+
+from narrative.native_app import QML_PATH
+from narrative.native_bridge import NativeBridge
+from narrative.operations import Operations
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("QT_QPA_PLATFORM") != "offscreen",
+    reason="Qt Quick 用例需要 offscreen 平台",
+)
+
+
+def _pump(app: QApplication, results: list[tuple[str, dict]], kind: str) -> dict:
+    deadline = time.monotonic() + 8
+    while not any(item[0] == kind for item in results) and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+    matched = [payload for name, payload in results if name == kind]
+    assert matched, f"没有收到 {kind} 结果"
+    return matched[-1]
+
+
+def test_workspace_opens_on_the_browse_page_with_categories(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    project = tmp_path / "browse.sqlite3"
+    ops = Operations.create_graph_project(project)
+    candidate = ops.graph_propose(
+        [
+            {"kind": "node", "id": "1", "node_type": "person", "name": "林舟"},
+            {"kind": "node", "id": "2", "node_type": "item", "name": "火纹石"},
+            {"kind": "node", "id": "3", "node_type": "event", "name": "林舟出场"},
+        ],
+        ops.graph_project_info()["revision"],
+    )
+    ops.graph_accept(candidate, 1)
+    revision = ops.graph_project_info()["revision"]
+    property_candidate = ops.property_propose(
+        [
+            {"kind": "property_definition", "id": "identity", "value_type": "string",
+             "cardinality": "one", "persistence": "until_changed"},
+            {"kind": "property_value", "id": "p1", "node_id": "1",
+             "property_id": "identity", "value": "总经理", "event_id": "3"},
+            {"kind": "property_value", "id": "p2", "node_id": "1",
+             "property_id": "identity", "value": "总经理，后升任董事长", "event_id": "3"},
+        ],
+        revision,
+        source="manual",
+    )
+    ops.property_accept(property_candidate, 1)
+
+    bridge = NativeBridge(tmp_path)
+    results: list[tuple[str, dict]] = []
+    errors: list[tuple[str, str]] = []
+    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
+    bridge.errorOccurred.connect(lambda kind, message: errors.append((kind, message)))
+
+    engine = QQmlApplicationEngine()
+    engine.rootContext().setContextProperty("bridge", bridge)
+    window: Any = None
+    try:
+        engine.load(QUrl.fromLocalFile(str(QML_PATH)))
+        window = engine.rootObjects()[0]
+
+        bridge.openProject(str(project))
+        _pump(app, results, "project")
+        _pump(app, results, "graph_view")
+        assert not errors
+
+        # The workspace lands on the browsing page, not on 原文.
+        assert window.property("mode") == "workspace"
+        assert window.property("currentPage") == "browse"
+
+        page = window.findChild(object, "browsePage")
+        assert page is not None
+        assert page.property("total") == 3
+
+        counts = page.property("counts").toVariant()
+        assert counts["person"] == 1
+        assert counts["item"] == 1
+        assert counts["event"] == 1
+        assert counts["scene"] == 0
+
+        # Filtering by category narrows the list; clearing it restores everything.
+        page.pickType("item")
+        assert page.property("total") == 1
+        page.pickType("")
+        assert page.property("total") == 3
+
+        # Name search runs over the loaded list, no extra round trip.
+        page.setProperty("query", "火纹")
+        page.rebuild()
+        assert page.property("total") == 1
+
+        # Selecting a node loads its dossier, evidence included.
+        page.setProperty("query", "")
+        page.rebuild()
+        page.select("1")
+        _pump(app, results, "detail")
+        detail = page.property("detail")
+        assert detail["node"]["name"] == "林舟"
+
+        # ... and its properties, which the right pane lists and can expand.
+        _pump(app, results, "node_properties")
+        rows = page.property("propertyRows").toVariant()
+        assert len(rows) == 1
+        assert rows[0]["label"] == "身份"
+        assert rows[0]["countText"] == "2 条披露"
+        # A record names the event it hangs on instead of showing a bare id.
+        assert rows[0]["records"][0]["event_name"] == "林舟出场"
+
+        # Clicking a linked node jumps to it and clears whatever filter hid it.
+        page.pickType("item")
+        assert page.property("total") == 1
+        page.jumpTo("1")
+        _pump(app, results, "detail")
+        assert page.property("selectedType") == ""
+        assert page.property("selectedId") == "1"
+        assert page.property("total") == 3
+        assert not errors
+    finally:
+        engine.deleteLater()
+        bridge.close()
+        app.processEvents()

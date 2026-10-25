@@ -1,12 +1,10 @@
 import argparse
 import json
-import os
-import subprocess
-import sys
 import time
 from pathlib import Path
 
-from .operations import OperationError, Operations
+from .errors import OperationError
+from .project_catalog import create_graph_project, open_graph_project
 
 CONTEXT_FIELDS = ("context_window", "output_reserve", "compaction_reserve", "compaction_max_tokens")
 
@@ -25,6 +23,36 @@ def _save_context_arguments(operations, args):
     changes = {field: getattr(args, field) for field in CONTEXT_FIELDS if getattr(args, field) is not None}
     if changes:
         operations.save_harness_settings(operations.harness_settings() | changes)
+
+
+def _records_arguments(parser):
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--records", "--records-json", dest="records", help="属性记录 JSON 数组")
+    group.add_argument("--records-file", type=Path, help="UTF-8 属性记录 JSON 数组文件")
+
+
+def _load_records(args):
+    text = (
+        args.records_file.read_text(encoding="utf-8-sig")
+        if args.records_file
+        else args.records
+    )
+    try:
+        records = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise OperationError(f"属性记录不是合法 JSON：{exc}") from None
+    if not isinstance(records, list):
+        raise OperationError("属性记录须为 JSON 数组")
+    return records
+
+
+def _at_argument(value):
+    if value is None:
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
 
 
 def main():
@@ -59,6 +87,21 @@ def main():
     view_input = graph_view.add_mutually_exclusive_group(required=True)
     view_input.add_argument("--spec", help="结构查询 JSON 对象")
     view_input.add_argument("--spec-file", type=Path, help="UTF-8 结构查询 JSON 文件")
+    graph_event_compare = commands.add_parser(
+        "graph-event-compare",
+        help="比较两个事件：默认按披露顺序，--axis story 按故事先后",
+    )
+    graph_event_compare.add_argument("left_id")
+    graph_event_compare.add_argument("right_id")
+    graph_event_compare.add_argument("--context-id", default="canon")
+    graph_event_compare.add_argument("--as-of-revision", type=int)
+    graph_event_compare.add_argument(
+        "--axis", choices=["disclosure", "story"], default="disclosure",
+        help="disclosure=读者先读到谁（线性）；story=故事里谁先发生（可分支）",
+    )
+    graph_event_lines = commands.add_parser("graph-event-lines", help="投影已审时序断言为事件线")
+    graph_event_lines.add_argument("--context-id", default="canon")
+    graph_event_lines.add_argument("--as-of-revision", type=int)
     graph_candidate = commands.add_parser("graph-candidate", help="查看待审候选原始对象及诊断")
     graph_candidate.add_argument("candidate_id")
     for name in ("graph-accept", "graph-reject"):
@@ -71,82 +114,108 @@ def main():
     graph_instruct = commands.add_parser("graph-instruct", help="在下一模型请求边界追加任务指令")
     graph_instruct.add_argument("run_id")
     graph_instruct.add_argument("text")
-    ui = commands.add_parser("ui", help="启动工作台")
-    ui.add_argument("--port", default="8501")
-    commands.add_parser("demo", help="在空项目载入自编演示")
-    imp = commands.add_parser("import", help="导入 UTF-8 章节")
-    imp.add_argument("path", type=Path)
-    imp.add_argument("--title")
-    commands.add_parser("status", help="查看项目状态")
-    character = commands.add_parser("character", help="查看人物档案")
-    character.add_argument("entity_id")
-    event_profile = commands.add_parser("event-profile", help="查看事件及其关联")
-    event_profile.add_argument("event_id")
-    search = commands.add_parser("search-analysis", help="按关键词与对象筛选故事资料")
-    search.add_argument("--query", default="")
-    search.add_argument("--source-id", action="append", default=[])
-    search.add_argument("--entity-id", action="append", default=[])
-    search.add_argument("--kind", action="append", default=[])
-    search.add_argument("--narrative-type", action="append", default=[])
-    search.add_argument("--category", action="append", default=[])
-    search.add_argument("--status", action="append", default=[])
-    search.add_argument("--storyline-id", action="append", default=[])
-    search.add_argument("--limit", type=int, default=100)
-    classification = commands.add_parser("classification-table", help="查看按章节汇总的叙事事件分类")
-    classification.add_argument("--source-id", action="append", default=[])
-    for cmd in ("accept", "reject", "check"):
-        sub = commands.add_parser(cmd)
-        sub.add_argument("change_id")
-    backup = commands.add_parser("backup")
-    backup.add_argument("destination", type=Path)
-    restore = commands.add_parser("restore")
-    restore.add_argument("backup", type=Path)
-    restore.add_argument("destination", type=Path)
-    export = commands.add_parser("export-input", help="创建任务并导出分块输入")
-    export.add_argument("source_id")
-    export.add_argument("destination", type=Path)
-    ingest = commands.add_parser("ingest-result", help="校验并导入 harness 结果")
-    ingest.add_argument("chunk_id")
-    ingest.add_argument("path", type=Path)
-    extract = commands.add_parser("extract", help="旧项目单次提取；新项目请用 graph-analyze")
-    extract.add_argument("source_id")
-    extract.add_argument("--base-url")
-    extract.add_argument("--model")
-    extract.add_argument("--timeout", type=int)
-    _context_arguments(extract)
+    property_precheck = commands.add_parser(
+        "property-precheck", aliases=["graph-property-precheck"], help="只读预检 v5 属性追加记录"
+    )
+    _records_arguments(property_precheck)
+    property_precheck.add_argument("--expected-revision", type=int)
+    property_propose = commands.add_parser(
+        "property-propose", aliases=["graph-property-propose"], help="提交 v5 属性待审候选"
+    )
+    _records_arguments(property_propose)
+    property_propose.add_argument("--expected-revision", type=int)
+    property_propose.add_argument("--source", choices=("manual", "model", "correction"), default="manual")
+    property_propose.add_argument("--note", default="")
+    for name in ("property-accept", "property-reject"):
+        review_command = commands.add_parser(
+            name, aliases=["graph-" + name], help="人工审核 v5 属性候选"
+        )
+        review_command.add_argument("candidate_id")
+        review_command.add_argument("version", type=int)
+    property_state = commands.add_parser(
+        "property-state", aliases=["graph-property-state"], help="查询节点属性在故事时点的投影"
+    )
+    property_state.add_argument("node_id")
+    property_state.add_argument("property_id")
+    property_state.add_argument("at_positional", nargs="?", help="可选故事 TimeRef 值")
+    property_state.add_argument("--at", help="故事 TimeRef：JSON 或 number/datetime 值；省略为当前视图")
+    property_state.add_argument("--as-of-revision", type=int)
+    property_state.add_argument(
+        "--scope", default="world", choices=["world", "cognition", "claim"]
+    )
+    property_state.add_argument("--holder-id", help="认知持有者；scope 非 world 时必填")
+    property_state.add_argument("--disclosure-source", help="披露切点的来源 ID")
+    property_state.add_argument("--disclosure-start", type=int, help="披露切点的原文偏移")
+    property_state.add_argument(
+        "--diagnostics", action="store_true",
+        help="作者/编辑器诊断：返回被过滤的记录 ID 与原因",
+    )
+    property_disclosure = commands.add_parser(
+        "property-disclosure-state",
+        aliases=["graph-property-disclosure-state"],
+        help="按原文披露切点查询可见状态（忽略故事时间）",
+    )
+    property_disclosure.add_argument("node_id")
+    property_disclosure.add_argument("property_id")
+    property_disclosure.add_argument("--source", required=True, help="来源 ID")
+    property_disclosure.add_argument("--start", required=True, type=int, help="原文偏移")
+    property_disclosure.add_argument(
+        "--scope", default="world", choices=["world", "cognition", "claim"]
+    )
+    property_disclosure.add_argument("--holder-id")
+    change_precheck = commands.add_parser(
+        "change-precheck", aliases=["graph-change-precheck"], help="预检混合图/属性批次"
+    )
+    change_precheck.add_argument("--graph", type=Path, help="图对象 JSON 文件")
+    change_precheck.add_argument("--properties", type=Path, help="属性记录 JSON 文件")
+    change_precheck.add_argument("--expected-revision", type=int)
+    change_propose = commands.add_parser(
+        "change-propose", aliases=["graph-change-propose"], help="建立统一变更候选"
+    )
+    change_propose.add_argument("--graph", type=Path)
+    change_propose.add_argument("--properties", type=Path)
+    change_propose.add_argument("--expected-revision", type=int)
+    change_propose.add_argument("--source", default="manual", choices=["manual", "model", "correction"])
+    change_propose.add_argument("--note", default="")
+    change_candidates = commands.add_parser(
+        "change-candidates", aliases=["graph-change-candidates"], help="列出统一变更候选"
+    )
+    change_candidates.add_argument("--status")
+    change_candidate = commands.add_parser(
+        "change-candidate", aliases=["graph-change-candidate"], help="查看统一变更候选"
+    )
+    change_candidate.add_argument("candidate_id")
+    change_accept = commands.add_parser(
+        "change-accept", aliases=["graph-change-accept"], help="接受统一变更候选"
+    )
+    change_accept.add_argument("candidate_id")
+    change_accept.add_argument("--version", type=int, default=1)
+    change_reject = commands.add_parser(
+        "change-reject", aliases=["graph-change-reject"], help="拒绝统一变更候选"
+    )
+    change_reject.add_argument("candidate_id")
+    change_reject.add_argument("--version", type=int, default=1)
+    property_history = commands.add_parser(
+        "property-history", aliases=["graph-property-history"], help="查看节点属性的已审记录与撤回"
+    )
+    property_history.add_argument("node_id")
+    property_history.add_argument("property_id")
+    property_history.add_argument(
+        "--scope", default="world", choices=["world", "cognition", "claim"]
+    )
+    property_history.add_argument("--holder-id")
+    property_world = commands.add_parser(
+        "property-world-state", aliases=["graph-property-world-state"], help="按节点分组投影全部属性状态"
+    )
+    property_world.add_argument("at_positional", nargs="?", help="可选故事 TimeRef 值")
+    property_world.add_argument("--at", help="故事 TimeRef：JSON 或 number/datetime 值；省略为当前视图")
+    property_world.add_argument("--as-of-revision", type=int)
     args = parser.parse_args()
+    if args.command.startswith("graph-property-"):
+        args.command = "property-" + args.command[len("graph-property-"):]
     try:
-        if args.command == "ui":
-            app = Path(__file__).with_name("ui.py")
-            project_path = Path(args.db).resolve()
-            if project_path.suffix != ".sqlite3":
-                raise OperationError("界面项目文件须使用 .sqlite3 扩展名")
-            raise SystemExit(
-                subprocess.call(
-                    [
-                        sys.executable,
-                        "-m",
-                        "streamlit",
-                        "run",
-                        str(app),
-                        "--server.address=127.0.0.1",
-                        f"--server.port={args.port}",
-                        "--server.showEmailPrompt=false",
-                        "--logger.hideWelcomeMessage=true",
-                        "--browser.gatherUsageStats=false",
-                    ],
-                    env={
-                        **os.environ,
-                        "NARRATIVE_PROJECT_DIR": str(project_path.parent),
-                        "NARRATIVE_PROJECT_NAME": project_path.stem,
-                    },
-                )
-            )
-        if args.command == "restore":
-            print(Operations.restore_file(args.backup, args.destination))
-            return
-        if args.command.startswith("graph-"):
-            graph = Operations.create_graph_project(args.db) if args.command == "graph-create" else Operations.open_graph_project(args.db)
+        if args.command.startswith(("graph-", "property-", "change-")):
+            graph = create_graph_project(args.db) if args.command == "graph-create" else open_graph_project(args.db)
             if args.command == "graph-create":
                 result = graph.graph_project_info()
             elif args.command == "graph-import":
@@ -176,6 +245,16 @@ def main():
             elif args.command == "graph-view":
                 spec_text = args.spec_file.read_text(encoding="utf-8-sig") if args.spec_file else args.spec
                 result = graph.graph_view(json.loads(spec_text))
+            elif args.command == "graph-event-compare":
+                result = graph.graph_event_compare(
+                    args.left_id, args.right_id,
+                    context_id=args.context_id, as_of_revision=args.as_of_revision,
+                    axis=args.axis,
+                )
+            elif args.command == "graph-event-lines":
+                result = graph.graph_event_lines(
+                    context_id=args.context_id, as_of_revision=args.as_of_revision,
+                )
             elif args.command == "graph-candidate":
                 result = graph.graph_candidate(args.candidate_id)
             elif args.command == "graph-accept":
@@ -194,99 +273,113 @@ def main():
                 result = graph.graph_analysis_control(args.run_id)
             elif args.command == "graph-instruct":
                 result = {"instruction_id": graph.instruct_graph_analysis(args.run_id, args.text)}
+            elif args.command == "property-precheck":
+                revision = (
+                    args.expected_revision
+                    if args.expected_revision is not None
+                    else graph.graph_project_info()["revision"]
+                )
+                result = graph.property_precheck(_load_records(args), revision)
+            elif args.command == "property-propose":
+                revision = (
+                    args.expected_revision
+                    if args.expected_revision is not None
+                    else graph.graph_project_info()["revision"]
+                )
+                candidate_id = graph.property_propose(
+                    _load_records(args), revision, source=args.source, note=args.note
+                )
+                try:
+                    candidate = graph.property_candidate(candidate_id)
+                except (AttributeError, ValueError):
+                    candidate = {"status": "pending", "version": 1, "diagnostics": []}
+                result = {
+                    "candidate_id": candidate_id,
+                    "status": candidate["status"],
+                    "version": candidate["version"],
+                    "expected_revision": revision,
+                    "diagnostics": candidate["diagnostics"],
+                }
+            elif args.command == "property-accept":
+                result = {
+                    "revision": graph.property_accept(args.candidate_id, args.version)
+                }
+            elif args.command == "property-reject":
+                graph.property_reject(args.candidate_id, args.version)
+                result = {"status": "rejected"}
+            elif args.command == "property-state":
+                at = args.at if args.at is not None else args.at_positional
+                disclosure_cut = None
+                if args.disclosure_source is not None or args.disclosure_start is not None:
+                    if args.disclosure_source is None or args.disclosure_start is None:
+                        raise OperationError("披露切点须同时提供 --disclosure-source 和 --disclosure-start")
+                    disclosure_cut = {
+                        "source_id": args.disclosure_source,
+                        "start": args.disclosure_start,
+                    }
+                result = graph.property_state(
+                    args.node_id,
+                    args.property_id,
+                    _at_argument(at),
+                    as_of_revision=args.as_of_revision,
+                    scope=args.scope,
+                    holder_id=args.holder_id,
+                    disclosure_cut=disclosure_cut,
+                    include_diagnostics=args.diagnostics,
+                )
+            elif args.command == "property-disclosure-state":
+                result = graph.property_disclosure_state(
+                    args.node_id,
+                    args.property_id,
+                    {"source_id": args.source, "start": args.start},
+                    scope=args.scope,
+                    holder_id=args.holder_id,
+                )
+            elif args.command in {"change-precheck", "change-propose"}:
+                graph_objects = (
+                    json.loads(args.graph.read_text(encoding="utf-8"))
+                    if getattr(args, "graph", None) else []
+                )
+                property_records = (
+                    json.loads(args.properties.read_text(encoding="utf-8"))
+                    if getattr(args, "properties", None) else []
+                )
+                expected = args.expected_revision
+                if expected is None:
+                    expected = graph.graph_project_info()["revision"]
+                if args.command == "change-precheck":
+                    result = graph.change_precheck(graph_objects, property_records, expected)
+                else:
+                    result = {
+                        "candidate_id": graph.change_propose(
+                            graph_objects, property_records, expected,
+                            source=args.source, note=args.note,
+                        )
+                    }
+            elif args.command == "change-candidates":
+                result = graph.change_candidates(args.status)
+            elif args.command == "change-candidate":
+                result = graph.change_candidate(args.candidate_id)
+            elif args.command == "change-accept":
+                result = {"revision": graph.change_accept(args.candidate_id, args.version)}
+            elif args.command == "change-reject":
+                graph.change_reject(args.candidate_id, args.version)
+                result = {"status": "rejected"}
+            elif args.command == "property-history":
+                result = graph.property_history(
+                    args.node_id, args.property_id,
+                    scope=args.scope, holder_id=args.holder_id,
+                )
+            elif args.command == "property-world-state":
+                at = args.at if args.at is not None else args.at_positional
+                result = graph.property_world_state(
+                    _at_argument(at), as_of_revision=args.as_of_revision
+                )
             else:
                 raise AssertionError("unreachable")
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return
-        operations = Operations(args.db)
-        if args.command == "demo":
-            print(operations.load_demo())
-        elif args.command == "import":
-            print(operations.import_file(args.path, args.title))
-        elif args.command == "status":
-            print(
-                json.dumps(
-                    operations.status(),
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
-        elif args.command == "character":
-            print(json.dumps(operations.character_profile(args.entity_id), ensure_ascii=False, indent=2))
-        elif args.command == "event-profile":
-            print(json.dumps(operations.event_profile(args.event_id), ensure_ascii=False, indent=2))
-        elif args.command == "search-analysis":
-            print(
-                json.dumps(
-                    operations.search_analysis(
-                        args.query,
-                        source_ids=args.source_id or None,
-                        entity_ids=args.entity_id or None,
-                        kinds=args.kind or None,
-                        narrative_types=args.narrative_type or None,
-                        categories=args.category or None,
-                        statuses=args.status or None,
-                        storyline_ids=args.storyline_id or None,
-                        limit=args.limit,
-                    ),
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
-        elif args.command == "classification-table":
-            print(
-                json.dumps(
-                    operations.classification_table(args.source_id or None),
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
-        elif args.command in {"accept", "reject", "check"}:
-            review = operations.review_candidate(args.change_id)
-            if args.command == "accept":
-                print(operations.accept_candidate(args.change_id, review.version))
-            elif args.command == "reject":
-                operations.reject_candidate(args.change_id, review.version)
-            else:
-                print(
-                    json.dumps(
-                        [d.model_dump() for d in review.diagnostics],
-                        ensure_ascii=False,
-                        indent=2,
-                    )
-                )
-        elif args.command == "backup":
-            print(operations.backup(args.destination))
-        elif args.command == "export-input":
-            print(operations.export_input_file(args.source_id, args.destination))
-        elif args.command == "ingest-result":
-            print(operations.ingest_result_file(args.chunk_id, args.path) or "空结果已记录")
-        elif args.command == "extract":
-            settings = operations.harness_settings()
-            for argument, field in (
-                (args.base_url, "base_url"),
-                (args.model, "model"),
-                (args.timeout, "timeout_seconds"),
-                *((getattr(args, field), field) for field in CONTEXT_FIELDS),
-            ):
-                if argument is not None:
-                    settings[field] = argument
-            operations.save_harness_settings(settings)
-            run_id = operations.create_run(args.source_id)
-            operations.start_extraction(run_id)
-            print(f"提取任务：{run_id}", flush=True)
-            try:
-                while True:
-                    run = next(r for r in operations.runs() if r["id"] == run_id)
-                    if run["status"] not in {"queued", "running"}:
-                        break
-                    time.sleep(0.5)
-            except KeyboardInterrupt:
-                operations.cancel_extraction(run_id)
-                raise SystemExit(130) from None
-            print(json.dumps(run, ensure_ascii=False, indent=2))
-            if run["status"] != "complete":
-                raise OperationError(run["data"].get("error") or "提取未完成")
+        raise OperationError(f"未知命令：{args.command}")
     except (OperationError, ValueError, OSError) as exc:
         parser.exit(1, f"错误：{exc}\n")
 

@@ -1,4 +1,9 @@
-"""Version 4 graph project contracts. Assertions are the sole claim-bearing record."""
+"""Version 5 graph project contracts.
+
+Ordinary attribute/relation/participation assertions are retired in v5; current
+node state is expressed by append-only property records. Temporal and containment
+assertions remain the reviewed graph claim records.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +26,7 @@ type NodeType = Literal[
 ]
 type Origin = Literal["original", "inference", "creative", "production"]
 
+# v5 replaces ordinary claim assertions with append-only property records.
 
 class TimeRef(GraphModel):
     timeline_id: str = "story"
@@ -79,6 +85,13 @@ class DisclosureRef(GraphModel):
     start: int = Field(ge=0)
 
 
+class NodeEvidence(GraphModel):
+    """The exact sentence a node was extracted from."""
+
+    source_id: str
+    quote: str = Field(min_length=1)
+
+
 class Node(GraphModel):
     kind: Literal["node"] = "node"
     id: str = Field(default_factory=new_id)
@@ -89,34 +102,40 @@ class Node(GraphModel):
     context_id: str = "canon"
     identity_note: str = ""
     occurrence: TimeExtent | None = None
+    # Where the reader first meets this node in the source. Story time and
+    # reading position are different axes; this one needs no inference.
+    disclosure: DisclosureRef | None = None
+    # The sentence it came from. Without this a node is just a name plus an
+    # offset; the quote is what makes it checkable.
+    evidence: NodeEvidence | None = None
+    # Who and what takes part. Kept on the event itself: a participant list is
+    # part of what the event is, not a separate assertion family.
+    participants: list[str] = Field(default_factory=list)
+    # Neighbouring events, recorded on the event so a chapter reads as a chain
+    # without needing a separate temporal assertion for every pair.
+    predecessors: list[str] = Field(default_factory=list)
+    successors: list[str] = Field(default_factory=list)
+    # Composite events contain atomic ones. A scene is just a larger event, and a
+    # scene can itself sit inside a larger one — containment is a node field, not
+    # a separate assertion family.
+    events: list[str] = Field(default_factory=list)
+    # Chapter boundaries are marks on the reading chain, not separate nodes and
+    # not hard breaks: a chapter starts or ends at an event, and the chain runs on.
+    source_marks: list[dict] = Field(default_factory=list)
+    # Retraction keeps history: the record stays, the projection drops it.
+    retracted: bool = False
 
     @model_validator(mode="after")
     def check_occurrence(self) -> Node:
         if self.occurrence and self.node_type != "event":
             raise ValueError("仅事件节点有发生区间；其他对象的时变状态用断言")
-        return self
-
-
-class PredicateDefinition(GraphModel):
-    kind: Literal["predicate"] = "predicate"
-    id: str
-    label: str = Field(min_length=1)
-    semantic: Literal["attribute", "relation", "participation", "temporal", "containment"]
-    subject_types: list[NodeType] = Field(default_factory=list)
-    object_types: list[NodeType] = Field(default_factory=list)
-    value_type: Literal["node", "scalar", "either"] = "node"
-    functional: bool = False
-    temporal_relation: Literal["before", "after", "same", "overlaps", "contains"] | None = None
-    description: str = ""
-
-    @model_validator(mode="after")
-    def check_temporal_relation(self) -> PredicateDefinition:
-        if self.semantic == "temporal" and self.temporal_relation is None:
-            raise ValueError("时序谓词须指定 temporal_relation")
-        if self.semantic != "temporal" and self.temporal_relation is not None:
-            raise ValueError("只有时序谓词可指定 temporal_relation")
-        if self.semantic == "containment" and self.value_type != "node":
-            raise ValueError("组织包含谓词须使用节点宾语")
+        for mark in self.source_marks:
+            if not isinstance(mark, dict) or not isinstance(mark.get("source_id"), str):
+                raise ValueError("章节标记须含 source_id")
+            if mark.get("role") not in {"start", "end"}:
+                raise ValueError("章节标记的 role 只能是 start 或 end")
+        if self.source_marks and self.node_type != "event":
+            raise ValueError("章节标记只挂在事件节点上")
         return self
 
 
@@ -145,63 +164,6 @@ class Timeline(GraphModel):
     calendar: str | None = None
 
 
-class Evidence(GraphModel):
-    kind: Literal["evidence"] = "evidence"
-    id: str = Field(default_factory=new_id)
-    source_id: str
-    source_hash: str
-    start: int = Field(ge=0)
-    end: int = Field(gt=0)
-    quote: str = Field(min_length=1)
-
-
-class EvidenceLink(GraphModel):
-    kind: Literal["evidence_link"] = "evidence_link"
-    id: str = Field(default_factory=new_id)
-    assertion_id: str
-    evidence_id: str
-    role: Literal["supports", "refutes", "mentions"] = "supports"
-
-
-class Assertion(GraphModel):
-    kind: Literal["assertion"] = "assertion"
-    id: str = Field(default_factory=new_id)
-    subject_id: str
-    predicate_id: str
-    object_id: str | None = None
-    value: str | bool | int | float | None = None
-    scope: Literal["world", "claim", "knowledge"] = "world"
-    holder_id: str | None = None
-    context_id: str = "canon"
-    polarity: Literal["positive", "negative"] = "positive"
-    modality: Literal["actual", "possible", "hypothetical", "reported"] = "actual"
-    certainty: Literal["certain", "suspects", "denies", "unknown"] = "unknown"
-    validity: TimeExtent = Field(default_factory=TimeExtent)
-    disclosure: DisclosureRef | None = None
-    origin: Origin = "original"
-    assessment: Literal["supported", "disputed", "retracted", "unresolved"] = "unresolved"
-    derived_from: list[str] = Field(default_factory=list)
-    supersedes_id: str | None = None
-    qualifiers: dict[str, str] = Field(default_factory=dict)
-    temporal_left: TimeRef | None = None
-    temporal_right: TimeRef | None = None
-    order_index: int | None = Field(default=None, ge=0, strict=True)
-
-    @model_validator(mode="after")
-    def check_claim(self) -> Assertion:
-        if (self.object_id is None) == (self.value is None) and self.temporal_right is None:
-            raise ValueError("断言须且仅须有节点宾语或标量值")
-        if self.object_id is not None and self.value is not None:
-            raise ValueError("节点宾语与标量值不能同时存在")
-        if self.scope == "world" and self.holder_id:
-            raise ValueError("世界断言不可指定人物持有人")
-        if self.scope != "world" and not self.holder_id:
-            raise ValueError("人物主张／认知须指定持有人")
-        if self.origin == "inference" and not self.derived_from:
-            raise ValueError("推断断言须给出所依据的断言 ID")
-        return self
-
-
 class SourceOrder(GraphModel):
     kind: Literal["source_order"] = "source_order"
     id: str = Field(default_factory=new_id)
@@ -211,7 +173,7 @@ class SourceOrder(GraphModel):
 
 
 type GraphObject = Annotated[
-    Node | PredicateDefinition | Context | Timeline | Evidence | EvidenceLink | Assertion | SourceOrder,
+    Node | Context | Timeline | SourceOrder,
     Field(discriminator="kind"),
 ]
 GRAPH_OBJECTS = TypeAdapter(list[GraphObject])

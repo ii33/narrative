@@ -13,8 +13,8 @@ from urllib.parse import urlsplit
 
 from pydantic import Field, StrictInt, model_validator
 
+from .base_model import Model
 from .model_gateway import COMPACTION_MODEL, ModelGateway
-from .models import Model
 from .providers import preset
 
 SDK_VERSION = "0.1.5rc1"
@@ -333,6 +333,10 @@ class HarnessRunner:
     def partial_raw(self) -> list[str]:
         """Provider content observed before an interrupted SDK turn, if any."""
         return self._gateway.raw_snapshot()
+
+    def upstream_activity_snapshot(self) -> dict:
+        """ModelGateway last upstream response-byte activity for live progress."""
+        return self._gateway.upstream_activity_snapshot()
 
     def extract(self, instruction: str, payload: dict, session_id: str) -> HarnessReply:
         with self._gateway.session(session_id):

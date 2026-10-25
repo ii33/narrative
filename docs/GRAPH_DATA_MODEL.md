@@ -1,10 +1,10 @@
-# 节点—断言—时序：v4 数据模型
+# 节点—断言—时序：v5 数据模型
 
 ## 目标与边界
 
-v4 是新建项目的主模型。旧 v3 项目、原始 Library 附件与历史报告原样保留；图项目使用独立 SQLite 文件，`Operations.open_graph_project` 在写入前检查版本并拒绝旧库。UI、CLI 和 agent 只经 `Operations` 返回的 `GraphOperations` 门面读写，不把待审候选或模型草稿混入正式图。
+v5 是新建项目的主模型。旧 v4／v3 项目、原始 Library 附件与历史报告原样保留；图项目使用独立 SQLite 文件，`Operations.open_graph_project` 在写入前检查版本并**显式拒绝 v4 及更旧库**，不迁移、不改写。UI、CLI 和 agent 只经 `Operations` 返回的 `GraphOperations` 门面读写，不把待审候选或模型草稿混入正式图。
 
-图的事实来源只有一处：**Assertion（断言）**。人物、物件、地点、事件、场景和故事线都是稳定身份的 Node；它们之间的参与、关系、地点、属性和先后均由类型化 PredicateDefinition + Assertion 表达。Node 本身只保存身份、别名、类型和必要的发生区间元信息，不塞有证据或可争议的属性。事件是一等节点，却仍可由谓词域、参与角色和时间规则施加专门约束。
+图的事实来源分两类权威记录：**Assertion（断言）**表达时序、阅读组织以及有立场的主张；**属性记录**表达节点属性、初始状态、观察、事件变更与撤回，合同见 [节点属性与事件变更合同](PROPERTY_STATE_CONTRACT.md)。人物、物件、地点、事件、场景和故事线都是稳定身份的 Node；v5 中普通 `attribute`、`relation`、`participation` 断言停用，节点状态不再由断言重复表达。Node 本身只保存身份、别名、类型和必要的发生区间元信息，不塞有证据或可争议的属性。事件是一等节点，却仍可由谓词域、参与角色和时间规则施加专门约束。
 
 ## 逻辑结构
 
@@ -23,6 +23,8 @@ v4 是新建项目的主模型。旧 v3 项目、原始 Library 附件与历史�
 物理库以 `objects(id,kind,data,accepted_revision)` 保存类型化对象，`evidence_links` 做独立多对多索引，`sources` 保存精确原文，`candidates` 和 `revisions` 保存审核与审计。断言的主语、宾语、持有人和谓词有 SQLite 表达式索引。这个实现保留关系型事务与审计，不依赖外部图数据库；UI 所见边由已接受断言投影生成，不另存第二套“真值边”。
 
 ## 统一断言的几种形态
+
+> **存档说明：** 以下示例是 v4 形态。v5 中 `participates`、`occurs_at`、`lost` 这类 participation／relation／attribute 断言已停用，应改用属性记录；`before` 等 temporal 断言与 containment 组织断言仍按本节表达。
 
 事件 `e1=甲在码头送别乙`、人物 `p1=甲`、`p2=乙`、地点 `dock=码头` 是节点：
 
@@ -64,9 +66,51 @@ v4 是新建项目的主模型。旧 v3 项目、原始 Library 附件与历史�
 图分析 agent 的工作集仅为私有草稿。一次 `stage` 可暂存多个对象；准备提交时，模型须单独调用 `graph_precheck({})`，观察整批诊断、正式修订号与工作集哈希，再单独调用 `graph_propose({})` 生成待人工审核的候选。`done` 或覆盖说明不会暗中触发预检、提交或接受。暂存对象变化、正式修订变化后旧预检失效，必须重新预检。运行器以工作集、独立证据、有效工具观察、预检诊断和候选变化判断实质进展；反复无效动作或空等待即使持续改写覆盖文字也会有界停止，并保留原始响应与诊断供人审视。
 `plan`、`coverage` 只用于前台展示；模型给出文字、列表或嵌套摘要时会整理为可显示的文字，原始响应仍原样留存，合法工具照常执行。工具参数、图对象和预检合同继续严格校验，不从展示文字猜测或修补事实。
 
+## 统一变更候选（`change-*`）
+
+`graph-*` 与 `property-*` 两套入口继续保留，用于只改一类记录的调用方；**混合变更**走统一的 `change-*` 合同：
+
+| 操作 | 行为 |
+| --- | --- |
+| `change_precheck(graph_objects, property_records, expected_revision)` | 同一批预检图对象和属性记录；属性记录可以引用本批新建的节点/事件。返回诊断带 `family=graph|property`。 |
+| `change_propose(...)` | 存一个 pending 统一候选；有 error 时拒绝创建。 |
+| `change_candidates(status)` / `change_candidate(id)` | 查看统一候选及两族记录数。 |
+| `change_accept(id, version)` | **一个 SQLite 事务**写入 `objects`/`evidence_links` 和 `property_records`，只递增一次全局 revision；`revisions.data` 同时保存 `operations` 与 `property_operations`。 |
+| `change_reject(id, version)` | 拒绝统一候选，不写正式数据。 |
+
+接受时会重新检查 `expected_revision`；候选建立后正式资料若已变化，整批拒绝，不做部分写入。候选保存的是**创建时的基础修订**，接受时校验这个修订；调用方传入更大的 `version` 不能绕过基础修订检查。批内引用（属性记录引用同批节点/事件）在预检时合并已接受快照和本批图对象后校验。
+
+属性记录新增 `scope`（`world/belief/claim/knowledge`）、`holder_id` 和 `disclosure`；世界事实与人物认知共享属性定义、事件锚点、证据、修订和撤回，但分别求值。`property_state(..., scope=..., holder_id=...)` 查认知，`disclosure_cut` 控制读者可见位置。详见 [节点属性与事件变更合同](PROPERTY_STATE_CONTRACT.md)。
+
+统一候选解决的是**候选与提交层**的分裂；跨族依赖失效和 GraphRAG 到候选的转换仍是后续工作，不因这个入口自动成立。
+
+## 跨族依赖与派生资格（2026-10-21）
+
+断言和属性记录都可以声明 `derived_from` / `support_groups`。引用是类型化的：
+
+```json
+{"kind": "assertion", "id": "a17"}
+{"kind": "property_record", "id": "p42"}
+```
+
+旧的字符串形式仍按 `assertion` 解释。`support_groups` 是“组内全部成立、组间任一成立”：
+
+```json
+"support_groups": [
+  [{"kind": "property_record", "id": "pa"}, {"kind": "assertion", "id": "a1"}],
+  [{"kind": "property_record", "id": "pb"}]
+]
+```
+
+没有支持组的记录默认为有效（除非被显式撤回）。预检检查悬空引用和推导环；跨族引用只能通过 `change_precheck` / `change_propose` 提交，单独 `graph_precheck` 会报 `CROSS_FAMILY_REF`。
+
+`property_state` 和 `graph_query` 会排除当前失去支持的派生记录；`graph_query` 的断言带 `derived_status`。失去支持**不等于**被撤回，也不等于内容为假：它只表示当前没有完整、有效的支持路径。历史记录仍保留，旧 `as_of_revision` 仍按当时的记录还原。
+
+撤回与资格变化不需要额外写入：属性撤回或断言 `assessment=retracted` 与其它记录在同一修订中接受，查询按该修订重新计算资格；当前视图一致，旧修订仍可还原。
+
 ## 阅读组织层级（`graph-nesting/2`）
 
-存储仍是 v4：用 `semantic=containment` 的谓词和有原文证据的断言表达父子节点，不增添物理表、不迁移旧平面图。它与时序谓词 `temporal_relation=contains` 完全不同。`subject_id` 为父节点，`object_id` 为子节点。`order_index` 是可选非负整数，只能用于组织包含，表示同父子节点的阅读顺序；其后按已登记的原文披露位置、断言 ID 稳定排序。这个顺序不推出故事发生时间。
+存储仍是 v5 图项目：用 `semantic=containment` 的谓词和有原文证据的断言表达父子节点，不增添物理表、不迁移旧平面图。它与时序谓词 `temporal_relation=contains` 完全不同。`subject_id` 为父节点，`object_id` 为子节点。`order_index` 是可选非负整数，只能用于组织包含，表示同父子节点的阅读顺序；其后按已登记的原文披露位置、断言 ID 稳定排序。这个顺序不推出故事发生时间。
 
 允许故事线包含故事线、场景或事件；场景包含场景或事件；事件包含事件。人物、物品、地点仍是共享实体，由参与或关系断言引用，不能成为组织子节点。有效组织边须是 `positive/world/actual`、同一语境、未撤回，且有关联 `supports` 原文证据；`origin=original` 或有有效 `derived_from` 依据的 `inference` 均可，`creative/production` 不作为正式组织边。推断依赖失效或陈旧时，查询不投影该边。预检禁止自包含、任意深度环、重复父子边和一个子节点有多个父节点。显式 `supersedes_id` 只可替换同语境、同子节点的旧组织边（可更换父节点）；将既有断言修订为 `assessment=retracted` 可撤回其组织效力。组织边不会继承参与人、结果或时间。
 
@@ -86,4 +130,4 @@ v4 是新建项目的主模型。旧 v3 项目、原始 Library 附件与历史�
 - 查询选择分支及其祖先，仍保留所有可见相冲断言及各自来源，不做默认“分支覆盖正篇”或最新值胜出。跨分支同名节点不会自动判定同一身份。
 - 没有隐式 `persist_until_changed`：新状态不会自动关闭旧状态；只有可审核且有证据的有效期修订或显式时间关系能让查询判定交接前后。无依据时保持未知或提示冲突。
 - 带披露切点的 `graph_query` 只返回可见断言及其引用节点，避免未来节点名经图总览或姓名搜索泄漏。`graph_snapshot` 和 `graph_display_map` 是无切点的正式全集/审核投影，界面不能拿它们补全阅读切点下的图。
-- 候选可以整批编辑或保留子集后重预检；v4 没有把旧库资料自动导入候选。真实模型输出与审核后的正式图应分别报告。
+- 候选可以整批编辑或保留子集后重预检；v5 没有把旧库资料自动导入候选。真实模型输出与审核后的正式图应分别报告。

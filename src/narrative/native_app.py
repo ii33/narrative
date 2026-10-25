@@ -46,16 +46,47 @@ def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("QT_LOGGING_RULES", "qt.scenegraph.general=true;qt.rhi.*=true")
     try:
         from PySide6.QtCore import QTimer, QUrl, qInstallMessageHandler
+        from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette
         from PySide6.QtQml import QQmlApplicationEngine
         from PySide6.QtQuick import QQuickWindow, QSGRendererInterface
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtQuickControls2 import QQuickStyle
+        from PySide6.QtWidgets import QApplication, QMessageBox, QStyleFactory
     except ImportError as exc:
         print("桌面界面依赖缺失；请在项目目录运行 uv sync --extra desktop。", file=sys.stderr)
         raise SystemExit(2) from exc
 
     from .native_bridge import NativeBridge
 
-    app = QApplication.instance() or QApplication([sys.argv[0]])
+    app = cast(QApplication, QApplication.instance() or QApplication([sys.argv[0]]))
+    if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+        # The offscreen Qt plugin may expose no system fonts on Windows.
+        cjk_font = Path("C:/Windows/Fonts/NotoSansSC-VF.ttf")
+        if cjk_font.is_file():
+            font_id = QFontDatabase.addApplicationFont(str(cjk_font))
+            if font_id >= 0:
+                families = QFontDatabase.applicationFontFamilies(font_id)
+                if families:
+                    app.setFont(QFont(families[0]))
+    # Fusion with a fixed light palette: without it the controls follow the OS
+    # theme, and dark buttons show up as black blocks on the light pages.
+    app.setStyle(QStyleFactory.create("Fusion"))
+    # Qt Quick Controls need their own style switch: importing the Fusion module
+    # in QML does nothing, and the default style leaves controls unthemed.
+    QQuickStyle.setStyle("Fusion")
+    palette = app.palette()
+    for role, color in (
+        (QPalette.ColorRole.Window, "#f4f7fb"),
+        (QPalette.ColorRole.Base, "#ffffff"),
+        (QPalette.ColorRole.AlternateBase, "#f4f7fb"),
+        (QPalette.ColorRole.Button, "#ffffff"),
+        (QPalette.ColorRole.Text, "#16233a"),
+        (QPalette.ColorRole.WindowText, "#16233a"),
+        (QPalette.ColorRole.ButtonText, "#16233a"),
+        (QPalette.ColorRole.Highlight, "#2b5cd9"),
+        (QPalette.ColorRole.HighlightedText, "#ffffff"),
+    ):
+        palette.setColor(role, QColor(color))
+    app.setPalette(palette)
     app.setApplicationName("叙事图工作台")
     render_log = _render_log_path(args.render_log)
     render_log.parent.mkdir(parents=True, exist_ok=True)

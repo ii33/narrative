@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtWidgets import QApplication
 
 from narrative.native_bridge import NativeBridge
 from narrative.operations import Operations
 
 
 def test_bridge_project_source_review_and_incremental_canvas(tmp_path) -> None:
-    app = QCoreApplication.instance() or QCoreApplication([])
+    app = QApplication.instance() or QApplication([])
     bridge = NativeBridge(tmp_path)
     results: list[tuple[str, dict]] = []
     errors: list[tuple[str, str]] = []
@@ -41,46 +41,49 @@ def test_bridge_project_source_review_and_incremental_canvas(tmp_path) -> None:
         remembered = invoke("provider", lambda: bridge.loadProviderProfileFor("ark"))["profile"]
         assert remembered["model"] == "saved-ark-model"
         assert invoke("provider", bridge.loadProviderProfile)["profile"]["provider"] == "qwen"
-        imported = invoke("source_imported", lambda: bridge.importSource("章节", "甲送别乙。"))
+        imported = invoke("source_imported", lambda: bridge.importSource("短章", "狼来到河边。小狼看见羊。"))
         source_id = imported["source_id"]
         source = invoke("source", lambda: bridge.sourceText(source_id))["source"]
-        assert "甲送别乙" in source["text"]
+        assert "狼来到河边" in source["text"]
 
         ops = Operations.open_graph_project(tmp_path / "native-test.sqlite3")
         revision = ops.graph_project_info()["revision"]
-        evidence = ops.locate(source_id, "甲送别乙")[0] | {"id": "q1"}
+        evidence = ops.locate(source_id, "狼来到河边")[0] | {"id": "quote"}
         objects = [
-            {"kind": "node", "id": "p1", "node_type": "person", "name": "甲"},
-            {"kind": "node", "id": "e1", "node_type": "event", "name": "送别"},
-            {"kind": "predicate", "id": "participates", "label": "参与", "semantic": "participation",
-             "subject_types": ["event"], "object_types": ["person"], "value_type": "node"},
+            {"kind": "node", "id": "line", "node_type": "storyline", "name": "河边主线"},
+            {"kind": "node", "id": "scene", "node_type": "scene", "name": "河边场景"},
+            {"kind": "node", "id": "event", "node_type": "event", "name": "狼来到河边"},
+            {"kind": "predicate", "id": "contains", "label": "包含", "semantic": "containment", "value_type": "node"},
             evidence,
-            {"kind": "assertion", "id": "a1", "subject_id": "e1", "predicate_id": "participates",
-             "object_id": "p1", "qualifiers": {"role": "送行者"}},
-            {"kind": "evidence_link", "id": "l1", "assertion_id": "a1", "evidence_id": "q1"},
+            {"kind": "assertion", "id": "a1", "subject_id": "line", "predicate_id": "contains", "object_id": "scene"},
+            {"kind": "assertion", "id": "a2", "subject_id": "scene", "predicate_id": "contains", "object_id": "event"},
+            {"kind": "evidence_link", "id": "l1", "assertion_id": "a1", "evidence_id": "quote"},
+            {"kind": "evidence_link", "id": "l2", "assertion_id": "a2", "evidence_id": "quote"},
         ]
         assert ops.graph_precheck(objects, revision) == []
         candidate_id = ops.graph_propose(objects, revision, source="manual")
         candidate = invoke("candidate", lambda: bridge.candidateDetail(candidate_id))
-        assert candidate["preview"]["display_map"]["items"]["p1"]["label"] == "甲"
+        assert candidate["preview"]["display_map"]["items"]["line"]["label"] == "河边主线"
         candidate_hierarchy = invoke("hierarchy", lambda: bridge.loadHierarchy(candidate_id))
         assert candidate_hierarchy["candidate_id"] == candidate_id
-        assert {node["id"] for node in candidate_hierarchy["nodes"]} == {"p1", "e1"}
+        assert {node["id"] for node in candidate_hierarchy["nodes"]} == {"line", "scene", "event"}
         assert invoke("canvas", bridge.loadGraph)["nodes"] == []  # pending remains private
         assert invoke("hierarchy", bridge.loadHierarchy)["nodes"] == []
         invoke("review", lambda: bridge.acceptCandidate(candidate_id, 1))
-        assert {node["id"] for node in invoke("hierarchy", bridge.loadHierarchy)["nodes"]} == {"p1", "e1"}
+        assert {node["id"] for node in invoke("hierarchy", bridge.loadHierarchy)["nodes"]} == {"line", "scene", "event"}
+        # Containment seeds only the storyline; scene and event stay collapsed on the canvas.
         overview = invoke("canvas", bridge.loadGraph)
-        assert [node["id"] for node in overview["nodes"]] == ["p1"]
-        bridge.setNodePosition("p1", 84.0, -17.0)
-        expanded = invoke("expand", lambda: bridge.expandNode("p1"))
-        assert [node["id"] for node in expanded["nodes_added"]] == ["e1"]
-        assert [(edge["subject_id"], edge["object_id"]) for edge in expanded["edges_added"]] == [("e1", "p1")]
-        assert invoke("expand", lambda: bridge.expandNode("p1"))["edges_added"] == []
-        detail = invoke("detail", lambda: bridge.nodeDetail("e1"))
-        assert detail["assertions"][0]["evidence"][0]["quote"] == "甲送别乙"
-        assert detail["assertions"][0]["object_label"] == "甲"
-        assert invoke("search", lambda: bridge.searchNodes("甲", ["person"]))["nodes"][0]["id"] == "p1"
+        assert [node["id"] for node in overview["nodes"]] == ["line"]
+        bridge.setNodePosition("line", 84.0, -17.0)
+        expanded = invoke("expand", lambda: bridge.expandNode("line"))
+        assert [node["id"] for node in expanded["nodes_added"]] == ["scene"]
+        assert [(edge["subject_id"], edge["object_id"]) for edge in expanded["edges_added"]] == [("line", "scene")]
+        assert invoke("expand", lambda: bridge.expandNode("line"))["edges_added"] == []
+        detail = invoke("detail", lambda: bridge.nodeDetail("scene"))
+        assertion = next(row for row in detail["assertions"] if row["id"] == "a1")
+        assert assertion["evidence"][0]["quote"] == "狼来到河边"
+        assert assertion["object_label"] == "河边场景"
+        assert invoke("search", lambda: bridge.searchNodes("河边", ["scene"]))["nodes"][0]["id"] == "scene"
     finally:
         bridge.close()
 
@@ -91,7 +94,7 @@ def test_bridge_query_epoch_discards_slow_filter_and_preserves_revision_zero(tmp
 
     from narrative.graph_operations import GraphOperations
 
-    app = QCoreApplication.instance() or QCoreApplication([])
+    app = QApplication.instance() or QApplication([])
     bridge = NativeBridge(tmp_path)
     results, errors = [], []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
@@ -132,4 +135,193 @@ def test_bridge_query_epoch_discards_slow_filter_and_preserves_revision_zero(tmp
         assert not errors
     finally:
         release.set()
+        bridge.close()
+
+
+def test_bridge_compare_and_temporal_candidate_call_operations(tmp_path, monkeypatch) -> None:
+    """The bridge reaches the audited Operations methods and emits dedicated kinds.
+
+    The core ``graph_event_compare``/``graph_temporal_propose`` land in a later
+    mainline round; this checks the bridge wiring only, never the pure core.
+    """
+    from narrative.graph_operations import GraphOperations
+
+    app = QApplication.instance() or QApplication([])
+    bridge = NativeBridge(tmp_path)
+    results: list[tuple[str, dict]] = []
+    errors: list[tuple[str, str]] = []
+    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
+    bridge.errorOccurred.connect(lambda kind, message: errors.append((kind, message)))
+
+    compare_calls: list[dict] = []
+    propose_calls: list[dict] = []
+
+    def fake_compare(self, left_id, right_id, context_id="canon", disclosure_cut=None, as_of_revision=None):
+        compare_calls.append({"left_id": left_id, "right_id": right_id, "context_id": context_id,
+                              "disclosure_cut": disclosure_cut, "as_of_revision": as_of_revision})
+        return {"left_id": left_id, "right_id": right_id, "relation": "before",
+                "assertion_ids": ["t1"], "reason": "已审 before 断言：左事件结束严格早于右事件开始"}
+
+    def fake_propose(self, source_id, quote, left_id, left_boundary, relation, right_id,
+                     right_boundary, expected_revision=None):
+        propose_calls.append({"source_id": source_id, "quote": quote, "left_id": left_id,
+                              "left_boundary": left_boundary, "relation": relation,
+                              "right_id": right_id, "right_boundary": right_boundary,
+                              "expected_revision": expected_revision})
+        return "cand-temporal-1"
+
+    monkeypatch.setattr(GraphOperations, "graph_event_compare", fake_compare)
+    monkeypatch.setattr(GraphOperations, "graph_temporal_propose", fake_propose)
+
+    def invoke(kind: str, action) -> dict:
+        before = len(results)
+        action()
+        deadline = time.monotonic() + 8
+        while len(results) == before and not errors and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert not errors
+        assert len(results) == before + 1, f"未收到 {kind} 的异步结果"
+        assert results[-1][0] == kind
+        return results[-1][1]
+
+    try:
+        invoke("project", lambda: bridge.createProject("compare-test"))
+        compared = invoke("event_compare", lambda: bridge.compareEvents("e1", "e2"))
+        assert compared["relation"] == "before"
+        assert compared["assertion_ids"] == ["t1"]
+        assert compare_calls == [{"left_id": "e1", "right_id": "e2", "context_id": "canon",
+                                  "disclosure_cut": None, "as_of_revision": None}]
+        proposed = invoke("temporal_candidate", lambda: bridge.proposeTemporalRelation(
+            "s1", "甲先别乙", "e1", "end", "before", "e2", "start"))
+        assert proposed == {"candidate_id": "cand-temporal-1", "status": "pending"}
+        assert propose_calls == [{"source_id": "s1", "quote": "甲先别乙", "left_id": "e1",
+                                  "left_boundary": "end", "relation": "before", "right_id": "e2",
+                                  "right_boundary": "start", "expected_revision": None}]
+    finally:
+        bridge.close()
+
+
+def test_bridge_disclosure_query_and_change_candidates(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    bridge = NativeBridge(tmp_path)
+    results: list[tuple[str, dict]] = []
+    errors: list[tuple[str, str]] = []
+    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
+    bridge.errorOccurred.connect(lambda kind, message: errors.append((kind, message)))
+
+    def invoke(kind: str, action) -> dict:
+        before = len(results)
+        action()
+        deadline = time.monotonic() + 8
+        while len(results) == before and not errors and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert not errors
+        assert len(results) == before + 1
+        assert results[-1][0] == kind
+        return results[-1][1]
+
+    try:
+        invoke("project", lambda: bridge.createProject("disclosure-test"))
+        imported = invoke("source_imported", lambda: bridge.importSource("短章", "林舟皮肤黝黑。"))
+        source_id = imported["source_id"]
+        ops = Operations.open_graph_project(tmp_path / "disclosure-test.sqlite3")
+        evidence = ops.locate(source_id, "皮肤黝黑")[0]
+        revision = ops.graph_project_info()["revision"]
+        graph = [
+            {"kind": "source_order", "id": "so", "source_id": source_id, "ordinal": 1, "context_id": "canon"},
+            {"kind": "node", "id": "n1", "node_type": "person", "name": "林舟"},
+            {"kind": "node", "id": "e1", "node_type": "event", "name": "得知肤色",
+             "disclosure": {"source_id": source_id, "start": evidence["start"]}},
+        ]
+        records = [
+            {"kind": "property_definition", "id": "skin", "value_type": "string", "cardinality": "one", "persistence": "until_changed"},
+            {"kind": "property_value", "id": "skin-1", "node_id": "n1", "property_id": "skin",
+             "value": "黝黑", "event_id": "e1",
+             "disclosure": {"source_id": source_id, "start": evidence["start"]},
+             "evidence": {"source_id": source_id, "quote": "皮肤黝黑"}},
+        ]
+        candidate_id = ops.change_propose(graph, records, revision, source="manual")
+        ops.change_accept(candidate_id, 1)
+
+        payload = invoke(
+            "property_disclosure",
+            lambda: bridge.queryPropertyDisclosure(
+                "n1", "skin", {"source_id": source_id, "start": evidence["start"]},
+                "world", "",
+            ),
+        )
+        assert payload["state"]["state"] == {"kind": "known", "value": "黝黑"}
+        candidates = invoke("change_candidates", lambda: bridge.loadChangeCandidates(""))
+        assert any(item["id"] == candidate_id for item in candidates["items"])
+    finally:
+        bridge.close()
+
+
+def test_bridge_revises_node_type_and_retracts(tmp_path) -> None:
+    """Type correction and retraction must be reachable from the UI, not scripts."""
+    app = QApplication.instance() or QApplication([])
+    bridge = NativeBridge(tmp_path)
+    results: list[tuple[str, dict]] = []
+    errors: list[tuple[str, str]] = []
+    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
+    bridge.errorOccurred.connect(lambda kind, message: errors.append((kind, message)))
+
+    def invoke(kind: str, action) -> dict:
+        before = len(results)
+        action()
+        deadline = time.monotonic() + 8
+        while len(results) == before and not errors and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert not errors, errors
+        assert len(results) == before + 1
+        assert results[-1][0] == kind
+        return results[-1][1]
+
+    try:
+        invoke("project", lambda: bridge.createProject("node-edit"))
+        invoke("source_imported", lambda: bridge.importSource("短章", "甲出场了。"))
+        ops = Operations.open_graph_project(tmp_path / "node-edit.sqlite3")
+        candidate = ops.change_propose(
+            [
+                {"kind": "node", "id": "n_jia", "node_type": "person", "name": "甲"},
+                {"kind": "node", "id": "n_fake", "node_type": "person", "name": "上帝"},
+            ],
+            [], ops.graph_project_info()["revision"], source="manual",
+        )
+        ops.change_accept(candidate, 1)
+
+        # A wrong type is corrected through a candidate, then accepted.
+        edited = invoke(
+            "node_edit",
+            lambda: bridge.reviseNode("n_jia", {"node_type": "item"}),
+        )
+        assert edited["candidate"]["status"] == "pending"
+        ops.change_accept(edited["candidate"]["id"], edited["candidate"]["version"])
+        node = next(item for item in ops.graph_snapshot()["nodes"] if item["id"] == "n_jia")
+        assert node["node_type"] == "item"
+
+        # A non-existent entity is retracted: gone from projections, kept in history.
+        retracted = invoke(
+            "node_edit",
+            lambda: bridge.reviseNode("n_fake", {"retracted": True}),
+        )
+        ops.change_accept(retracted["candidate"]["id"], retracted["candidate"]["version"])
+        visible = ops.graph_query(limit=100)["nodes"]
+        assert all(item["id"] != "n_fake" for item in visible)
+        stored = next(item for item in ops.graph_snapshot()["nodes"] if item["id"] == "n_fake")
+        assert stored["retracted"] is True
+
+        # Position binding is a candidate too, and lands on the node.
+        source_id = ops.sources()[0]["id"]
+        located = invoke(
+            "node_edit",
+            lambda: bridge.reviseNode("n_jia", {"disclosure": {"source_id": source_id, "start": 0}}),
+        )
+        ops.change_accept(located["candidate"]["id"], located["candidate"]["version"])
+        node = next(item for item in ops.graph_snapshot()["nodes"] if item["id"] == "n_jia")
+        assert node["disclosure"] == {"source_id": source_id, "start": 0}
+    finally:
         bridge.close()

@@ -1,4 +1,4 @@
-"""Protocol regressions from the first real v4 agent run; no cloud calls."""
+"""Protocol regressions for the v5 graph agent; no cloud calls."""
 
 from __future__ import annotations
 
@@ -32,23 +32,43 @@ def _action(name: str) -> str:
 
 
 def _objects() -> list[dict]:
-    """Nine linked objects staged together, including two reviewed claims."""
+    """A valid v5 batch of ten linked objects: two event claims over two events."""
     return [
-        {"kind": "node", "id": "p1", "node_type": "person", "name": "屠夫"},
         {"kind": "node", "id": "w1", "node_type": "other", "name": "狼"},
         {"kind": "node", "id": "e1", "node_type": "event", "name": "屠夫遇狼"},
-        {"kind": "predicate", "id": "participates", "label": "参与", "semantic": "participation", "subject_types": ["event"], "object_types": ["person", "other"], "value_type": "node"},
+        {"kind": "node", "id": "e2", "node_type": "event", "name": "狼离开"},
+        {"kind": "predicate", "id": "before", "label": "先于", "semantic": "temporal", "temporal_relation": "before", "subject_types": ["event"], "object_types": ["event"], "value_type": "node"},
+        {"kind": "predicate", "id": "contains_event", "label": "包含事件", "semantic": "containment", "subject_types": ["event"], "object_types": ["event"], "value_type": "node"},
         {"kind": "evidence", "id": "ev1", "evidence_ref": "h1"},
-        {"kind": "assertion", "id": "a1", "subject_id": "e1", "predicate_id": "participates", "object_id": "p1", "qualifiers": {"role": "遭遇者"}},
-        {"kind": "assertion", "id": "a2", "subject_id": "e1", "predicate_id": "participates", "object_id": "w1", "qualifiers": {"role": "被遇见的狼"}},
+        {"kind": "assertion", "id": "a1", "subject_id": "e1", "predicate_id": "before", "object_id": "e2", "temporal_left": {"timeline_id": "story", "form": "event_boundary", "event_id": "e1", "boundary": "end"}, "temporal_right": {"timeline_id": "story", "form": "event_boundary", "event_id": "e2", "boundary": "start"}},
+        {"kind": "assertion", "id": "a2", "subject_id": "e1", "predicate_id": "contains_event", "object_id": "e2"},
         {"kind": "evidence_link", "id": "l1", "assertion_id": "a1", "evidence_id": "ev1"},
         {"kind": "evidence_link", "id": "l2", "assertion_id": "a2", "evidence_id": "ev1"},
     ]
 
 
-def _scripted(tmp_path: Path, monkeypatch, responses, *, before_reply=None, budget=None):
+def _base_nodes() -> list[dict]:
+    """Reviewed nodes accepted before a run so property records can reference them."""
+    return [
+        {"kind": "node", "id": "actor", "node_type": "person", "name": "屠夫"},
+        {"kind": "node", "id": "mark", "node_type": "event", "name": "遇狼"},
+    ]
+
+
+def _property_records() -> list[dict]:
+    """One v5 property batch: a definition, an initial state, and an event change."""
+    return [
+        {"kind": "property_definition", "id": "state", "value_type": "string", "cardinality": "one", "persistence": "until_changed", "owner_node_types": ["person"]},
+        {"kind": "property_value", "id": "mark-state", "node_id": "actor", "property_id": "state", "value": "安然", "event_id": "mark"},
+    ]
+
+
+def _scripted(tmp_path: Path, monkeypatch, responses, *, before_reply=None, budget=None, base_nodes=None):
     ops = GraphOperations(tmp_path / "graph.sqlite3", create=True)
     source_id = ops.import_source("短篇", "屠夫遇见狼。")
+    if base_nodes:
+        revision = ops.graph_project_info()["revision"]
+        ops.graph_accept(ops.graph_propose(base_nodes, revision, source="manual"), 1)
     calls = []
 
     class FakeRunner:
@@ -91,9 +111,12 @@ def _scripted(tmp_path: Path, monkeypatch, responses, *, before_reply=None, budg
 
 
 def test_explicit_precheck_and_propose_after_unbounded_stage(tmp_path: Path, monkeypatch):
+    records = _property_records()
     responses = [
         _reply(),  # replaced with locate after the isolated source is created
         _reply(stage=_objects()),
+        _reply(actions=[{"tool": "property_precheck", "args": {"records": records}}]),
+        _reply(actions=[{"tool": "property_propose", "args": {"records": records}}]),
         _action("graph_precheck"),
         _action("graph_propose"),
     ]
@@ -101,18 +124,24 @@ def test_explicit_precheck_and_propose_after_unbounded_stage(tmp_path: Path, mon
         if index == 0:
             responses[0] = _reply(actions=[{"tool": "locate", "args": {"source_id": graph_ops.sources()[0]["id"], "quote": "屠夫遇见狼。"}}])
 
-    graph_ops, state, calls = _scripted(tmp_path, monkeypatch, responses, before_reply=source_for_script)
+    graph_ops, state, calls = _scripted(tmp_path, monkeypatch, responses, before_reply=source_for_script, base_nodes=_base_nodes())
     assert state["status"] == "complete", state.get("error")
-    assert len(calls) == 4
+    assert len(calls) == 6
     assert len({session for _, session in calls}) == 1
-    assert len(state["workspace"]) == 9
-    assert state["steps"][2]["tools"][0]["result"]["status"] == "passed"
+    assert len(state["workspace"]) == 10
+    assert state["steps"][2]["tools"][0]["result"]["passed"] is True
     assert state["steps"][3]["tools"][0]["result"]["status"] == "pending"
+    assert state["steps"][4]["tools"][0]["result"]["status"] == "passed"
+    assert state["steps"][5]["tools"][0]["result"]["status"] == "pending"
     candidate_id = state["candidate_ids"][0]
     candidate = graph_ops.graph_candidate(candidate_id)
     assert candidate["status"] == "pending"
-    assert len(candidate["objects"]) == 9
+    assert len(candidate["objects"]) == 10
     assert graph_ops.graph_snapshot()["assertions"] == []
+    pending_properties = graph_ops.property_candidates("pending")
+    assert len(pending_properties) == 1
+    assert pending_properties[0]["records"] == records
+    assert graph_ops.property_candidates("accepted") == []
 
 
 @pytest.mark.parametrize("mode", ["invalid_tool", "empty_wait"])
@@ -152,7 +181,7 @@ def test_stage_change_invalidates_precheck_until_rechecked(tmp_path: Path, monke
     assert state["steps"][4]["tools"][0]["result"].get("error")
     assert state["steps"][5]["tools"][0]["result"]["status"] == "passed"
     assert len(state["candidate_ids"]) == 1
-    assert len(ops.graph_candidate(state["candidate_ids"][0])["objects"]) == 10
+    assert len(ops.graph_candidate(state["candidate_ids"][0])["objects"]) == 11
 
 
 def test_revision_change_invalidates_precheck_until_rechecked(tmp_path: Path, monkeypatch):
@@ -275,13 +304,14 @@ def test_incremental_event_index_bridge_preserves_reading_cut():
 
 
 def test_incremental_prompt_contract_keeps_identity_and_review_gate():
-    from narrative.narrative_agent import Budget
+    from narrative.agent_runtime import Budget
 
     prompt = graph_agent._prompt([], 0, Budget())
-    assert graph_agent.PROMPT_VERSION == "graph-agent/10"
-    for required in ("graph_event_index", "parent_edge_id", "supersedes_id", "source_order", "disclosure_cut", "既有事件保持原ID", "canon语境与story时间线由系统预建", "graph_precheck", "graph_propose", "不能自行接受"):
+    assert graph_agent.PROMPT_VERSION == "graph-agent/11"
+    for required in ("graph_event_index", "parent_edge_id", "supersedes_id", "source_order", "disclosure_cut", "既有事件保持原ID", "canon语境与story时间线由系统预建", "graph_precheck", "graph_propose", "property_precheck", "property_propose", "不能自行接受", "PENDING_GRAPH_REVIEW", "两阶段"):
         assert required in prompt
     assert "graph_event_index" in graph_agent.TOOL_CATALOG
+    assert "property_propose" in graph_agent.TOOL_CATALOG
 
 
 def test_actual_budget_is_visible_on_every_request_without_bypassing_review(tmp_path, monkeypatch):

@@ -13,7 +13,11 @@ def _node(item: dict, labels: dict[str, dict], positions: dict[str, tuple[float,
         "kind_label": labels.get(item["id"], {}).get("kind_label", "节点"),
         "summary": labels.get(item["id"], {}).get("summary", ""),
         "context_id": item.get("context_id", "canon"),
-        **{key: item.get(key) for key in ("occurrence", "depth", "parent_id")},
+        **{key: item.get(key) for key in (
+            "occurrence", "depth", "parent_id", "disclosure", "evidence",
+            "identity_note", "participants", "predecessors", "successors",
+            "events", "aliases",
+        )},
     }
     if item["id"] in positions:
         view["x"], view["y"] = positions[item["id"]]
@@ -192,14 +196,18 @@ class CanvasState:
 def node_detail(
     view: dict, node_id: str, labels: dict[str, dict], sources: list[dict] | None = None,
 ) -> dict:
-    """Build a readable node dossier without changing assertion scope or direction."""
+    """Build a readable node dossier from the node itself.
+
+    There is no assertion layer, so the dossier carries no relations: only the
+    node, its evidence and whatever the node records about itself.
+    """
     by_id = {item["id"]: item for item in view["nodes"]}
     if node_id not in by_id:
         raise ValueError("节点在当前正式图中不存在或不可见")
     assertions = []
     related_ids: set[str] = set()
     source_titles = {item["id"]: item["title"] for item in sources or []}
-    for assertion in view["assertions"]:
+    for assertion in view.get("assertions", []):
         row = dict(assertion)
         row["role"] = row.get("qualifiers", {}).get("role")
         row["evidence"] = [

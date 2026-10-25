@@ -7,11 +7,9 @@ import time
 import pytest
 
 from narrative import cli, graph_agent
-from narrative.graph_models import Assertion, PredicateDefinition
+from narrative.agent_runtime import _compact, _json
 from narrative.graph_operations import GraphOperations
 from narrative.harness import HarnessReply, HarnessSettings
-from narrative.narrative_agent import _compact, _json
-from narrative.operations import Operations
 
 POLICY = {
     "context_window": 2_000_000,
@@ -24,14 +22,14 @@ POLICY = {
 @pytest.mark.parametrize("graph", [True, False])
 def test_profiles_roundtrip_context_fields_and_preserve_explicit_old_caps(tmp_path, graph):
     path = tmp_path / "profiles.sqlite3"
-    ops = GraphOperations(path, create=True) if graph else Operations(path)
+    ops = GraphOperations(path, create=True)
     saved = ops.save_harness_settings({"provider": "ark", "max_tokens": 16384, **POLICY})
     ops.save_harness_settings({"provider": "openai", "model": "account-model"})
     assert ops.harness_settings("ark") == saved
     fresh = ops.harness_settings("qwen")
     assert fresh == HarnessSettings(provider="qwen", model="__unconfigured__").model_dump() | {"model": ""}
     assert all(field in fresh for field in POLICY)
-    reopened = GraphOperations(path) if graph else Operations(path)
+    reopened = GraphOperations(path)
     assert reopened.harness_settings("ark") == saved
     assert saved["max_tokens"] == 16384
     draft = reopened.harness_settings("opencode-go")
@@ -41,28 +39,16 @@ def test_profiles_roundtrip_context_fields_and_preserve_explicit_old_caps(tmp_pa
         reopened.save_harness_settings(draft)
 
 
-def test_graph_schema_exposes_pydantic_enums_without_observation_truncation(tmp_path):
+def test_graph_schema_lists_only_node_object_kinds(tmp_path):
     ops = GraphOperations(tmp_path / "schema.sqlite3", create=True)
     schema = ops.graph_schema()
-    fields = schema["field_contracts"]
-    predicate = PredicateDefinition.model_json_schema()["properties"]
-    assertion_schema = Assertion.model_json_schema()
-    assertion = assertion_schema["properties"]
-    for field in ("semantic", "value_type"):
-        assert fields["predicate"]["enums"][field] == predicate[field]["enum"]
-    assert fields["predicate"]["enums"]["temporal_relation"] == predicate["temporal_relation"]["anyOf"][0]["enum"]
-    for field in ("scope", "polarity", "modality", "certainty", "origin", "assessment"):
-        definition = assertion[field]
-        if "$ref" in definition:
-            definition = assertion_schema["$defs"][definition["$ref"].rsplit("/", 1)[-1]]
-        assert fields["assertion"]["enums"][field] == definition["enum"]
-    assert fields["predicate"]["defaults"]["value_type"] == "node"
-    assert fields["TimeRef"]["enums"]["boundary"] == ["start", "end"]
+    assert schema["object_kinds"] == ["node", "context", "timeline", "source_order"]
+    assert set(schema["fields"]) == {"node", "context", "timeline", "source_order"}
     assert len(_json(schema)) < 32000
     assert _compact(schema) is schema
 
 
-@pytest.mark.parametrize("command", ["graph-analyze", "extract"])
+@pytest.mark.parametrize("command", ["graph-analyze"])
 def test_cli_forwards_context_flags_through_operations(monkeypatch, capsys, command):
     class FakeOperations:
         def __init__(self):
@@ -93,10 +79,7 @@ def test_cli_forwards_context_flags_through_operations(monkeypatch, capsys, comm
             return [{"id": "run", "status": "complete"}]
 
     fake = FakeOperations()
-    if command == "graph-analyze":
-        monkeypatch.setattr(cli.Operations, "open_graph_project", lambda path: fake)
-    else:
-        monkeypatch.setattr(cli, "Operations", lambda path: fake)
+    monkeypatch.setattr(cli, "open_graph_project", lambda path: fake)
     flags = [item for field, value in POLICY.items() for item in ("--" + field.replace("_", "-"), str(value))]
     monkeypatch.setattr("sys.argv", ["narrative", "--db", "unused.sqlite3", command, "source", *flags])
     cli.main()

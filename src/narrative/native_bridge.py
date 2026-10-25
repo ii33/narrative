@@ -6,6 +6,7 @@ No database connection, model runner or canvas geometry is shared with the GUI t
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -13,9 +14,12 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
 
+from . import graph_profile_ops, project_catalog, providers
+from .extraction import build_candidate, extract_chapter
 from .graph_operations import GraphOperations
+from .harness import HarnessSettings
 from .native_models import CanvasState, candidate_summary, node_detail, search_result
-from .operations import Operations
+from .provider_store import ProviderStore
 
 _NODE_TYPES = {"person", "group", "item", "location", "event", "scene", "storyline", "other"}
 
@@ -23,7 +27,9 @@ _NODE_TYPES = {"person", "group", "item", "location", "event", "scene", "storyli
 class NativeBridge(QObject):
     """QML context object named ``bridge``; all Operations I/O runs off the GUI thread."""
 
-    resultReady = Signal(str, dict)
+    # The string form is what QML needs: a bare ``dict`` registers a Python type
+    # that QML cannot see, so every Connections handler silently fails.
+    resultReady = Signal(str, "QVariantMap")  # type: ignore[arg-type]
     errorOccurred = Signal(str, str)
     busyChanged = Signal(bool)
     _workerDone = Signal(int, object, object)
@@ -128,11 +134,25 @@ class NativeBridge(QObject):
             return
 
         def work() -> dict:
-            ops = Operations.open_graph_project(path)
+            ops = project_catalog.open_graph_project(path)
             return operation(ops)
 
         self._submit(kind, work, apply,
-                     query_epoch=self._query_epoch if kind in {"canvas", "detail", "search", "expand", "timeline", "hierarchy", "reading_hierarchy"} else None)
+                     query_epoch=self._query_epoch if kind in {"canvas", "detail", "search", "expand", "timeline", "hierarchy", "reading_hierarchy", "event_compare", "property_context", "property_state", "property_world", "property_history",
+                                   "node_properties"} else None)
+
+    @staticmethod
+    def _exact_integers(settings: dict) -> dict:
+        """QML numbers arrive as doubles; strict int fields need exact integers back."""
+        normalized = dict(settings)
+        for key in (
+            "max_tokens", "context_window", "output_reserve", "compaction_reserve",
+            "compaction_max_tokens", "timeout_seconds",
+        ):
+            value = normalized.get(key)
+            if isinstance(value, float) and value.is_integer():
+                normalized[key] = int(value)
+        return normalized
 
     def _path_for(self, name_or_path: str) -> Path:
         supplied = Path(name_or_path.strip())
@@ -163,7 +183,52 @@ class NativeBridge(QObject):
 
     @Slot()
     def refreshProjects(self) -> None:
-        self._submit("projects", lambda: {"projects": Operations.list_projects(self._directory)})
+        self._submit("projects", lambda: {"projects": project_catalog.list_projects(self._directory)})
+
+    @Slot()
+    def loadGlobalSettings(self) -> None:
+        """Application-wide harness defaults; available before a project is open."""
+
+        def work() -> dict:
+            store = ProviderStore()
+            return {
+                "profile": graph_profile_ops.global_settings(store),
+                "catalog": providers.catalog(),
+                "path": str(store.path),
+            }
+
+        self._submit("global_settings", work)
+
+    @Slot("QVariantMap")
+    def saveGlobalSettings(self, settings: dict) -> None:
+        normalized = self._exact_integers(settings)
+
+        def work() -> dict:
+            store = ProviderStore()
+            profile = graph_profile_ops.save_global_settings(store, normalized)
+            return {"profile": profile, "catalog": providers.catalog(), "path": str(store.path)}
+
+        self._submit("global_settings", work)
+
+    @Slot()
+    def clearIncompatibleProjects(self) -> None:
+        """Remove project files this build cannot open (older schema versions)."""
+
+        def work() -> dict:
+            result = project_catalog.clear_incompatible(self._directory)
+            return result | {"projects": project_catalog.list_projects(self._directory)}
+
+        self._submit("projects_cleared", work)
+
+    @Slot()
+    def closeProject(self) -> None:
+        """Return to the launcher: drop the open project and its cached reads."""
+        self._epoch += 1
+        self._reading_cut = {}
+        self._project_path = None
+        self._canvas.clear()
+        self._query_canvas = None
+        self.resultReady.emit("project_closed", {})
 
     @Slot(str)
     def createProject(self, name: str) -> None:
@@ -182,7 +247,7 @@ class NativeBridge(QObject):
         epoch = self._epoch
 
         def work() -> dict:
-            ops = Operations.create_graph_project(path)
+            ops = project_catalog.create_graph_project(path)
             return self._project_view(ops)
 
         def apply(result: dict) -> dict:
@@ -207,7 +272,7 @@ class NativeBridge(QObject):
         epoch = self._epoch
 
         def work() -> dict:
-            ops = Operations.open_graph_project(path)
+            ops = project_catalog.open_graph_project(path)
             return self._project_view(ops)
 
         def apply(result: dict) -> dict:
@@ -233,13 +298,12 @@ class NativeBridge(QObject):
     def loadGraphView(self, spec: dict) -> None:
         """One shared query controls every reading projection and cancels stale reads."""
         try:
-            path = self._project()
+            self._project()
         except ValueError as exc:
             self.errorOccurred.emit("graph_view", str(exc))
             return
         self._query_epoch += 1
         self._unified_active = True
-        query_epoch = self._query_epoch
         requested = dict(spec)
         self._reading_cut = dict(requested.get("disclosure_cut") or {})
         self._query_spec = requested
@@ -248,112 +312,131 @@ class NativeBridge(QObject):
         self._query_visible.clear()
         self._canvas.clear(preserve_positions=True)
 
-        def work() -> dict:
-            ops = Operations.open_graph_project(path)
+        def work(ops) -> dict:
             revision = requested.get("as_of_revision")
             if revision is None:
                 revision = ops.graph_project_info()["revision"]
             pinned = requested | {"as_of_revision": revision}
-            views = {view: ops.graph_view(pinned | {"view": view})
-                     for view in ("graph", "timeline", "table", "forest")}
-            return {"views": views, "labels": ops.graph_display_map(as_of_revision=revision)["items"],
-                    "index": ops.graph_event_index(context_id=requested.get("context_id", "canon"),
-                        as_of_revision=revision, disclosure_cut=requested.get("disclosure_cut") or None)}
+            view = ops.graph_view(pinned | {"view": "table"})
+            return {"view": view, "labels": ops.graph_display_map(as_of_revision=revision)["items"]}
 
         def apply(result: dict) -> dict:
-            views = result["views"]
-            self._query_canvas = self._canvas.replace_query(views["graph"], result["labels"])
-            self._query_visible = {node["id"] for node in self._query_canvas["nodes"]}
-            return {"canvas": self._query_canvas,
-                    "timeline": views["timeline"], "table": views["table"],
-                    "hierarchy": views["forest"], "index": result["index"],
-                    "query": views["graph"]["query"], "request": requested,
-                    "query_json": json.dumps(views["graph"]["query"], ensure_ascii=False, indent=2)}
+            view = result["view"]
+            self._query_canvas = view
+            self._query_visible = {node["id"] for node in view["nodes"]}
+            return {"canvas": view, "labels": result["labels"]}
 
-        self._submit("graph_view", work, apply, query_epoch=query_epoch)
-
-    @Slot()
-    def loadTimeline(self) -> None:
-        self._project_task("timeline", lambda ops: ops.graph_timeline(disclosure_cut=self._reading_cut or None))
+        self._project_task("graph_view", work, apply)
 
     @Slot(str)
-    def collapseNode(self, node_id: str) -> None:
+    def loadPropertyContext(self, node_id: str = "") -> None:
+        """Load selectable nodes and the reviewed node-local property projection."""
+        def work(ops) -> dict:
+            snapshot = ops.graph_snapshot()
+            world = ops.property_world_state()
+            return {
+                "revision": snapshot["revision"],
+                "nodes": [{key: node.get(key) for key in ("id", "name", "node_type")}
+                          for node in snapshot.get("nodes", [])],
+                "world": world,
+                "selected_node_id": node_id,
+            }
+        self._project_task("property_context", work)
+
+    @Slot(str, str, str)
+    def queryProperty(self, node_id: str, property_id: str, at_json: str = "") -> None:
+        """Query one property and its append-only history through Operations."""
         try:
-            if self._unified_active and self._query_canvas is None:
-                raise ValueError("查询正在加载，请稍后折叠")
-            if self._query_canvas is not None:
-                self._query_folded.add(node_id)
-                nodes, visible_edges = self._folded_query_projection()
-                visible = {node["id"] for node in nodes}
-                removed = self._query_visible - visible
-                edges = [e["assertion_id"] for e in self._query_canvas["edges"]
-                         if e["assertion_id"] not in {edge["assertion_id"] for edge in visible_edges}]
-                self._query_visible = visible
-                self.resultReady.emit("collapse", {"center_id": node_id,
-                    "nodes_removed": sorted(removed), "edges_removed": edges})
-                return
-            self.resultReady.emit("collapse", self._canvas.collapse(node_id))
-        except ValueError as exc:
-            self.errorOccurred.emit("collapse", str(exc))
+            at = json.loads(at_json) if at_json.strip() else None
+        except json.JSONDecodeError as exc:
+            self.errorOccurred.emit("property_state", f"at 必须是 JSON TimeRef：{exc.msg}")
+            return
 
-    def _folded_query_projection(self) -> tuple[list[dict], list[dict]]:
-        view = self._query_canvas or {"nodes": [], "edges": []}
-        focus = (view.get("focus") or {}).get("id")
-        hidden = {edge[key] for edge in view["edges"]
-                  if self._query_folded.intersection((edge["subject_id"], edge["object_id"]))
-                  for key in ("subject_id", "object_id")} - self._query_folded - {focus}
-        return ([node for node in view["nodes"] if node["id"] not in hidden],
-                [edge for edge in view["edges"]
-                 if edge["subject_id"] not in hidden and edge["object_id"] not in hidden])
+        def work(ops) -> dict:
+            return {
+                "node_id": node_id,
+                "property_id": property_id,
+                "at": at,
+                "state": ops.property_state(node_id, property_id, at),
+                "history": ops.property_history(node_id, property_id),
+            }
+        self._project_task("property_state", work)
 
-    @Slot()
+    @Slot(str, str, "QVariantMap", str, str)
+    def queryPropertyDisclosure(
+        self, node_id: str, property_id: str, cut: dict,
+        scope: str = "world", holder_id: str = "",
+    ) -> None:
+        """Reader-facing disclosure projection; ignores story time."""
+        if not node_id.strip() or not property_id.strip():
+            self.errorOccurred.emit("property_disclosure", "节点和属性不能为空")
+            return
+        if not cut.get("source_id") or cut.get("start") is None:
+            self.errorOccurred.emit("property_disclosure", "披露切点须包含 source_id 和 start")
+            return
+
+        def work(ops) -> dict:
+            return {
+                "node_id": node_id, "property_id": property_id,
+                "scope": scope or "world", "holder_id": holder_id or None,
+                "cut": dict(cut),
+                "state": ops.property_disclosure_state(
+                    node_id, property_id, dict(cut),
+                    scope=scope or "world", holder_id=holder_id or None,
+                ),
+            }
+        self._project_task("property_disclosure", work)
+
     @Slot(str)
-    def loadHierarchy(self, candidate_id: str = "") -> None:
-        """Read an accepted hierarchy or an explicit, review-only candidate preview."""
-        def work(ops) -> dict:
-            tree = ops.graph_hierarchy(candidate_id=candidate_id or None,
-                                       disclosure_cut=None if candidate_id else self._reading_cut or None)
-            if not candidate_id:
-                tree["event_index"] = ops.graph_event_index(disclosure_cut=self._reading_cut or None)
-            return tree
-        self._project_task("hierarchy", work)
+    def loadPropertyWorldState(self, at_json: str = "") -> None:
+        """Load the aggregate projection; inverse holder lookups derive from it."""
+        try:
+            at = json.loads(at_json) if at_json.strip() else None
+        except json.JSONDecodeError as exc:
+            self.errorOccurred.emit("property_world", f"at 必须是 JSON TimeRef：{exc.msg}")
+            return
+        self._project_task("property_world", lambda ops: {"world": ops.property_world_state(at)})
 
-    @Slot()
-    def loadReadingPositions(self) -> None:
-        def work(ops) -> dict:
-            orders = {row["source_id"]: row["ordinal"] for row in
-                      ops.graph_snapshot().get("source_orders", []) if row["context_id"] == "canon"}
-            sources = sorted((s for s in ops.sources() if s["id"] in orders),
-                             key=lambda s: orders[s["id"]])
-            items = []
-            for source in sources:
-                text = ops.source(source["id"])["text"]
-                for match in re.finditer(r"[^\r\n]+", text):
-                    excerpt = match.group().strip()
-                    if excerpt:
-                        items.append({"source_id": source["id"], "start": match.end() - 1,
-                                      "label": source["title"] + " · " + excerpt[:45],
-                                      "excerpt": excerpt})
-            return {"items": items, "unregistered": len(ops.sources()) - len(sources)}
-        self._project_task("reading_positions", work)
+    @Slot(str, int)
+    def proposePropertyRecords(self, records_json: str, expected_revision: int) -> None:
+        """Precheck and stage property records; acceptance remains a human action."""
+        try:
+            records = json.loads(records_json)
+        except json.JSONDecodeError as exc:
+            self.errorOccurred.emit("property_stage", f"记录 JSON 无效：{exc.msg}")
+            return
+        if not isinstance(records, list) or not records or not all(isinstance(row, dict) for row in records):
+            self.errorOccurred.emit("property_stage", "请提供非空 JSON 对象数组")
+            return
 
-    @Slot(str, "QVariantMap")
-    def loadReadingHierarchy(self, focus_id: str, cut: dict) -> None:
-        self._query_epoch += 1
-        self._unified_active = False
-        if cut != self._reading_cut:
-            self._epoch += 1
-            self._reading_cut = dict(cut)
-            self._canvas.clear(preserve_positions=True)
         def work(ops) -> dict:
-            tree = ops.graph_hierarchy(disclosure_cut=cut or None)
-            actual_focus = focus_id if any(n["id"] == focus_id for n in tree["nodes"]) else ""
-            if actual_focus:
-                tree = ops.graph_hierarchy(focus_id=actual_focus, disclosure_cut=cut or None)
-            return {"hierarchy": tree, "index": ops.graph_event_index(
-                focus_id=actual_focus or None, disclosure_cut=cut or None),
-                "requested_focus_id": focus_id, "focus_id": actual_focus, "cut": cut}
-        self._project_task("reading_hierarchy", work)
+            diagnostics = ops.property_precheck(records, expected_revision)
+            if any(item.get("severity") == "error" for item in diagnostics):
+                return {"status": "precheck_failed", "diagnostics": diagnostics,
+                        "expected_revision": expected_revision}
+            candidate_id = ops.property_propose(records, expected_revision, source="manual")
+            return {"status": "pending", "candidate": ops.property_candidate(candidate_id),
+                    "diagnostics": diagnostics}
+        self._project_task("property_stage", work)
+
+    @Slot(str)
+    def loadNodeProperties(self, node_id: str) -> None:
+        """Every property of one node, read-only; used by the browsing detail pane."""
+
+        def work(ops) -> dict:
+            return ops.property_node_summary(node_id)
+
+        self._project_task("node_properties", work)
+
+    @Slot(str, int)
+    def acceptPropertyCandidate(self, candidate_id: str, version: int) -> None:
+        """Accept a staged property candidate; the human action stays explicit."""
+
+        def work(ops) -> dict:
+            revision = ops.property_accept(candidate_id, version)
+            return {"status": "accepted", "revision": revision}
+
+        self._project_task("property_review", work)
 
     @Slot(str, "QVariantList")
     def searchNodes(self, query: str, types: list) -> None:
@@ -365,38 +448,6 @@ class NativeBridge(QObject):
         def work(ops) -> dict:
             view = ops.graph_query(query=query, limit=2000, disclosure_cut=self._reading_cut or None)
             return search_result(view, ops.graph_display_map()["items"], requested)
-
-        self._project_task("search", work)
-
-    @Slot(str)
-    def expandNode(self, node_id: str) -> None:
-        if self._unified_active and self._query_canvas is None:
-            self.errorOccurred.emit("expand", "查询正在加载，请稍后恢复")
-            return
-        if self._query_canvas is not None:
-            # Restore only the current query's bounded projection, never re-query neighbors.
-            self._query_folded.discard(node_id)
-            nodes, edges = self._folded_query_projection()
-            self._query_visible = {node["id"] for node in nodes}
-            self.resultReady.emit("expand", {"center_id": node_id,
-                "revision": self._query_canvas["revision"],
-                "nodes_added": nodes, "edges_added": edges, "pending_excluded": True})
-            return
-        def work(ops) -> dict:
-            return {
-                "view": ops.graph_neighborhood(node_id, depth=1, limit=2000, disclosure_cut=self._reading_cut or None),
-                "labels": ops.graph_display_map()["items"],
-            }
-
-        def apply(result: dict) -> dict:
-            return self._canvas.expand(result["view"], result["labels"])
-
-        self._project_task("expand", work, apply)
-
-    @Slot(str, float, float)
-    def setNodePosition(self, node_id: str, x: float, y: float) -> None:
-        self._canvas.set_position(node_id, x, y)
-
     @Slot(str)
     def nodeDetail(self, node_id: str) -> None:
         self._detail_node = node_id
@@ -409,12 +460,196 @@ class NativeBridge(QObject):
 
         self._project_task("detail", work)
 
+    def _extraction_dir(self) -> Path:
+        project = self._project()
+        return project.with_name(project.stem + "_extraction")
+
+    @Slot(str)
+    def loadExtraction(self, source_id: str) -> None:
+        """Read a stored extraction for one source, if it exists."""
+        directory = self._extraction_dir()
+        path = directory / f"{source_id}.json"
+
+        def work() -> dict:
+            if not path.is_file():
+                return {"source_id": source_id, "nodes": [], "grouped": {}, "counts": {},
+                        "rejected": [], "missing": True}
+            return json.loads(path.read_text(encoding="utf-8"))
+
+        self._submit("extraction", work)
+
+    @Slot(str)
+    def startExtraction(self, source_id: str) -> None:
+        """Read the whole source and extract nodes and events with the project model."""
+        directory = self._extraction_dir()
+
+        def work(ops) -> dict:
+            source = ops.source(source_id)
+            settings = HarnessSettings.model_validate(
+                ops.harness_settings() | {"timeout_seconds": 600}
+            )
+            api_key = os.environ.get(settings.key_env) or os.environ.get("DEEPSEEK_API_KEY")
+            if not api_key:
+                raise ValueError(f"缺少 {settings.key_env} 或 DEEPSEEK_API_KEY")
+            data = extract_chapter(
+                source["title"], source["text"],
+                settings=settings, api_key=api_key,
+                workdir=directory / source_id / "sdk", ops=ops,
+            )
+            data.pop("raw", None)
+            data["source_id"] = source_id
+            data["source_hash"] = source["hash"]
+            data["extracted_at"] = __import__("datetime").datetime.now().isoformat(timespec="seconds")
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / f"{source_id}.json").write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            return data
+
+        self._project_task("extraction", work)
+
+    @Slot(str)
+    def commitExtraction(self, source_id: str) -> None:
+        """Turn a stored extraction into one pending candidate."""
+        path = self._extraction_dir() / f"{source_id}.json"
+
+        def work(ops) -> dict:
+            if not path.is_file():
+                raise ValueError("还没有提取结果")
+            data = json.loads(path.read_text(encoding="utf-8"))
+            built = build_candidate(ops, data)
+            if built.get("empty"):
+                return {"candidate": None, "empty": True, "diagnostics": []}
+            if built["errors"]:
+                return {"diagnostics": built["diagnostics"], "candidate": None}
+            candidate = ops.change_propose(
+                built["objects"], built["property_records"], built["revision"],
+                source="correction" if built.get("requires_correction") else "model",
+                note=f"原文提取：{data.get('chapter', source_id)}",
+            )
+            return {
+                "candidate": ops.change_candidate(candidate),
+                "diagnostics": built["diagnostics"],
+                "node_count": built["node_count"],
+                "scene_links": built["scene_links"],
+            }
+
+        self._project_task("extraction_commit", work)
+
+    @Slot(str, "QVariantMap")
+    def reviseNode(self, node_id: str, changes: dict) -> None:
+        """Correct one node (type, name, source position, retraction) as a candidate.
+
+        Nothing is written directly: the edit becomes a pending candidate that a
+        human accepts on the candidate page, same as any other change.
+        """
+        allowed = {
+            "node_type", "name", "aliases", "identity_note",
+            "disclosure", "retracted",
+        }
+        payload = {
+            key: value for key, value in (changes or {}).items() if key in allowed
+        }
+        if not payload:
+            self.errorOccurred.emit("node_edit", "没有可应用的修改")
+            return
+
+        def work(ops) -> dict:
+            snapshot = ops.graph_snapshot()
+            node = next(
+                (item for item in snapshot["nodes"] if item["id"] == node_id), None
+            )
+            if node is None:
+                raise ValueError("节点不存在")
+            updated = dict(node) | payload
+            revision = ops.graph_project_info()["revision"]
+            diagnostics = ops.change_precheck([updated], [], revision)
+            errors = [item for item in diagnostics if item.get("severity") == "error"]
+            if errors:
+                return {"diagnostics": diagnostics, "candidate": None, "node_id": node_id}
+            candidate = ops.change_propose(
+                [updated], [], revision, source="correction",
+                note=f"节点修正：{node['name']}",
+            )
+            return {
+                "diagnostics": diagnostics,
+                "candidate": ops.change_candidate(candidate),
+                "node_id": node_id,
+                "changes": payload,
+            }
+
+        self._project_task("node_edit", work)
+
     @Slot(str)
     def loadCandidates(self, status: str) -> None:
         self._project_task(
             "candidates",
             lambda ops: {"items": [candidate_summary(item) for item in ops.graph_candidates(status or None)]},
         )
+
+    @Slot(str)
+    def loadChangeCandidates(self, status: str) -> None:
+        self._project_task(
+            "change_candidates",
+            lambda ops: {"items": ops.change_candidates(status or None)},
+        )
+
+    @Slot(str)
+    def changeCandidateDetail(self, candidate_id: str) -> None:
+        self._project_task(
+            "change_candidate",
+            lambda ops: {"candidate": ops.change_candidate(candidate_id)},
+        )
+
+    @Slot(str, int)
+    def acceptChangeCandidate(self, candidate_id: str, version: int) -> None:
+        def work(ops) -> dict:
+            revision = ops.change_accept(candidate_id, version)
+            return {"candidate_id": candidate_id, "status": "accepted", "revision": revision}
+
+        def apply(result: dict) -> dict:
+            self._canvas.clear(preserve_positions=True)
+            return result | {"graph_reset_required": True}
+
+        self._project_task("change_review", work, apply)
+
+    @Slot(str, int)
+    def rejectChangeCandidate(self, candidate_id: str, version: int) -> None:
+        def work(ops) -> dict:
+            ops.change_reject(candidate_id, version)
+            return {"candidate_id": candidate_id, "status": "rejected",
+                    "revision": ops.graph_project_info()["revision"]}
+
+        self._project_task("change_review", work)
+
+    @Slot(str, str, int, str, str)
+    def proposeChange(
+        self, graph_json: str, properties_json: str,
+        expected_revision: int, source: str = "manual", note: str = "",
+    ) -> None:
+        try:
+            graph_objects = json.loads(graph_json) if graph_json.strip() else []
+            property_records = json.loads(properties_json) if properties_json.strip() else []
+        except json.JSONDecodeError as exc:
+            self.errorOccurred.emit("change_stage", f"JSON 解析失败：{exc.msg}")
+            return
+        if not isinstance(graph_objects, list) or not isinstance(property_records, list):
+            self.errorOccurred.emit("change_stage", "图对象和属性记录都必须是 JSON 数组")
+            return
+
+        def work(ops) -> dict:
+            diagnostics = ops.change_precheck(graph_objects, property_records, expected_revision)
+            if any(item.get("severity") == "error" for item in diagnostics):
+                return {"diagnostics": diagnostics, "candidate": None}
+            candidate_id = ops.change_propose(
+                graph_objects, property_records, expected_revision,
+                source=source or "manual", note=note,
+            )
+            return {
+                "diagnostics": diagnostics,
+                "candidate": ops.change_candidate(candidate_id),
+            }
+        self._project_task("change_stage", work)
 
     @Slot(str)
     def candidateDetail(self, candidate_id: str) -> None:
@@ -488,17 +723,9 @@ class NativeBridge(QObject):
 
     @Slot("QVariantMap")
     def saveProviderProfile(self, settings: dict) -> None:
-        # QML JavaScript numbers arrive through QVariantMap as doubles. Preserve
-        # Operations' strict integer validation while restoring exact integers.
-        normalized = dict(settings)
-        for key in (
-            "max_tokens", "context_window", "output_reserve", "compaction_reserve",
-            "compaction_max_tokens", "timeout_seconds",
-        ):
-            value = normalized.get(key)
-            if isinstance(value, float) and value.is_integer():
-                normalized[key] = int(value)
-        self._project_task("provider", lambda ops: {"profile": ops.save_provider_profile(normalized)})
+        self._project_task(
+            "provider", lambda ops: {"profile": ops.save_provider_profile(self._exact_integers(settings))}
+        )
 
     @Slot("QVariantList", str, "QVariantMap")
     def startAnalysis(self, source_ids: list, task: str, budget: dict) -> None:

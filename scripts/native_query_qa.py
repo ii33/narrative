@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication
 
 from narrative.native_app import QML_PATH
 from narrative.native_bridge import NativeBridge
-from narrative.operations import Operations
+from narrative.project_catalog import create_graph_project
 
 
 def main() -> None:
@@ -24,7 +24,7 @@ def main() -> None:
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     project = output / "manual-query-fixture.sqlite3"
-    ops = Operations.create_graph_project(project)
+    ops = create_graph_project(project)
     sid = ops.import_source("工程验收人工夹具", "旅人来到河岸，遇见向导。两人随后渡河。")
     quote = ops.locate(sid, "旅人来到河岸")[0] | {"id": "quote"}
     objects = [quote, {"kind": "source_order", "id": "order", "source_id": sid, "ordinal": 0},

@@ -16,12 +16,12 @@ from PySide6.QtWidgets import QApplication
 
 from narrative.native_app import QML_PATH
 from narrative.native_bridge import NativeBridge
-from narrative.operations import Operations
+from narrative.project_catalog import open_graph_project
 
 project = Path(sys.argv[1]).resolve()
 output = Path(sys.argv[2]).resolve()
 output.mkdir(parents=True, exist_ok=True)
-ops = Operations.open_graph_project(project)
+ops = open_graph_project(project)
 
 
 def formal_state():

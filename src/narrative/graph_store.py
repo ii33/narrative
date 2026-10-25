@@ -1,4 +1,4 @@
-"""Isolated v4 graph database; never upgrades or mutates historical projects."""
+"""Isolated v5 graph database; never upgrades or mutates historical projects."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
-GRAPH_SCHEMA_VERSION = 4
+GRAPH_SCHEMA_VERSION = 6
 
 
 class GraphStore:
@@ -30,20 +30,6 @@ class GraphStore:
                         id TEXT PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL,
                         accepted_revision INTEGER NOT NULL);
                     CREATE INDEX objects_kind ON objects(kind);
-                    CREATE INDEX assertions_subject ON objects(json_extract(data,'$.subject_id'))
-                        WHERE kind='assertion';
-                    CREATE INDEX assertions_object ON objects(json_extract(data,'$.object_id'))
-                        WHERE kind='assertion';
-                    CREATE INDEX assertions_holder ON objects(json_extract(data,'$.holder_id'))
-                        WHERE kind='assertion';
-                    CREATE INDEX assertions_predicate ON objects(json_extract(data,'$.predicate_id'))
-                        WHERE kind='assertion';
-                    CREATE TABLE evidence_links (
-                        id TEXT PRIMARY KEY, assertion_id TEXT NOT NULL,
-                        evidence_id TEXT NOT NULL, role TEXT NOT NULL,
-                        accepted_revision INTEGER NOT NULL);
-                    CREATE INDEX evidence_by_assertion ON evidence_links(assertion_id);
-                    CREATE INDEX evidence_by_evidence ON evidence_links(evidence_id);
                     CREATE TABLE candidates (
                         id TEXT PRIMARY KEY, data TEXT NOT NULL, status TEXT NOT NULL,
                         version INTEGER NOT NULL, expected_revision INTEGER NOT NULL,
@@ -51,7 +37,29 @@ class GraphStore:
                     CREATE TABLE revisions (
                         revision INTEGER PRIMARY KEY, candidate_id TEXT, data TEXT NOT NULL,
                         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-                    PRAGMA user_version=4;
+                    CREATE TABLE property_records (
+                        id TEXT PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL,
+                        accepted_revision INTEGER NOT NULL, candidate_id TEXT,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+                    CREATE INDEX property_records_revision ON property_records(accepted_revision);
+                    CREATE INDEX property_records_node ON property_records(json_extract(data,'$.node_id'));
+                    CREATE INDEX property_records_property ON property_records(json_extract(data,'$.property_id'));
+                    CREATE TRIGGER property_records_no_update BEFORE UPDATE ON property_records
+                    BEGIN SELECT RAISE(ABORT, 'property records are append-only'); END;
+                    CREATE TRIGGER property_records_no_delete BEFORE DELETE ON property_records
+                    BEGIN SELECT RAISE(ABORT, 'property records are append-only'); END;
+                    CREATE TABLE property_candidates (
+                        id TEXT PRIMARY KEY, data TEXT NOT NULL, status TEXT NOT NULL,
+                        version INTEGER NOT NULL, expected_revision INTEGER NOT NULL,
+                        result_revision INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+                    CREATE INDEX property_candidates_status ON property_candidates(status);
+                    CREATE TABLE change_candidates (
+                        id TEXT PRIMARY KEY, data TEXT NOT NULL, status TEXT NOT NULL,
+                        version INTEGER NOT NULL, expected_revision INTEGER NOT NULL,
+                        result_revision INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+                    CREATE INDEX change_candidates_status ON change_candidates(status);
+                    CREATE TABLE provider_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    PRAGMA user_version=6;
                 """)
                 db.executemany(
                     "INSERT INTO meta(key,value) VALUES (?,?)",
@@ -76,7 +84,12 @@ class GraphStore:
         with sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version != GRAPH_SCHEMA_VERSION:
-                raise ValueError(f"图项目需要 v4 新库；此文件版本为 {version}，未修改历史库")
+                # v4 and older files are read-only historical projects. Nothing is
+                # opened for writing and no schema/data migration is attempted.
+                raise ValueError(
+                    f"图项目需要 v{GRAPH_SCHEMA_VERSION} 新库；此文件为旧版或未知版本（{version}），"
+                    "已按 read-only 只读拒绝，未迁移或改写"
+                )
             if not db.execute("SELECT 1 FROM meta WHERE key='revision'").fetchone():
                 raise ValueError("无效的图项目")
 
@@ -137,9 +150,6 @@ class GraphStore:
                 rows = list(db.execute("SELECT id,data,accepted_revision FROM objects"))
                 objects = [json.loads(row["data"]) for row in rows]
                 object_revisions = {row["id"]: row["accepted_revision"] for row in rows}
-                links = [dict(row) | {"kind": "evidence_link"} for row in db.execute(
-                    "SELECT id,assertion_id,evidence_id,role FROM evidence_links"
-                )]
             else:
                 state: dict[str, dict] = {}
                 object_revisions: dict[str, int] = {}
@@ -154,20 +164,15 @@ class GraphStore:
                     (as_of_revision,),
                 ):
                     for item in json.loads(row["data"]).get("operations", []):
-                        if item["kind"] != "evidence_link":
-                            state[item["id"]] = item
-                            object_revisions[item["id"]] = row["revision"]
-                        else:
-                            state[item["id"]] = item
+                        state[item["id"]] = item
+                        object_revisions[item["id"]] = row["revision"]
                 objects = list(state.values())
-                links = [o for o in objects if o["kind"] == "evidence_link"]
-                objects = [o for o in objects if o["kind"] != "evidence_link"]
             sources = [dict(row) for row in db.execute(
                 "SELECT id,title,hash,created_at,length(text) AS length FROM sources WHERE imported_revision<=?",
                 (as_of_revision,),
             )]
         groups: dict[str, list[dict]] = {
-            key: [] for key in ("nodes", "predicates", "assertions", "evidences", "contexts", "timelines", "source_orders")
+            key: [] for key in ("nodes", "contexts", "timelines", "source_orders")
         }
         for obj in objects:
             groups.setdefault(obj["kind"] + "s", []).append(obj)
@@ -177,7 +182,6 @@ class GraphStore:
             "current_revision": current,
             "object_revisions": object_revisions,
             "objects": objects,
-            "evidence_links": links,
             "sources": sources,
             **groups,
         }

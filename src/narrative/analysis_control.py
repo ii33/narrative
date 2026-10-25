@@ -6,12 +6,22 @@ import re
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 from uuid import uuid4
+
+
+class ProjectPathLike(Protocol):
+    path: str
+
+
+class ProjectInfoProvider(Protocol):
+    def project_info(self) -> ProjectPathLike: ...
+
 
 _RUN_ID = re.compile(r"[0-9a-f]{32}\Z")
 
 
-def _path(operations, run_id: str) -> Path:
+def _path(operations: ProjectInfoProvider, run_id: str) -> Path:
     if not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id):
         raise ValueError("分析任务 ID 无效")
     project = Path(operations.project_info().path)

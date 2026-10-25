@@ -1,0 +1,34 @@
+{
+  "schema": "microsoft-graphrag-query-suite/1",
+  "description": "Fixed questions for the three-chapter index. Terms are checked literally; a name-consistency regression fails on 林舟.",
+  "queries": [
+    {
+      "id": "transfer-local",
+      "method": "local",
+      "query": "林舟为什么被传送到火星？",
+      "must_include": ["老周", "火纹石", "火星"],
+      "must_exclude": ["林舟"]
+    },
+    {
+      "id": "zhiyanxin-basic",
+      "method": "basic",
+      "query": "火纹石是什么？",
+      "must_include": ["火纹石", "法宝"],
+      "must_exclude": ["林舟"]
+    },
+    {
+      "id": "relations-global",
+      "method": "global",
+      "query": "前三章的主要人物关系与核心冲突是什么？",
+      "must_include": ["林舟", "老周", "陈默"],
+      "must_exclude": ["林舟"]
+    },
+    {
+      "id": "hua-local",
+      "method": "local",
+      "query": "老周与苏娘的关系如何？",
+      "must_include": ["苏娘", "老周"],
+      "must_exclude": ["林舟", "苏娘"]
+    }
+  ]
+}
