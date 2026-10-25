@@ -402,11 +402,14 @@ def test_related_only_keeps_the_nodes_of_this_step(workspace) -> None:
     ids = {node["id"] for node in _value(page.property("nodes"))}
     assert ids == {"7", "1", "3"}
     assert page.property("relatedOnly") is True
+    # 侧栏计数也要跟着收，否则数字和列表对不上。
+    assert page.property("counts") == {"item": 1, "person": 1, "scene": 1}
 
     del results[:]
     page.toggleRelated()
     _pump(app, results, "browse")
     assert page.property("total") == 8
+    assert page.property("counts") == {"event": 2, "item": 2, "person": 2, "scene": 2}
 
 
 def test_a_reading_cut_switches_the_state(tmp_path: Path) -> None:

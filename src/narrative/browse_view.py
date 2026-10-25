@@ -157,17 +157,23 @@ def browse_view(
     ``time_filter`` decides whether the *list* obeys the reading position. The
     cut is resolved and returned either way, because the property pane always
     obeys it.
+
+    Counts describe everything the other conditions leave — the reading position,
+    相关节点, the search — but never the type filter itself: the sidebar *is* that
+    filter, and a count that only ever shows the selected type would be useless.
     """
     cut = cut_for(snapshot, cut_id) if cut_id else None
     nodes = visible_nodes(snapshot, cut if (cut is not None and time_filter) else None)
-    counts = Counter(node.get("node_type") or "other" for node in nodes)
     related = set(related_nodes(snapshot, cut_id)) if (related_only and cut_id) else None
     needle = query.strip()
-    shown = [
+    candidates = [
         node for node in nodes
-        if (not node_type or (node.get("node_type") or "other") == node_type)
-        and (related is None or node["id"] in related)
-        and matches(node, needle)
+        if (related is None or node["id"] in related) and matches(node, needle)
+    ]
+    counts = Counter(node.get("node_type") or "other" for node in candidates)
+    shown = [
+        node for node in candidates
+        if not node_type or (node.get("node_type") or "other") == node_type
     ]
     shown.sort(key=_key)
     return {
@@ -181,6 +187,10 @@ def browse_view(
         "nodes": shown,
         "counts": {key: counts.get(key, 0) for key in sorted(counts)},
         "total": len(shown),
+        # 工程里到底有没有节点，用来区分"空工程"和"筛没了"。
+        "project_total": len([
+            node for node in snapshot.get("nodes", []) if not node.get("retracted")
+        ]),
         "related_only": bool(related_only),
         "related": sorted(related) if related is not None else [],
         "time_filter": bool(time_filter),

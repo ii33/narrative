@@ -139,6 +139,9 @@ QML 提交 `{granularity, cut_id, node_type, query, related_only, time_filter}`�
 拿到 `{nodes, counts, total, steps, events, cut}` 就画——不再自己过滤、计数或推导顺序。
 `tests/test_browse_view.py` 直接测这一层，不需要起界面。
 
+**计数跟着条件走，只除了类型筛选本身**：阅读位置、相关节点、搜索都会让计数变小
+（否则数字和列表对不上），而类型筛选不参与——侧栏就是那个筛选，只剩一个类型就没意义了。
+
 ## 归并属性名
 
 同一个方面用了两个名字（`cultivation` / `cultivation_stage`）时，那一行会出现

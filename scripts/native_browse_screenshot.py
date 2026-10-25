@@ -67,6 +67,7 @@ def main() -> int:
     parser.add_argument("--granularity", default="scene", choices=("scene", "event"),
                         help="事件等级：按场景还是按事件切")
     parser.add_argument("--time", action="store_true", help="同时把节点列表也收窄到该阅读位置")
+    parser.add_argument("--related", action="store_true", help="只显示当前步骤的相关节点")
     args = parser.parse_args()
     project = args.project.resolve()
     if not project.is_file():
@@ -126,6 +127,9 @@ def main() -> int:
             wait_for("browse")
         if args.time:
             page.toggleTimeFilter()
+            wait_for("browse")
+        if args.related:
+            page.toggleRelated()
             wait_for("browse")
         app.processEvents()
         page.select(args.node)

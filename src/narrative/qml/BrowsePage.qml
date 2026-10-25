@@ -50,11 +50,8 @@ Item {
     })
     readonly property var scopeLabels: ({world: "世界", cognition: "认知", claim: "声称"})
     // 工程里一个节点都没有（区别于"被条件过滤掉了"）。
-    readonly property bool isEmptyProject: {
-        var all = 0
-        for (var name in counts) all += counts[name]
-        return all === 0
-    }
+    property int projectTotal: 0
+    readonly property bool isEmptyProject: projectTotal === 0
 
     ListModel { id: rows }
     ListModel { id: categories }
@@ -106,6 +103,7 @@ Item {
         steps = payload.steps || []
         events = payload.events || []
         counts = payload.counts || ({})
+        projectTotal = payload.project_total === undefined ? 0 : payload.project_total
         total = payload.total || 0
         nodes = payload.nodes || []
         var cut = payload.cut || null

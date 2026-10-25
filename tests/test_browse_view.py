@@ -91,15 +91,25 @@ def test_the_list_obeys_the_cut_only_when_asked(tmp_path: Path) -> None:
     assert whole["cut"]["event_id"] == "6"
 
 
-def test_counts_describe_the_cut_not_the_filter(tmp_path: Path) -> None:
+def test_counts_follow_the_other_conditions_but_not_the_type_filter(
+    tmp_path: Path,
+) -> None:
     _ops, snapshot = _project(tmp_path / "counts.sqlite3")
 
-    view = browse_view(snapshot, node_type="person", query="曾")
+    by_type = browse_view(snapshot, node_type="person")
+    assert [node["name"] for node in by_type["nodes"]] == ["林舟", "陈默", "老周"]
+    # 侧栏本身就是类型筛选，所以计数仍然列出各类型有多少。
+    assert by_type["counts"] == {"event": 3, "person": 3, "scene": 2}
 
-    assert [node["name"] for node in view["nodes"]] == ["陈默"]
-    # 侧栏的计数是"这个位置有多少"，不是"筛完剩多少"。
-    assert view["counts"]["person"] == 3
-    assert view["total"] == 1
+    # 相关节点把范围收到这一步，计数跟着收——否则数字会和列表对不上。
+    related = browse_view(snapshot, cut_id="4", related_only=True)
+    assert {node["id"] for node in related["nodes"]} == {"1", "2", "4"}
+    assert related["counts"] == {"person": 2, "scene": 1}
+
+    # 搜索也一样：计数说的是"这些条件之下有什么"。
+    searched = browse_view(snapshot, query="曾")
+    assert [node["name"] for node in searched["nodes"]] == ["陈默"]
+    assert searched["counts"] == {"person": 1}
 
 
 def test_query_matches_aliases(tmp_path: Path) -> None:
