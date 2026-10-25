@@ -19,7 +19,9 @@ from .extraction import build_candidate, extract_chapter
 from .graph_operations import GraphOperations
 from .harness import HarnessSettings
 from .native_models import CanvasState, candidate_summary, node_detail, search_result
+from .order_ids import order_key
 from .property_audit import audit_candidate
+from .property_store import supersede_records
 from .provider_store import ProviderStore
 
 _NODE_TYPES = {"person", "group", "item", "location", "event", "scene", "storyline", "other"}
@@ -605,12 +607,42 @@ class NativeBridge(QObject):
             if any(item.get("severity") == "error" for item in diagnostics):
                 return {"status": "precheck_failed", "diagnostics": diagnostics}
             candidate = ops.property_propose(records, revision, source="manual", note=note)
+            # A hand-written record is the acceptance step: the precheck already
+            # proved the quote sits in the source and the fields line up. Model
+            # output still waits on the review page, because there a person has to
+            # decide — here the person already did.
+            revision_after = ops.property_accept(candidate, 1)
+            anchor = next(
+                (item.get("event_id") for item in records
+                 if item.get("kind") == "property_value"),
+                "",
+            )
+            names = {
+                node["id"]: node.get("name") or node["id"]
+                for node in ops.graph_snapshot().get("nodes", [])
+            }
             return {
-                "status": "pending", "candidate_id": candidate,
+                "status": "accepted",
+                "revision": revision_after,
+                "anchor": anchor,
+                "anchor_name": names.get(anchor or "", ""),
                 "diagnostics": diagnostics,
             }
 
-        self._project_task(kind, work)
+        def apply(result: dict) -> dict:
+            # The edit landed where its disclosure sits. If that is beyond the
+            # reading position the pane is parked at, say so instead of letting it
+            # look as if nothing happened.
+            raw_anchor = str(result.get("anchor") or "")
+            raw_cut = self._state_cut or ""
+            anchor = order_key(raw_anchor) if raw_anchor else None
+            cut = order_key(raw_cut) if raw_cut else None
+            result["outside_window"] = bool(
+                anchor is not None and cut is not None and anchor > cut
+            )
+            return result
+
+        self._project_task(kind, work, apply)
 
     def _place_evidence(self, ops, record: dict, payload: dict) -> str | None:
         """Where the reader meets this sentence: derived from the quote, not typed."""
@@ -654,6 +686,13 @@ class NativeBridge(QObject):
                     "persistence": "until_changed",
                 })
             records.append(record)
+            # 补一条更晚的披露，等于说这个方面从此刻起换了值：更早的那条
+            # 从这次披露起失效，和提取、审计用的是同一条规则。
+            records.extend(
+                supersede_records(
+                    ops.property_records(include_retracted=True), [record]
+                )
+            )
             return records, "人工补录"
 
         self._stage_records("property_add", build)

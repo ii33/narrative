@@ -481,33 +481,16 @@ def _checkpoint_at(start: int, checkpoints: list[tuple[int, int, str]]) -> str |
 def _supersede_retractions(
     ops, batch: list[dict], accepted: list[dict]
 ) -> list[dict]:
-    """Older values this extraction replaces, as retractions anchored where the
-    replacement was disclosed.
+    """Older values this extraction replaces, as retraction records.
 
-    The rule lives in `property_store.supersede_plan` so the audit and the
-    extraction cannot disagree about what "superseded" means. Here it only becomes
-    records: the marks ride along in the same candidate as the value that caused
-    them, so a value and its invalidation can never land apart.
+    The rule lives in `property_store.supersede_plan` so the audit, the
+    extraction and a hand-written edit cannot disagree about what "superseded"
+    means. Here it only becomes records, riding in the same candidate as the
+    value that caused them — a value and its invalidation never land apart.
     """
-    from .property_store import supersede_plan
+    from .property_store import supersede_records
 
-    out: list[dict] = []
-    for item in supersede_plan(accepted, batch):
-        digest = hashlib.sha1(
-            f"{item['target_id']}:{item['event_id']}".encode()
-        ).hexdigest()[:12]
-        record = {
-            "kind": "property_retraction",
-            "id": f"retract_{digest}",
-            "target_id": item["target_id"],
-            "reason": item["reason"],
-            "event_id": item["event_id"],
-            "basis": "audit",
-        }
-        if isinstance(item.get("disclosure"), dict):
-            record["disclosure"] = item["disclosure"]
-        out.append(record)
-    return out
+    return supersede_records(accepted, batch)
 
 
 def _review_supersede(

@@ -358,6 +358,17 @@ Item {
         app.openSource(sourceId, start)
     }
 
+    // 改动落在阅读位置之后时要说清楚：记录确实写进去了，只是这一刻还读不到。
+    function editToast(prefix, payload) {
+        if (payload.outside_window !== true) return prefix
+        return prefix + "，但它披露于「" + (payload.anchor_name || "该事件")
+            + "」——在当前阅读位置之后，切到「最新」或那个事件才看得到"
+    }
+
+    function notifyEdit(prefix, payload) {
+        app.toast(page.editToast(prefix, payload), payload.outside_window === true)
+    }
+
     function togglePropertyScope(scope) {
         if (page.propertyScope === scope) return
         page.propertyScope = scope
@@ -473,8 +484,9 @@ Item {
             } else if (kind === "detail") {
                 detail = payload
             } else if (kind === "property_correct") {
-                if (payload.status === "pending") {
-                    app.toast("更正已提交，去「审核」接受后生效", false)
+                if (payload.status === "accepted") {
+                    app.toast(page.editToast("更正已生效", payload), payload.outside_window === true)
+                    if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
                 } else {
                     var problem = (payload.diagnostics || [])[0] || ({})
                     app.toast("更正未通过预检：" + (problem.message || "未知原因"), true)
@@ -491,8 +503,9 @@ Item {
                 app.toast("已合并到「" + (payload.target_id || "") + "」", false)
                 if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
             } else if (kind === "property_add") {
-                if (payload.status === "pending") {
-                    app.toast("已提交补录，去「审核」接受后生效", false)
+                if (payload.status === "accepted") {
+                    app.toast(page.editToast("补录已生效", payload), payload.outside_window === true)
+                    if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
                 } else {
                     var first = (payload.diagnostics || [])[0] || ({})
                     app.toast("补录未通过预检：" + (first.message || "未知原因"), true)
@@ -1229,7 +1242,7 @@ Item {
             Label {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
-                text: "补录也会先成为候选，到「审核」接受后才进正式资料。引文逐字复制，程序会核对。"
+                text: "引文逐字复制，程序会核对位置；通过后立即生效（和它同一方面的更早的值，从这次披露起失效）。"
                 color: t.muted
                 font.pixelSize: 11
             }

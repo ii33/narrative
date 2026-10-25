@@ -524,9 +524,9 @@ def test_the_pane_can_add_a_record(workspace) -> None:
     page.submitAddProperty()
     payload = _pump(app, results, "property_add")
 
-    # 补录不直接进正式资料：先成为候选，等人在审核页接受。
-    assert payload["status"] == "pending"
-    assert payload["candidate_id"]
+    # 人工补录本身就是接受动作：预检通过即生效，不再多绕一次审核。
+    assert payload["status"] == "accepted"
+    assert payload["revision"] > 0
 
 
 def test_a_hand_written_record_is_checked_against_the_source(tmp_path: Path) -> None:
@@ -557,12 +557,14 @@ def test_a_hand_written_record_is_checked_against_the_source(tmp_path: Path) -> 
             "quote": "林舟脸色铁青", "source_id": source_id,
         })
         added = _pump(QApplication.instance(), results, "property_add")
-        assert added["status"] == "pending"
+        assert added["status"] == "accepted"
+        # 引文推出来的位置就在结果里：落点不在当前窗口时界面要说得出来。
+        assert added["anchor"] == "2"
 
         reopened = open_graph_project(project)
-        candidate = reopened.property_candidate(added["candidate_id"])
         record = next(
-            item for item in candidate["records"] if item["kind"] == "property_value"
+            item for item in reopened.property_records()
+            if item["kind"] == "property_value"
         )
         # 位置由引文推出来，不用人填。
         assert record["disclosure"] == {"source_id": source_id, "start": 0}
@@ -581,7 +583,7 @@ def test_a_hand_written_record_is_checked_against_the_source(tmp_path: Path) -> 
 
 
 def test_the_node_editor_corrects_and_invalidates(workspace) -> None:
-    """编辑器：改值＝追加一条更正，失效＝撤回记录，两者都先成为候选。"""
+    """编辑器：改值＝追加一条更正，失效＝撤回记录，都立即生效。"""
     app, _bridge, page, results, _errors = workspace
     editor = page.findChild(object, "nodeEditor")
     assert editor is not None
@@ -607,7 +609,7 @@ def test_the_node_editor_corrects_and_invalidates(workspace) -> None:
     del results[:]
     editor.submitEdit()
     corrected = _pump(app, results, "property_correct")
-    assert corrected["status"] == "pending"
+    assert corrected["status"] == "accepted"
 
     # 失效：整条属性一起撤回，必须写原因。
     del results[:]
@@ -655,8 +657,9 @@ def test_the_node_editor_follows_the_reading_position(workspace) -> None:
     assert payload["cut_name"] == "开场"
     assert payload["later_count"] == 1
     assert {item["label"] for item in _value(editor.property("properties"))} == {"持有者"}
-    assert editor.findChild(object, "editorSubmitNode").property("enabled") is False
-    assert editor.findChild(object, "editorAddProperty").property("enabled") is False
+    # 只过滤显示，不封锁编辑：在事件 a 发现问题，就在事件 a 补上。
+    assert editor.findChild(object, "editorSubmitNode").property("enabled") is True
+    assert editor.findChild(object, "editorAddProperty").property("enabled") is True
 
     # 回到最新：整份历史回来，编辑重新可用。
     del results[:]
@@ -668,3 +671,76 @@ def test_the_node_editor_follows_the_reading_position(workspace) -> None:
         "持有者", "状态",
     }
     assert editor.findChild(object, "editorSubmitNode").property("enabled") is True
+
+
+def test_a_hand_written_disclosure_changes_the_state_from_its_own_event(
+    tmp_path: Path,
+) -> None:
+    """用户场景：某人在事件 a 瞎了但没提取出来。
+
+    在 a 补一条之后，a 之后的状态立刻变成失明，a 之前仍然是正常——旧值不是
+    被删掉，而是从 a 起不再算状态。
+    """
+    project = tmp_path / "blind.sqlite3"
+    ops = Operations.create_graph_project(project)
+    source_id = ops.import_source("第一章", "林舟视力正常。他走进房间。后来他瞎了。")
+    ops.graph_accept(
+        ops.graph_propose(
+            [
+                {"kind": "node", "id": "1", "node_type": "person", "name": "林舟"},
+                {"kind": "node", "id": "2", "node_type": "event", "name": "出场"},
+                {"kind": "node", "id": "3", "node_type": "event", "name": "走进房间"},
+            ],
+            ops.graph_project_info()["revision"],
+        ),
+        1,
+    )
+    ops.property_accept(
+        ops.property_propose(
+            [
+                {"kind": "property_definition", "id": "vision", "value_type": "string",
+                 "cardinality": "one", "persistence": "until_changed"},
+                {"kind": "property_value", "id": "v1", "node_id": "1",
+                 "property_id": "vision", "value": "正常", "event_id": "2",
+                 "evidence": {"source_id": source_id, "quote": "林舟视力正常"},
+                 "disclosure": {"source_id": source_id, "start": 0}},
+            ],
+            ops.graph_project_info()["revision"],
+            source="manual",
+        ),
+        1,
+    )
+
+    bridge = NativeBridge(tmp_path)
+    results: list[tuple[str, dict]] = []
+    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
+    try:
+        bridge.openProject(str(project))
+        _pump(QApplication.instance() or QApplication([]), results, "project")
+        bridge.addPropertyRecord({
+            "node_id": "1", "property_id": "vision", "value": "失明",
+            "event_id": "3", "quote": "他走进房间", "source_id": source_id,
+        })
+        added = _pump(QApplication.instance(), results, "property_add")
+        assert added["status"] == "accepted"
+        assert added["outside_window"] is False
+    finally:
+        bridge.close()
+
+    reopened = open_graph_project(project)
+    # 事件 3 之后：失明是状态，正常从这次披露起失效。
+    after = reopened.property_node_summary("1", cut="3")["properties"][0]
+    assert after["value"] == "失明"
+    assert after["invalid_count"] == 1
+    # 并集里能看见旧值，以及它从哪次披露起不再算状态。
+    union = reopened.property_node_summary(
+        "1", cut="3", include_invalid=True
+    )["properties"][0]
+    assert [row["value"] for row in union["records"]] == ["正常", "失明"]
+    assert union["records"][0]["invalidated_at"] == "走进房间"
+
+    # 事件 2：还没读到失明，正常仍然是状态。
+    before = reopened.property_node_summary("1", cut="2")["properties"][0]
+    assert before["value"] == "正常"
+    assert before["invalid_count"] == 0
+

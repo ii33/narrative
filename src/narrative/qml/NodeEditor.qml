@@ -149,8 +149,14 @@ Dialog {
                     editor.cutEventId = id
                     if (editor.visible) editor.reload()
                 }
-            } else if (kind === "property_correct" || kind === "property_retract"
-                       || kind === "property_add") {
+            } else if (kind === "property_correct" || kind === "property_add") {
+                editor.host.notifyEdit(kind === "property_add" ? "补录已生效" : "更正已生效",
+                                       payload)
+                editor.reload()
+                editor.host.load()
+                if (editor.nodeId === editor.host.selectedId)
+                    bridge.loadNodeProperties(editor.nodeId)
+            } else if (kind === "property_retract") {
                 editor.reload()
                 editor.host.load()
                 if (editor.nodeId === editor.host.selectedId)
@@ -208,7 +214,6 @@ Dialog {
             Button {
                 objectName: "editorSubmitNode"
                 text: "提交节点修订"
-                enabled: !editor.readOnly
                 onClicked: editor.submitNode()
             }
         }
@@ -224,7 +229,7 @@ Dialog {
                 text: "读到「" + (editor.cutName || "该事件") + "」时可见的属性"
                     + (editor.laterCount > 0
                         ? "；此后还有 " + editor.laterCount + " 条披露未显示" : "")
-                    + "。这是历史视图，只读。"
+                    + "。改动仍然立即生效，落在你选的披露事件上。"
                 color: t.warn
                 font.pixelSize: 11
             }
@@ -258,7 +263,7 @@ Dialog {
             }
             Item { Layout.fillWidth: true }
             Label {
-                text: "改动一律先成为候选，去「审核」接受后才生效"
+                text: "人工改动立即生效；模型提取才需要到「审核」接受"
                 color: t.muted
                 font.pixelSize: 10
             }
@@ -266,7 +271,6 @@ Dialog {
                 objectName: "editorAddProperty"
                 text: "新增属性"
                 flat: true
-                enabled: !editor.readOnly
                 onClicked: editor.host.openAddProperty()
             }
         }
@@ -317,7 +321,6 @@ Dialog {
                                 text: "更正"
                                 flat: true
                                 font.pixelSize: 10
-                                enabled: !editor.readOnly
                                 onClicked: {
                                     var records = modelData.records || []
                                     var latest = null
@@ -331,7 +334,6 @@ Dialog {
                                 text: "失效"
                                 flat: true
                                 font.pixelSize: 10
-                                enabled: !editor.readOnly
                                 onClicked: editor.startRetract(modelData)
                             }
                         }

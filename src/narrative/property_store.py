@@ -150,6 +150,34 @@ def supersede_plan(
     return list(unique.values())
 
 
+def supersede_records(accepted: list[dict], batch: list[dict]) -> list[dict]:
+    """Retraction records for the older values this batch replaces.
+
+    The plan says which records and from where; this turns each into the record
+    that says so. Ids are derived from the pair, so re-running the same batch
+    produces the same ids instead of piling up duplicates.
+    """
+    import hashlib
+
+    out: list[dict] = []
+    for item in supersede_plan(accepted, batch):
+        digest = hashlib.sha1(
+            f"{item['target_id']}:{item['event_id']}".encode()
+        ).hexdigest()[:12]
+        record = {
+            "kind": "property_retraction",
+            "id": f"retract_{digest}",
+            "target_id": item["target_id"],
+            "reason": item["reason"],
+            "event_id": item["event_id"],
+            "basis": "audit",
+        }
+        if isinstance(item.get("disclosure"), dict):
+            record["disclosure"] = item["disclosure"]
+        out.append(record)
+    return out
+
+
 def _categorization_overrides(records: list[dict]) -> dict[str, str]:
     """Current category of each moved record: the last accepted move wins."""
     overrides: dict[str, str] = {}
