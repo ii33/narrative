@@ -1,0 +1,108 @@
+"""浏览投影：过滤、计数、步骤表和相关节点都在后端算。
+
+界面只提交条件、渲染结果，所以这些规则必须能在这里单独验证。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from narrative.browse_view import browse_view, cut_for, related_nodes, steps
+from narrative.project_catalog import create_graph_project
+
+
+def _project(path: Path):
+    ops = create_graph_project(path)
+    source = ops.import_source("第一章", "林舟推开房门，看见陈默坐在沙发上。老周后来出现在门口，两个人都愣住了。")
+    ops.graph_accept(
+        ops.graph_propose(
+            [
+                {"kind": "source_order", "id": "order_1", "source_id": source,
+                 "ordinal": 1, "context_id": "canon"},
+                {"kind": "node", "id": "1", "node_type": "person", "name": "林舟",
+                 "disclosure": {"source_id": source, "start": 0}},
+                {"kind": "node", "id": "2", "node_type": "person", "name": "陈默",
+                 "aliases": ["陈总"], "disclosure": {"source_id": source, "start": 10}},
+                {"kind": "node", "id": "3", "node_type": "person", "name": "老周",
+                 "disclosure": {"source_id": source, "start": 20}},
+                {"kind": "node", "id": "4", "node_type": "scene", "name": "房间冲突",
+                 "events": ["5", "6"], "disclosure": {"source_id": source, "start": 0}},
+                {"kind": "node", "id": "5", "node_type": "event", "name": "林舟进门",
+                 "participants": ["1", "2"], "disclosure": {"source_id": source, "start": 0}},
+                {"kind": "node", "id": "6", "node_type": "event", "name": "两人对峙",
+                 "participants": ["1"], "disclosure": {"source_id": source, "start": 10}},
+                {"kind": "node", "id": "7", "node_type": "scene", "name": "老周现身",
+                 "events": ["8"], "disclosure": {"source_id": source, "start": 20}},
+                {"kind": "node", "id": "8", "node_type": "event", "name": "老周出场",
+                 "participants": ["3"], "disclosure": {"source_id": source, "start": 20}},
+            ],
+            ops.graph_project_info()["revision"],
+        ),
+        1,
+    )
+    return ops, ops.graph_snapshot()
+
+
+def test_steps_follow_the_granularity(tmp_path: Path) -> None:
+    _ops, snapshot = _project(tmp_path / "steps.sqlite3")
+
+    assert [step["id"] for step in steps(snapshot, "scene")] == ["4", "7"]
+    assert [step["id"] for step in steps(snapshot, "event")] == ["5", "6", "8"]
+    # 未知粒度按默认的「场景」处理，不会抛错。
+    assert [step["id"] for step in steps(snapshot, "chapter")] == ["4", "7"]
+
+
+def test_a_scene_cuts_where_its_last_event_is(tmp_path: Path) -> None:
+    _ops, snapshot = _project(tmp_path / "anchor.sqlite3")
+
+    cut = cut_for(snapshot, "4")
+    # 场景 4 的最后一个事件是 6：读完场景＝读到事件 6。
+    assert cut["event_id"] == "6"
+    assert cut["step_id"] == "4"
+    assert cut["start"] == 10
+
+    # 事件粒度下，切点就是事件自己。
+    assert cut_for(snapshot, "5")["event_id"] == "5"
+    assert cut_for(snapshot, "nope") is None
+
+
+def test_related_nodes_of_a_scene_are_its_events_participants(
+    tmp_path: Path,
+) -> None:
+    _ops, snapshot = _project(tmp_path / "related.sqlite3")
+
+    # 场景自己 + 两个事件里出现过的人。
+    assert related_nodes(snapshot, "4") == ["1", "2", "4"]
+    # 单个事件：自己 + 参与者。
+    assert related_nodes(snapshot, "5") == ["1", "2", "5"]
+    assert related_nodes(snapshot, "nope") == []
+
+
+def test_the_list_obeys_the_cut_only_when_asked(tmp_path: Path) -> None:
+    _ops, snapshot = _project(tmp_path / "cut.sqlite3")
+
+    narrowed = browse_view(snapshot, cut_id="4", time_filter=True)
+    # 读到事件 6（位置 10）：位置 20 的老周和第二个场景还没出现。
+    assert [node["id"] for node in narrowed["nodes"]] == ["1", "2", "4", "5", "6"]
+
+    whole = browse_view(snapshot, cut_id="4", time_filter=False)
+    assert len(whole["nodes"]) == 8
+    # 不收窄也照样给出切点：属性区永远跟着它。
+    assert whole["cut"]["event_id"] == "6"
+
+
+def test_counts_describe_the_cut_not_the_filter(tmp_path: Path) -> None:
+    _ops, snapshot = _project(tmp_path / "counts.sqlite3")
+
+    view = browse_view(snapshot, node_type="person", query="曾")
+
+    assert [node["name"] for node in view["nodes"]] == ["陈默"]
+    # 侧栏的计数是"这个位置有多少"，不是"筛完剩多少"。
+    assert view["counts"]["person"] == 3
+    assert view["total"] == 1
+
+
+def test_query_matches_aliases(tmp_path: Path) -> None:
+    _ops, snapshot = _project(tmp_path / "alias.sqlite3")
+
+    assert [node["id"] for node in browse_view(snapshot, query="陈总")["nodes"]] == ["2"]

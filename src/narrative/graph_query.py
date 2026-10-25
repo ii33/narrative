@@ -19,7 +19,7 @@ def _contexts(objects: dict[str, dict], selected: str) -> list[str]:
     return lineage
 
 
-def _revealed(node: dict, cut: dict, orders: dict[str, int] | None = None) -> bool:
+def revealed(node: dict, cut: dict, orders: dict[str, int] | None = None) -> bool:
     """A node is visible once the reader has reached its disclosure position.
 
     ``orders`` maps a source to its reading ordinal. Without it a node from
@@ -88,7 +88,7 @@ def query_graph(
             for row in snapshot.get("source_orders", []) or []
             if isinstance(row, dict) and "source_id" in row and "ordinal" in row
         }
-        result = [node for node in result if _revealed(node, disclosure_cut, orders)]
+        result = [node for node in result if revealed(node, disclosure_cut, orders)]
     if limit is not None:
         result = result[:limit]
 

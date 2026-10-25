@@ -54,6 +54,7 @@ def _pump(
             if name == kind and (not node_id or _node_of(payload) == node_id)
         ]
 
+
     deadline = time.monotonic() + 8
     while not ready() and time.monotonic() < deadline:
         app.processEvents()
@@ -79,11 +80,20 @@ def _seed(path: Path) -> Path:
                 {"kind": "node", "id": "3", "node_type": "item", "name": "铜钥匙",
                  "disclosure": {"source_id": source_id, "start": 2}},
                 {"kind": "node", "id": "4", "node_type": "event", "name": "开场",
+                 "participants": ["1", "3"],
                  "disclosure": {"source_id": source_id, "start": 3}},
                 {"kind": "node", "id": "5", "node_type": "event", "name": "后来又过了些日子",
+                 "participants": ["2"],
                  "disclosure": {"source_id": source_id, "start": 4}},
                 {"kind": "node", "id": "6", "node_type": "item", "name": "令牌",
                  "disclosure": {"source_id": source_id, "start": 5}},
+                # 两个场景各装一个事件：默认粒度是场景，切点落在场景的最后一个事件上。
+                {"kind": "node", "id": "7", "node_type": "scene", "name": "第一个场景",
+                 "events": ["4"],
+                 "disclosure": {"source_id": source_id, "start": 3}},
+                {"kind": "node", "id": "8", "node_type": "scene", "name": "第二个场景",
+                 "events": ["5"],
+                 "disclosure": {"source_id": source_id, "start": 4}},
             ],
             ops.graph_project_info()["revision"],
         ),
@@ -143,7 +153,7 @@ def workspace(tmp_path: Path):
         window: Any = engine.rootObjects()[0]
         bridge.openProject(str(project))
         _pump(app, results, "project")
-        _pump(app, results, "graph_view")
+        _pump(app, results, "browse")
         page = window.findChild(object, "browsePage")
         assert page is not None
         page.select("1")
@@ -265,23 +275,32 @@ def test_stepping_the_reading_position(workspace) -> None:
     _pump(app, results, "node_properties", "3")
     app.processEvents()
 
-    # 从「最新」往回退一步，落在最后一个事件上。
+    # 从「最新」往回退一步，落在最后一个场景上（它锚在事件 5）。
+    del results[:]
     page.stepCut(-1)
+    _pump(app, results, "browse")
     assert page.property("cutEventId") == "5"
     _pump(app, results, "node_properties", "3")
 
+    # 再往前一步：第一个场景，锚在事件 4。
+    del results[:]
+    page.stepCut(-1)
+    _pump(app, results, "browse")
+    assert page.property("cutEventId") == "4"
+
+    # 已经是第一个步骤，再往前不动。
     page.stepCut(-1)
     assert page.property("cutEventId") == "4"
 
-    # 已经是第一个事件，再往前不动。
-    page.stepCut(-1)
-    assert page.property("cutEventId") == "4"
-
+    # 再往后回到最后一个场景，然后回到「最新」。
+    del results[:]
     page.stepCut(1)
+    _pump(app, results, "browse")
     assert page.property("cutEventId") == "5"
 
-    # 从最后一个事件再往后，回到「最新」。
+    del results[:]
     page.stepCut(1)
+    _pump(app, results, "browse")
     assert page.property("cutEventId") == ""
     assert page.property("cutLater") == 0
 
@@ -308,35 +327,34 @@ def test_inbound_records_follow_the_reading_cut(workspace) -> None:
 def test_the_list_narrows_with_the_time_filter(workspace) -> None:
     """「按时间显示」打开后，列表只列已经出场过的节点。"""
     app, _bridge, page, results, _errors = workspace
-    assert page.property("total") == 6
+    assert page.property("total") == 8
 
     # 打开开关但停在「最新」：没有收窄。
     del results[:]
     page.toggleTimeFilter()
-    _pump(app, results, "graph_view")
+    _pump(app, results, "browse")
     assert page.property("timeFilter") is True
-    assert page.property("total") == 6
+    assert page.property("total") == 8
 
-    # 切到第一个事件（披露位置 3）：之后出场的 5、6 不在列表里。
+    # 切到第一个场景（锚在事件 4，披露位置 3）：之后出场的 5、6、8 不在列表里。
     del results[:]
     page.pickCut(1)
-    _pump(app, results, "reading_cut")
-    _pump(app, results, "graph_view")
+    _pump(app, results, "browse")
     app.processEvents()
-    assert page.property("total") == 4
+    assert page.property("total") == 5
 
     # 关掉开关：列表恢复全书。
     del results[:]
     page.toggleTimeFilter()
-    _pump(app, results, "graph_view")
-    assert page.property("total") == 6
+    _pump(app, results, "browse")
+    assert page.property("total") == 8
 
 
 def test_a_node_that_has_not_appeared_yet_loses_the_selection(workspace) -> None:
     app, _bridge, page, results, _errors = workspace
     del results[:]
     page.toggleTimeFilter()
-    _pump(app, results, "graph_view")
+    _pump(app, results, "browse")
 
     del results[:]
     page.select("6")
@@ -346,11 +364,49 @@ def test_a_node_that_has_not_appeared_yet_loses_the_selection(workspace) -> None
     # 收窄到第一个事件后，令牌还没出场：详情不能留在屏幕上。
     del results[:]
     page.pickCut(1)
-    _pump(app, results, "reading_cut")
-    _pump(app, results, "graph_view")
+    _pump(app, results, "browse")
     app.processEvents()
     assert page.property("selectedId") == ""
     assert _value(page.property("propertyRows")) == []
+
+
+def test_the_granularity_switches_the_step_list(workspace) -> None:
+    """默认按场景切；切到事件粒度后，步骤换成事件。"""
+    app, _bridge, page, results, _errors = workspace
+    steps = _value(page.property("steps"))
+    assert page.property("granularity") == "scene"
+    assert [step["id"] for step in steps] == ["7", "8"]
+
+    del results[:]
+    page.pickGranularity("event")
+    _pump(app, results, "browse")
+    steps = _value(page.property("steps"))
+    assert [step["id"] for step in steps] == ["4", "5"]
+    # 换粒度后原来的切点不属于新粒度，回到「最新」。
+    assert page.property("cutId") == ""
+    assert page.property("cutEventId") == ""
+
+
+def test_related_only_keeps_the_nodes_of_this_step(workspace) -> None:
+    app, _bridge, page, results, _errors = workspace
+    del results[:]
+    page.pickCut(1)
+    _pump(app, results, "browse")
+
+    del results[:]
+    page.toggleRelated()
+    _pump(app, results, "browse")
+    app.processEvents()
+
+    # 第一个场景只有一个事件，参与者是林舟和手镯：列表只剩场景本身和这两个。
+    ids = {node["id"] for node in _value(page.property("nodes"))}
+    assert ids == {"7", "1", "3"}
+    assert page.property("relatedOnly") is True
+
+    del results[:]
+    page.toggleRelated()
+    _pump(app, results, "browse")
+    assert page.property("total") == 8
 
 
 def test_a_reading_cut_switches_the_state(tmp_path: Path) -> None:
@@ -367,7 +423,7 @@ def test_a_reading_cut_switches_the_state(tmp_path: Path) -> None:
         window: Any = engine.rootObjects()[0]
         bridge.openProject(str(project))
         _pump(app, results, "project")
-        _pump(app, results, "graph_view")
+        _pump(app, results, "browse")
         page = window.findChild(object, "browsePage")
         page.select("3")
         _pump(app, results, "detail", "3")
@@ -377,9 +433,10 @@ def test_a_reading_cut_switches_the_state(tmp_path: Path) -> None:
         latest = {row["label"] for row in _value(page.property("propertyRows"))}
         assert latest == {"持有者", "状态"}
 
-        # 第 1 个选项是第一个事件「开场」，手镯的状态还没披露。
+        # 第 1 个选项是第一个步骤，手镯的状态还没披露。
         del results[:]
         page.pickCut(1)
+        _pump(app, results, "browse")
         _pump(app, results, "node_properties", "3")
         app.processEvents()
 
@@ -392,6 +449,7 @@ def test_a_reading_cut_switches_the_state(tmp_path: Path) -> None:
         # 回到最新，状态又出现。
         del results[:]
         page.backToLatest()
+        _pump(app, results, "browse")
         _pump(app, results, "node_properties", "3")
         app.processEvents()
         assert {row["label"] for row in _value(page.property("propertyRows"))} == {

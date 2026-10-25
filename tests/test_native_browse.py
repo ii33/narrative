@@ -75,7 +75,7 @@ def test_workspace_opens_on_the_browse_page_with_categories(tmp_path: Path) -> N
 
         bridge.openProject(str(project))
         _pump(app, results, "project")
-        _pump(app, results, "graph_view")
+        _pump(app, results, "browse")
         assert not errors
 
         # The workspace lands on the browsing page, not on 原文.
@@ -86,26 +86,35 @@ def test_workspace_opens_on_the_browse_page_with_categories(tmp_path: Path) -> N
         assert page is not None
         assert page.property("total") == 3
 
-        counts = page.property("counts").toVariant()
+        counts = page.property("counts")
         assert counts["person"] == 1
         assert counts["item"] == 1
         assert counts["event"] == 1
-        assert counts["scene"] == 0
+        assert counts.get("scene", 0) == 0
 
         # Filtering by category narrows the list; clearing it restores everything.
+        # 过滤在后端做，所以每次都要等一次结果；清掉旧结果才不会被它骗过。
+        del results[:]
         page.pickType("item")
+        _pump(app, results, "browse")
         assert page.property("total") == 1
+        del results[:]
         page.pickType("")
+        _pump(app, results, "browse")
         assert page.property("total") == 3
 
-        # Name search runs over the loaded list, no extra round trip.
+        # 搜索也走同一条查询，界面不再自己筛。
+        del results[:]
         page.setProperty("query", "火纹")
-        page.rebuild()
+        page.load()
+        _pump(app, results, "browse")
         assert page.property("total") == 1
 
         # Selecting a node loads its dossier, evidence included.
+        del results[:]
         page.setProperty("query", "")
-        page.rebuild()
+        page.load()
+        _pump(app, results, "browse")
         page.select("1")
         _pump(app, results, "detail")
         detail = page.property("detail")
@@ -129,9 +138,13 @@ def test_workspace_opens_on_the_browse_page_with_categories(tmp_path: Path) -> N
         assert groups[0]["count"] == 1
 
         # Clicking a linked node jumps to it and clears whatever filter hid it.
+        del results[:]
         page.pickType("item")
+        _pump(app, results, "browse")
         assert page.property("total") == 1
+        del results[:]
         page.jumpTo("1")
+        _pump(app, results, "browse")
         _pump(app, results, "detail")
         assert page.property("selectedType") == ""
         assert page.property("selectedId") == "1"

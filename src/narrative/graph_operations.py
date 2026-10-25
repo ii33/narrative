@@ -400,6 +400,16 @@ class GraphOperations:
         """Read-only audit: overlaps, contradictions, stale values, gaps."""
         return self.properties.audit(node_ids)
 
+    def browse_view(self, **spec) -> dict:
+        """One answer for the browsing page: nodes, counts, steps and the cut.
+
+        Filtering, counting, the step list and the related-node rule all live in
+        the projection, so the GUI only renders what it is given.
+        """
+        from .browse_view import browse_view
+
+        return browse_view(self.graph_snapshot(), **spec)
+
     def property_node_summary(self, node_id: str, cut: object = None) -> dict:
         """Read-only: every property of one node, with its disclosure sequence.
 

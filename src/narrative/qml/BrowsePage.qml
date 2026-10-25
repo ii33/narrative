@@ -9,7 +9,10 @@ Item {
     property var app
     readonly property var t: app.theme
 
-    property var allNodes: []
+    property var nodes: []
+    property var steps: []
+    property var events: []
+    property var nameIndex: ({})
     property string selectedType: ""
     property string query: ""
     property string selectedId: ""
@@ -24,11 +27,11 @@ Item {
     })
     readonly property var typeKeys: ["person", "group", "item", "location", "event", "scene", "storyline", "other"]
 
-    // 「最新」+ 每个事件；编号即阅读顺序，所以顺序就是读者读到的顺序。
+    // 「最新」+ 当前粒度的每一步；编号即阅读顺序，所以顺序就是读者读到的顺序。
     readonly property var cutLabels: {
         var labels = ["最新（全部披露）"]
-        for (var i = 0; i < eventOptions.length; ++i)
-            labels.push(eventOptions[i].id + "  " + eventOptions[i].name)
+        for (var i = 0; i < steps.length; ++i)
+            labels.push(steps[i].id + "  " + steps[i].name)
         return labels
     }
 
@@ -46,6 +49,12 @@ Item {
         seclusion_duration: "闭关时长"
     })
     readonly property var scopeLabels: ({world: "世界", cognition: "认知", claim: "声称"})
+    // 工程里一个节点都没有（区别于"被条件过滤掉了"）。
+    readonly property bool isEmptyProject: {
+        var all = 0
+        for (var name in counts) all += counts[name]
+        return all === 0
+    }
 
     ListModel { id: rows }
     ListModel { id: categories }
@@ -59,89 +68,59 @@ Item {
     property bool groupByCategory: true
     property var expandedProps: ({})
     property var pickerTargets: []
-    property var eventOptions: []
     property var mergeNames: []
-    // 阅读位置：选一个事件，属性区显示"读到这里时"的状态；空串表示看到最新。
+    // 事件等级：场景 / 事件。默认场景（粒度更粗，一次读一段）。
+    property string granularity: "scene"
+    // 阅读位置：cutId 是场景或事件的编号，空串表示看到最新。
+    property string cutId: ""
     property string cutEventId: ""
-    property string cutEventName: ""
-    property string cutSourceId: ""
-    property int cutStart: -1
+    property string cutName: ""
     property int cutLater: 0
+    // 勾选后只列当前这一步的相关节点。
+    property bool relatedOnly: false
     // 节点列表是否跟着阅读位置收窄。默认全部显示。
     property bool timeFilter: false
+    // 属性区上一次用的切点：搜索时切点没变就不重载，展开状态得以保留。
+    property string appliedCut: ""
+    property string pendingFocus: ""
 
+    // 查询、过滤、计数、切点解析都在后端：界面只提交条件并渲染结果。
     function load() {
-        var spec = {view: "table", limit: 2000}
-        // 只有「按时间显示」才把节点列表也切到阅读位置；属性区始终跟着切点。
-        if (page.timeFilter && page.cutSourceId.length > 0 && page.cutStart >= 0)
-            spec.disclosure_cut = {source_id: page.cutSourceId, start: page.cutStart}
-        bridge.loadGraphView(spec)
+        bridge.loadBrowse({
+            granularity: page.granularity,
+            cut_id: page.cutId,
+            node_type: page.selectedType,
+            query: page.query,
+            related_only: page.relatedOnly,
+            time_filter: page.timeFilter
+        })
     }
 
     function nameOf(id) {
-        for (var i = 0; i < allNodes.length; ++i)
-            if (allNodes[i].id === id) return allNodes[i].name
-        return id
+        var name = page.nameIndex[id]
+        return name === undefined ? id : name
     }
 
-    function applyNodes(list) {
-        allNodes = list || []
-        var tally = {}
-        for (var k = 0; k < page.typeKeys.length; ++k)
-            tally[page.typeKeys[k]] = 0
-        var events = []
-        for (var i = 0; i < allNodes.length; ++i) {
-            var kind = allNodes[i].node_type || "other"
-            tally[kind] = (tally[kind] || 0) + 1
-            if (kind === "event") events.push({id: allNodes[i].id, name: allNodes[i].name || allNodes[i].id})
-        }
-        // 事件列表只从「全部显示」的那次结果里取：收窄后的列表只剩已出场的节点，
-        // 拿它当选项会让人无法再往前走。
-        if (!page.timeFilter) eventOptions = events
-        counts = tally
-        rebuildCategories()
-        rebuild()
-        // 收窄后选中的节点可能还没出场：不能留着一个"此刻还不存在"的详情。
-        if (page.selectedId.length > 0 && !allNodes.some(function (node) {
-            return node.id === page.selectedId
-        })) {
-            page.selectedId = ""
-            page.detail = ({})
-            page.propertyRows = []
-            page.categoryGroups = []
-            page.inboundRows = []
-            page.expandedProps = ({})
-        }
-    }
+    function applyBrowse(payload) {
+        revision = payload.revision === undefined ? revision : payload.revision
+        steps = payload.steps || []
+        events = payload.events || []
+        counts = payload.counts || ({})
+        total = payload.total || 0
+        nodes = payload.nodes || []
+        var cut = payload.cut || null
+        cutEventId = cut ? cut.event_id : ""
+        cutName = cut ? cut.step_name : ""
+        if (!cut) cutLater = 0
 
-    function rebuildCategories() {
-        categories.clear()
-        categories.append({key: "", label: "全部", count: allNodes.length})
-        for (var i = 0; i < page.typeKeys.length; ++i) {
-            var key = page.typeKeys[i]
-            categories.append({key: key, label: page.typeLabels[key], count: counts[key] || 0})
-        }
-    }
+        var index = page.nameIndex
+        for (var i = 0; i < nodes.length; ++i)
+            if (nodes[i].id) index[nodes[i].id] = nodes[i].name || nodes[i].id
+        page.nameIndex = index
 
-    function matches(node) {
-        if (page.selectedType.length > 0 && (node.node_type || "other") !== page.selectedType)
-            return false
-        var needle = page.query.trim().toLowerCase()
-        if (needle.length === 0) return true
-        if (String(node.name || "").toLowerCase().indexOf(needle) >= 0) return true
-        var aliases = node.aliases || []
-        for (var i = 0; i < aliases.length; ++i)
-            if (String(aliases[i]).toLowerCase().indexOf(needle) >= 0) return true
-        return false
-    }
-
-    function rebuild() {
         rows.clear()
-        var shown = 0
-        for (var i = 0; i < allNodes.length; ++i) {
-            var node = allNodes[i]
-            if (!page.matches(node)) continue
-            shown += 1
+        for (var j = 0; j < nodes.length; ++j) {
+            var node = nodes[j]
             rows.append({
                 id: node.id || "",
                 name: node.name || "未命名",
@@ -149,28 +128,88 @@ Item {
                 note: node.identity_note || ""
             })
         }
-        total = shown
+        rebuildCategories()
+        syncCutIndex()
+
+        // 收窄或过滤后选中的节点可能不在列表里：不能留着一个"此刻还不存在"的详情。
+        if (page.selectedId.length > 0 && !nodes.some(function (node) {
+            return node.id === page.selectedId
+        })) {
+            page.clearSelection()
+        }
+        if (page.pendingFocus.length > 0) {
+            for (var k = 0; k < rows.count; ++k) {
+                if (rows.get(k).id === page.pendingFocus) {
+                    nodeList.positionViewAtIndex(k, ListView.CenterInView)
+                    break
+                }
+            }
+            page.pendingFocus = ""
+        }
+        // 属性区跟同一个锚点事件走；切点没变就不重载。
+        if (page.selectedId.length > 0 && page.appliedCut !== page.cutEventId) {
+            page.appliedCut = page.cutEventId
+            bridge.loadNodeProperties(page.selectedId)
+        }
+    }
+
+    function rebuildCategories() {
+        var all = 0
+        for (var name in counts) all += counts[name]
+        categories.clear()
+        categories.append({key: "", label: "全部", count: all})
+        for (var i = 0; i < page.typeKeys.length; ++i) {
+            var key = page.typeKeys[i]
+            categories.append({key: key, label: page.typeLabels[key], count: counts[key] || 0})
+        }
+    }
+
+    function syncCutIndex() {
+        var index = 0
+        for (var i = 0; i < page.steps.length; ++i)
+            if (page.steps[i].id === page.cutId) { index = i + 1; break }
+        if (cutBox.currentIndex !== index) cutBox.currentIndex = index
+    }
+
+    function clearSelection() {
+        selectedId = ""
+        detail = ({})
+        propertyRows = []
+        categoryGroups = []
+        inboundRows = []
+        expandedProps = ({})
+        appliedCut = ""
     }
 
     function pickType(kind) {
         selectedType = kind
-        rebuild()
+        page.load()
     }
 
-    // 事件按编号排列（编号即阅读顺序），所以下拉里的事件顺序就是读者读到的顺序。
+    // 事件等级切换后原来的切点不再属于新的粒度，回到「最新」。
+    function pickGranularity(value) {
+        if (page.granularity === value) return
+        page.granularity = value
+        page.cutId = ""
+        page.appliedCut = ""
+        page.load()
+    }
+
+    // 步骤按编号排列（编号即阅读顺序），所以下拉里的顺序就是读者读到的顺序。
     function pickCut(index) {
-        // 让下拉显示和实际切点始终一致：按钮和外部调用都走这里。
         if (cutBox.currentIndex !== index) cutBox.currentIndex = index
-        var event = index > 0 ? page.eventOptions[index - 1] : null
-        cutEventId = event ? event.id : ""
-        cutEventName = event ? event.name : ""
-        cutLater = 0
-        // 切点的来源位置由后端解析，列表与属性共用同一个答案。
-        bridge.setReadingCut(cutEventId)
+        page.cutId = index > 0 ? page.steps[index - 1].id : ""
+        page.cutLater = 0
+        page.load()
     }
 
     function toggleTimeFilter() {
         page.timeFilter = !page.timeFilter
+        page.load()
+    }
+
+    function toggleRelated() {
+        page.relatedOnly = !page.relatedOnly
         page.load()
     }
 
@@ -179,20 +218,19 @@ Item {
         page.pickCut(0)
     }
 
-    // 上一个 / 下一个时间点。下拉里 0 是「最新」，1..N 是事件，
+    // 上一个 / 下一个时间点。下拉里 0 是「最新」，1..N 是各步骤，
     // 所以时间顺序是 1 → N → 最新(0)，两头各自接上。
     function stepCut(delta) {
-        var total = page.eventOptions.length
-        if (total === 0) return
+        var count = page.steps.length
+        if (count === 0) return
         var index = cutBox.currentIndex
         if (delta < 0) {
-            if (index === 0) index = total
+            if (index === 0) index = count
             else if (index > 1) index -= 1
         } else {
             if (index === 0) return
-            index = index < total ? index + 1 : 0
+            index = index < count ? index + 1 : 0
         }
-        cutBox.currentIndex = index
         page.pickCut(index)
     }
 
@@ -203,6 +241,7 @@ Item {
         categoryGroups = []
         inboundRows = []
         expandedProps = ({})
+        appliedCut = page.cutEventId
         bridge.nodeDetail(id)
         bridge.loadNodeProperties(id)
     }
@@ -270,7 +309,6 @@ Item {
         vocabulary = payload.vocabulary || []
         inboundRows = payload.inbound || []
         cutLater = payload.later_count || 0
-        if (payload.cut) cutEventName = page.nameOf(String(payload.cut))
         categoryGroups = built
         propertyRows = all
         expandedProps = ({})
@@ -322,7 +360,7 @@ Item {
     }
 
     function submitAddProperty() {
-        var event = page.eventOptions[addEventField.currentIndex] || ({})
+        var event = page.events[addEventField.currentIndex] || ({})
         var node = page.detail.node || ({})
         var sourceId = node.evidence ? node.evidence.source_id
             : (node.disclosure ? node.disclosure.source_id : "")
@@ -358,21 +396,16 @@ Item {
 
     function jumpTo(id) {
         if (!id) return
-        // A node may be filtered out of the list; clear the filter first so the
-        // jump always lands somewhere visible.
-        if (page.selectedType.length > 0 || page.query.length > 0) {
+        // 目标节点可能被当前条件挡在列表外：先清掉条件，再跳过去。
+        if (page.selectedType.length > 0 || page.query.length > 0 || page.relatedOnly) {
             page.selectedType = ""
             page.query = ""
+            page.relatedOnly = false
             searchField.text = ""
-            page.rebuild()
         }
+        page.pendingFocus = id
+        page.load()
         page.select(id)
-        for (var i = 0; i < rows.count; ++i) {
-            if (rows.get(i).id === id) {
-                nodeList.positionViewAtIndex(i, ListView.CenterInView)
-                return
-            }
-        }
     }
 
     function toggleProperty(key) {
@@ -399,9 +432,14 @@ Item {
                 categoryGroups = []
                 inboundRows = []
                 expandedProps = ({})
+                page.cutId = ""
                 page.cutEventId = ""
-                page.cutEventName = ""
+                page.cutName = ""
                 page.cutLater = 0
+                page.appliedCut = ""
+                page.relatedOnly = false
+                page.timeFilter = false
+                page.granularity = "scene"
                 page.load()
             }
         }
@@ -410,22 +448,12 @@ Item {
     Connections {
         target: bridge
         function onResultReady(kind, payload) {
-            if (kind === "graph_view") {
-                var canvas = payload.canvas || ({})
-                revision = canvas.revision || revision
-                page.applyNodes(canvas.nodes)
+            if (kind === "browse") {
+                page.applyBrowse(payload)
             } else if (kind === "detail") {
                 detail = payload
                 var index = payload.node ? page.typeKeys.indexOf(payload.node.node_type) : -1
                 kindEditor.currentIndex = index >= 0 ? index : 0
-            } else if (kind === "reading_cut") {
-                page.cutSourceId = payload.source_id || ""
-                page.cutStart = payload.start === undefined ? -1 : payload.start
-                page.cutEventName = payload.name || ""
-                page.cutLater = 0
-                // 列表（按时间显示时）和属性都按这个位置重取。
-                page.load()
-                if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
             } else if (kind === "node_properties") {
                 page.applyProperties(payload)
             } else if (kind === "property_categorize") {
@@ -466,9 +494,10 @@ Item {
             TextField {
                 id: searchField
                 objectName: "browseSearchField"
-                Layout.preferredWidth: 300
+                Layout.preferredWidth: 280
                 placeholderText: "搜索名称或别名"
-                onTextChanged: { page.query = text; page.rebuild() }
+                // 输入停下来再查，避免每个字都跑一次后端。
+                onTextChanged: { page.query = text; searchTimer.restart() }
             }
             Label {
                 text: total + " 个节点 · 修订 " + revision
@@ -476,6 +505,39 @@ Item {
                 font.pixelSize: 12
             }
             Item { Layout.fillWidth: true }
+            Button {
+                text: "刷新"
+                flat: true
+                onClicked: page.load()
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+
+            // 事件等级：决定「阅读位置」按场景还是按事件走。
+            Label {
+                text: "事件等级"
+                color: t.muted
+                font.pixelSize: 12
+            }
+            Button {
+                objectName: "browseGranularityScene"
+                text: "场景"
+                flat: page.granularity !== "scene"
+                highlighted: page.granularity === "scene"
+                font.pixelSize: 11
+                onClicked: page.pickGranularity("scene")
+            }
+            Button {
+                objectName: "browseGranularityEvent"
+                text: "事件"
+                flat: page.granularity !== "event"
+                highlighted: page.granularity === "event"
+                font.pixelSize: 11
+                onClicked: page.pickGranularity("event")
+            }
             // 列表是否跟着阅读位置收窄。
             Button {
                 objectName: "browseTimeFilter"
@@ -485,7 +547,6 @@ Item {
                 font.pixelSize: 11
                 onClicked: page.toggleTimeFilter()
             }
-            // 阅读位置：切到某个事件，右侧属性显示"读到这里时"的状态。
             Label {
                 text: "阅读位置"
                 color: t.muted
@@ -496,16 +557,17 @@ Item {
                 text: "‹"
                 flat: true
                 font.pixelSize: 15
-                enabled: page.eventOptions.length > 0
+                enabled: page.steps.length > 0
                     && (cutBox.currentIndex > 1 || cutBox.currentIndex === 0)
                 onClicked: page.stepCut(-1)
             }
             ComboBox {
                 id: cutBox
                 objectName: "browseCutBox"
-                Layout.preferredWidth: 280
+                Layout.fillWidth: true
+                Layout.maximumWidth: 320
                 model: page.cutLabels
-                enabled: page.eventOptions.length > 0
+                enabled: page.steps.length > 0
                 onActivated: page.pickCut(currentIndex)
             }
             Button {
@@ -513,7 +575,7 @@ Item {
                 text: "›"
                 flat: true
                 font.pixelSize: 15
-                enabled: page.eventOptions.length > 0 && cutBox.currentIndex !== 0
+                enabled: page.steps.length > 0 && cutBox.currentIndex !== 0
                 onClicked: page.stepCut(1)
             }
             Button {
@@ -523,11 +585,22 @@ Item {
                 enabled: page.cutEventId.length > 0
                 onClicked: page.backToLatest()
             }
-            Button {
-                text: "刷新"
-                flat: true
-                onClicked: page.load()
+            CheckBox {
+                id: relatedBox
+                objectName: "browseRelatedOnly"
+                text: "相关节点"
+                checked: page.relatedOnly
+                font.pixelSize: 11
+                onToggled: page.toggleRelated()
             }
+            Item { Layout.fillWidth: true }
+        }
+
+        // 搜索防抖：输入停下 200ms 才查。
+        Timer {
+            id: searchTimer
+            interval: 200
+            onTriggered: page.load()
         }
 
         RowLayout {
@@ -655,7 +728,7 @@ Item {
                     Label {
                         anchors.centerIn: parent
                         visible: rows.count === 0
-                        text: page.allNodes.length === 0 ? "这个工程还没有节点。" : "该分类下没有节点。"
+                        text: page.isEmptyProject ? "这个工程还没有节点。" : "该分类下没有节点。"
                         color: t.muted
                     }
                 }
@@ -751,10 +824,12 @@ Item {
                                 Layout.topMargin: 2
                                 visible: page.cutEventId.length > 0
                                 wrapMode: Text.Wrap
-                                text: "读到「" + (page.cutEventName || page.cutEventId) + "」时的状态"
+                                text: "读到「" + (page.cutName || page.cutEventId) + "」时的状态"
                                     + (cutBox.currentIndex > 0
                                         ? "（第 " + cutBox.currentIndex + " / "
-                                            + page.eventOptions.length + " 个事件）" : "")
+                                            + page.steps.length + " 个"
+                                            + (page.granularity === "scene" ? "场景" : "事件")
+                                            + "）" : "")
                                     + (page.cutLater > 0
                                         ? "；此后还有 " + page.cutLater + " 条披露未显示" : "")
                                 color: t.warn
@@ -796,7 +871,7 @@ Item {
                                     text: "补录"
                                     flat: true
                                     font.pixelSize: 10
-                                    enabled: page.selectedId.length > 0 && page.eventOptions.length > 0
+                                    enabled: page.selectedId.length > 0 && page.events.length > 0
                                     onClicked: page.openAddProperty()
                                 }
                             }
@@ -1138,7 +1213,7 @@ Item {
                     id: addEventField
                     objectName: "addEventField"
                     Layout.fillWidth: true
-                    model: page.eventOptions.map(function (item) { return item.name })
+                    model: page.events.map(function (item) { return item.name })
                 }
                 Label { text: "大类"; color: t.muted; font.pixelSize: 11 }
                 ComboBox {

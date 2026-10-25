@@ -429,6 +429,42 @@ class NativeBridge(QObject):
         """Whole-graph property audit; the review page shows the findings."""
         self._project_task("property_audit", lambda ops: ops.property_audit())
 
+    @Slot("QVariantMap")
+    def loadBrowse(self, spec: dict) -> None:
+        """One question for the browsing page: nodes, counts, steps and the cut.
+
+        Filtering, counting, the step list and the related-node rule all happen
+        in the projection; the page only renders what comes back. The cut is
+        resolved there too, so the list and the property pane cannot disagree.
+        """
+        try:
+            self._project()
+        except ValueError as exc:
+            self.errorOccurred.emit("browse", str(exc))
+            return
+        self._query_epoch += 1
+        epoch = self._query_epoch
+        requested = dict(spec)
+
+        def work() -> dict:
+            ops = project_catalog.open_graph_project(self._project())
+            return ops.browse_view(
+                granularity=str(requested.get("granularity") or "scene"),
+                cut_id=str(requested.get("cut_id") or ""),
+                node_type=str(requested.get("node_type") or ""),
+                query=str(requested.get("query") or ""),
+                related_only=bool(requested.get("related_only")),
+                time_filter=bool(requested.get("time_filter")),
+            )
+
+        def apply(result: dict) -> dict:
+            cut = result.get("cut") or {}
+            # The property pane cuts at the same anchor event the list uses.
+            self._state_cut = str(cut.get("event_id") or "")
+            return result
+
+        self._submit("browse", work, apply, query_epoch=epoch)
+
     @Slot(str)
     def loadNodeProperties(self, node_id: str) -> None:
         """Every property of one node, read-only; used by the browsing detail pane."""
@@ -437,39 +473,6 @@ class NativeBridge(QObject):
             return ops.property_node_summary(node_id, cut=self._state_cut or None)
 
         self._project_task("node_properties", work)
-
-    @Slot(str)
-    def setReadingCut(self, event_id: str) -> None:
-        """Move the reading position used by the property pane and the node list.
-
-        An empty id means "everything disclosed so far". The cut is an event, not
-        a story time: it says how far the reader has read, not when things happen.
-        Resolving it here keeps one source of truth — the list and the properties
-        both take their position from this answer.
-        """
-        event_id = event_id.strip()
-
-        def work(ops) -> dict:
-            if not event_id:
-                return {"event_id": "", "source_id": "", "start": -1, "name": ""}
-            snapshot = ops.graph_snapshot()
-            node = next(
-                (item for item in snapshot.get("nodes", []) if item["id"] == event_id), None
-            )
-            disclosure = (node or {}).get("disclosure") or {}
-            start = disclosure.get("start")
-            return {
-                "event_id": event_id,
-                "source_id": disclosure.get("source_id") or "",
-                "start": start if isinstance(start, int) else -1,
-                "name": (node or {}).get("name") or event_id,
-            }
-
-        def apply(result: dict) -> dict:
-            self._state_cut = str(result.get("event_id") or "")
-            return result
-
-        self._project_task("reading_cut", work, apply)
 
     @Slot()
     def loadPropertyCategories(self) -> None:
