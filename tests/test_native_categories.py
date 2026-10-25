@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from pathlib import Path
@@ -410,6 +411,53 @@ def test_related_only_keeps_the_nodes_of_this_step(workspace) -> None:
     _pump(app, results, "browse")
     assert page.property("total") == 8
     assert page.property("counts") == {"event": 2, "item": 2, "person": 2, "scene": 2}
+
+
+def test_the_pane_separates_the_latest_state_from_every_disclosure(workspace) -> None:
+    """「最新」是这一刻的状态，「全部」是历次披露的并集——能失效之后两者不是一回事。"""
+    app, bridge, page, results, _errors = workspace
+
+    # 让林舟的「脸色铁青」从事件 5 起失效：最新只剩一条，全部仍是两条。
+    del results[:]
+    bridge.applySuperseded(json.dumps([
+        {"target_id": "v1", "event_id": "5", "reason": "后来又过了些日子"}
+    ]))
+    _pump(app, results, "property_supersede")
+
+    page.jumpTo("1")
+    _pump(app, results, "browse")
+    _pump(app, results, "detail", "1")
+    _pump(app, results, "node_properties", "1")
+    app.processEvents()
+
+    latest = _value(page.property("propertyRows"))
+    assert page.property("propertyScope") == "latest"
+    assert [row["valueText"] for row in latest] == ["身受重伤"]
+    assert [len(row["records"]) for row in latest] == [1]
+
+    del results[:]
+    page.togglePropertyScope("all")
+    _pump(app, results, "property_scope")
+    _pump(app, results, "node_properties", "1")
+    app.processEvents()
+
+    everything = _value(page.property("propertyRows"))
+    assert page.property("propertyScope") == "all"
+    # 并集：失效的那条也列出来（它单独在一个大类下），带着标记和失效时点。
+    assert len(everything) == 2
+    assert {row["valueText"] for row in everything} == {"脸色铁青", "身受重伤"}
+    invalid = next(row for row in everything if row["valueText"] == "脸色铁青")
+    assert [record["valid"] for record in invalid["records"]] == [False]
+    assert invalid["records"][0]["invalidated_at"] == "后来又过了些日子"
+    assert invalid["countText"] == "共 1 条"
+
+    # 回到「最新」，失效的那条不再列出。
+    del results[:]
+    page.togglePropertyScope("latest")
+    _pump(app, results, "property_scope")
+    _pump(app, results, "node_properties", "1")
+    app.processEvents()
+    assert len(_value(page.property("propertyRows"))[0]["records"]) == 1
 
 
 def test_a_reading_cut_switches_the_state(tmp_path: Path) -> None:

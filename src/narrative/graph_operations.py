@@ -410,13 +410,20 @@ class GraphOperations:
 
         return browse_view(self.graph_snapshot(), **spec)
 
-    def property_node_summary(self, node_id: str, cut: object = None) -> dict:
+    def property_node_summary(
+        self, node_id: str, cut: object = None, *, include_invalid: bool = False
+    ) -> dict:
         """Read-only: every property of one node, with its disclosure sequence.
 
         ``cut`` is an event id: the projection then answers "what was known when
         the reader reached that event" instead of "what is known now".
+        ``include_invalid`` switches the answer from "the state at that point" to
+        "every disclosure up to it" — the union of what was said over time, with
+        each record marked valid or invalid.
         """
-        return self.properties.node_properties(node_id, cut=cut)
+        return self.properties.node_properties(
+            node_id, cut=cut, include_retracted=include_invalid
+        )
 
     def property_categories(self) -> dict[str, list[str]]:
         """Display categories per node type; loose groupings, editable at will."""

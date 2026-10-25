@@ -69,6 +69,8 @@ def main() -> int:
     parser.add_argument("--time", action="store_true", help="同时把节点列表也收窄到该阅读位置")
     parser.add_argument("--related", action="store_true", help="只显示当前步骤的相关节点")
     parser.add_argument("--editor", action="store_true", help="打开节点编辑器再截图")
+    parser.add_argument("--scope", default="latest", choices=("latest", "all"),
+                        help="属性范围：latest 这一刻的状态，all 历次披露的并集")
     args = parser.parse_args()
     project = args.project.resolve()
     if not project.is_file():
@@ -133,6 +135,9 @@ def main() -> int:
             page.toggleRelated()
             wait_for("browse")
         app.processEvents()
+        if args.scope == "all":
+            page.togglePropertyScope("all")
+            wait_for("property_scope")
         page.select(args.node)
         wait_for("node_properties")
         if args.editor:

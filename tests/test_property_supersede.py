@@ -210,3 +210,59 @@ def test_a_judgment_that_cannot_be_located_is_dropped(tmp_path: Path) -> None:
                         "at_event": "他笑了"}]},
         [], accepted, {"林舟": "1"}, {"他笑了": "3"},
     ) == []
+
+
+# -- 两个问题，两种回答 ----------------------------------------------------
+
+def test_the_projection_answers_state_or_union(tmp_path: Path) -> None:
+    """「最新」是这一刻的状态，「全部」是历次披露的并集。"""
+    ops, source = _project(tmp_path / "union.sqlite3")
+    ops.property_accept(
+        ops.property_propose(
+            [
+                _definition("height"),
+                _value("v1", "矮小", "2", 0, property_id="height", source_id=source,
+                       evidence={"source_id": source, "quote": "林舟脸色铁青"}),
+                _value("v2", "变高了", "3", 7, property_id="height", source_id=source,
+                       evidence={"source_id": source, "quote": "后来他笑了"}),
+            ],
+            ops.graph_project_info()["revision"],
+            source="manual",
+        ),
+        1,
+    )
+    ops.property_supersede([{"target_id": "v1", "event_id": "3", "reason": "被取代"}])
+
+    state = ops.property_node_summary("1")["properties"][0]
+    assert [row["value"] for row in state["records"]] == ["变高了"]
+    assert (state["valid_count"], state["invalid_count"]) == (1, 1)
+
+    union = ops.property_node_summary("1", include_invalid=True)["properties"][0]
+    # 并集：两条都在，各自标着有效/失效。
+    assert [row["value"] for row in union["records"]] == ["矮小", "变高了"]
+    assert [row["valid"] for row in union["records"]] == [False, True]
+    assert union["records"][0]["invalidated_at"] == "他笑了"
+    # 失效的那条仍然算在这一行里，不是被抹掉。
+    assert (union["valid_count"], union["invalid_count"]) == (1, 1)
+
+
+def test_the_union_view_keeps_the_headline_of_a_fully_invalid_row(tmp_path: Path) -> None:
+    """整条失效的行在并集里仍然显示它说过的最后一句，而不是一个空行。"""
+    ops, source = _project(tmp_path / "gone.sqlite3")
+    ops.property_accept(
+        ops.property_propose(
+            [_definition("height"),
+             _value("v1", "矮小", "2", 0, property_id="height", source_id=source,
+                    evidence={"source_id": source, "quote": "林舟脸色铁青"})],
+            ops.graph_project_info()["revision"],
+            source="manual",
+        ),
+        1,
+    )
+    ops.property_retract(["v1"], "原文没说身高")
+
+    union = ops.property_node_summary("1", include_invalid=True)["properties"][0]
+    assert union["retracted"] is True
+    assert union["value"] == "矮小"
+    assert union["record_count"] == 1
+    assert union["invalid_count"] == 1

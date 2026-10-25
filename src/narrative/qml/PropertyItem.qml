@@ -114,7 +114,7 @@ Column {
                 Layout.fillWidth: true
                 visible: item.row.disclosedText.length > 0 || item.splitHint.length > 0
                     || item.row.retractedText.length > 0
-                text: [item.row.disclosedText, item.row.laterText,
+                text: [item.row.countText, item.row.disclosedText, item.row.laterText,
                        item.row.retractedText, item.splitHint]
                     .filter(function (part) { return part.length > 0 }).join(" · ")
                 // 失效是编辑留下的痕迹，用提示色而不是普通说明色。
@@ -167,10 +167,9 @@ Column {
                 spacing: 6
 
                 Label {
-                    text: modelData.kind === "property_retraction"
-                        ? "撤回"
-                        : modelData.is_current ? "当前" : "历史"
-                    color: modelData.is_current ? item.t.ok : item.t.muted
+                    // 有效/失效是记录上的标记，不是按位置推的「当前/历史」。
+                    text: modelData.valid ? "有效" : "失效"
+                    color: modelData.valid ? item.t.ok : item.t.bad
                     font.pixelSize: 10
                     Layout.preferredWidth: 28
                 }

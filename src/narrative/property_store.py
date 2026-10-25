@@ -1171,8 +1171,11 @@ class PropertyStore:
                 if include_retracted or entry["record"].get("id") not in invalid
             ]
             # Counted per line, not per aspect: each row says how many of its own
-            # records went, which is what the reader is looking at.
-            invalid_count = len(ordered) - len(kept)
+            # records went, which is what the reader is looking at. It is the same
+            # number whether or not the invalid rows themselves are listed.
+            invalid_count = sum(
+                1 for entry in ordered if entry["record"].get("id") in invalid
+            )
             if not kept:
                 # One line for the aspect, in the category of its newest record —
                 # not one ghost per category it used to sit in.
@@ -1258,6 +1261,10 @@ class PropertyStore:
             # The state is what still counts, not what was said last: a value the
             # audit invalidated is history even if nothing newer replaced it.
             current = valid_rows[-1] if valid_rows else None
+            # In the union view a row can be listed with no valid value left. The
+            # headline then shows the last thing said, and the row says it no
+            # longer counts — better than an empty row that hides its own content.
+            headline = current or latest
             # Only the slice holding the aspect's state is current; the other one is
             # the same aspect seen through another category, so it says it is
             # history. Two values disclosed at the same position are both current —
@@ -1285,16 +1292,16 @@ class PropertyStore:
                 "other_categories": sorted(
                     shown_categories.get(aspect, set()) - {category}
                 ),
-                "value_node": current["value_node"] if current else None,
-                "scope": current["scope"] if current else None,
+                "value_node": headline["value_node"],
+                "scope": headline["scope"],
                 "scopes": sorted({row["scope"] for row in decorated}),
-                "holder_id": current["holder_id"] if current else None,
-                "holder_name": current["holder_name"] if current else None,
+                "holder_id": headline["holder_id"],
+                "holder_name": headline["holder_name"],
                 "value_type": definition.get("value_type"),
-                "value": current["value"] if current else None,
-                "event_id": current["event_id"] if current else None,
-                "start": (current["disclosure"] or {}).get("start") if current else None,
-                "disclosed_at": current["event_name"] if current else None,
+                "value": headline["value"],
+                "event_id": headline["event_id"],
+                "start": (headline["disclosure"] or {}).get("start"),
+                "disclosed_at": headline["event_name"],
                 "is_current": is_current,
                 "retracted": current is None,
                 "valid_count": len(valid_rows),
