@@ -69,8 +69,6 @@ Item {
     property var expandedProps: ({})
     property var pickerTargets: []
     property var mergeNames: []
-    // 改名：要改的是整行（同一方面可能有两个名字），新名字由用户输入。
-    property var renameNames: []
     // 事件等级：场景 / 事件。默认场景（粒度更粗，一次读一段）。
     property string granularity: "scene"
     // 阅读位置：cutId 是场景或事件的编号，空串表示看到最新。
@@ -292,14 +290,10 @@ Item {
             // 「全部」列出历次披露：先说这条一共几条，再说其中失效几条。
             countText: page.propertyScope === "all" && records.length > 0
                 ? "共 " + records.length + " 条" : "",
-            // 失效是编辑动作，不是披露：说清楚失效几条、整条还剩不剩。
-            retractedText: item.retracted
-                ? ((item.invalid_count || 0) > 0
-                    ? "已失效，当前没有有效值" : "")
-                : ((item.invalid_count || 0) > 0
-                    ? item.invalid_count + " 条已失效" : ""),
-            laterText: (item.later_count || 0) > 0
-                ? "此后还有 " + item.later_count + " 条披露" : "",
+            // 失效是编辑动作，不是披露：只说这一行还有没有有效值。
+            // 失效几条、后面还剩几条这类计数不往行上放——它们每行都出现，
+            // 反而盖住读者真正要看的那句话。
+            retractedText: item.retracted ? "已失效，当前没有有效值" : "",
             records: records
         }
     }
@@ -354,27 +348,6 @@ Item {
         for (var i = 0; i < mergeNames.length; ++i)
             if (mergeNames[i] !== target) bridge.mergeProperties(mergeNames[i], target)
         mergeDialog.close()
-    }
-
-    // 改名：一个方面换个名字。取值记录不改写，只是以后按新名字读；
-    // 撤回这次改名就恢复原名。目标是另一个方面的名字时要用「合并」，不在这里做。
-    function askRename(row) {
-        if (!row) return
-        var names = (row.nameIds || []).slice()
-        if (names.length === 0 && row.label) names = [row.label]
-        renameNames = names
-        renameField.text = ""
-        renameDialog.open()
-    }
-
-    function applyRename() {
-        var name = renameField.text.trim()
-        if (name.length === 0) {
-            app.toast("请填写新的属性名", true)
-            return
-        }
-        bridge.renameProperty(JSON.stringify(renameNames), name)
-        renameDialog.close()
     }
 
     function openSource(sourceId, start) {
@@ -533,9 +506,6 @@ Item {
                 if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
             } else if (kind === "property_merge") {
                 app.toast("已合并到「" + (payload.target_id || "") + "」", false)
-                if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
-            } else if (kind === "property_rename") {
-                app.toast("已改名为「" + (payload.to_id || "") + "」", false)
                 if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
             } else if (kind === "property_add") {
                 if (payload.status === "accepted") {
@@ -907,12 +877,12 @@ Item {
                                             + page.steps.length + " 个"
                                             + (page.granularity === "scene" ? "场景" : "事件")
                                             + "）" : "")
-                                    + (page.cutLater > 0
-                                        ? "；此后还有 " + page.cutLater + " 条披露未显示" : "")
                                 color: t.warn
                                 font.pixelSize: 11
                             }
 
+                            // 属性标题、范围切换和整理动作分成两行：详情栏固定 440 宽，
+                            // 六个按钮挤在一行时整行最小宽度会超过栏宽，行尾的按钮被推出面板。
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 8
@@ -922,6 +892,12 @@ Item {
                                     font.pixelSize: 13
                                     font.weight: Font.DemiBold
                                 }
+                                Label {
+                                    text: propertyRows.length + " 项"
+                                    color: t.muted
+                                    font.pixelSize: 11
+                                }
+                                Item { Layout.fillWidth: true }
                                 // 范围：最新 = 这一刻的状态；全部 = 历次披露的并集。
                                 Button {
                                     objectName: "propertyScopeLatest"
@@ -939,11 +915,10 @@ Item {
                                     font.pixelSize: 10
                                     onClicked: page.togglePropertyScope("all")
                                 }
-                                Label {
-                                    text: propertyRows.length + " 项"
-                                    color: t.muted
-                                    font.pixelSize: 11
-                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
                                 Item { Layout.fillWidth: true }
                                 Button {
                                     objectName: "categoryModeButton"
@@ -1211,58 +1186,6 @@ Item {
                 flat: true
                 text: "取消"
                 onClicked: mergeDialog.close()
-            }
-        }
-    }
-
-    // 改名：一个方面换个名字。取值记录照旧，撤回改名就恢复原名。
-    Dialog {
-        id: renameDialog
-        objectName: "renameDialog"
-        title: "改属性名"
-        modal: true
-        anchors.centerIn: parent
-        width: 430
-
-        contentItem: ColumnLayout {
-            spacing: 6
-            Label {
-                Layout.fillWidth: true
-                wrapMode: Text.Wrap
-                text: "当前名字：" + page.renameNames.join(" / ")
-                color: t.ink
-                font.pixelSize: 12
-            }
-            Label {
-                Layout.fillWidth: true
-                wrapMode: Text.Wrap
-                text: "新名字对整个工程生效：所有用到这个方面的节点都按新名字显示。"
-                    + "已记下的取值不改写，撤回这次改名就恢复原名。"
-                    + "想把两个属性合成一个方面，用「合并」而不是改名。"
-                color: t.muted
-                font.pixelSize: 11
-            }
-            TextField {
-                id: renameField
-                objectName: "renameField"
-                Layout.fillWidth: true
-                placeholderText: "新名字，例如 出身"
-                onAccepted: page.applyRename()
-            }
-            RowLayout {
-                Layout.fillWidth: true
-                Item { Layout.fillWidth: true }
-                Button {
-                    text: "取消"
-                    flat: true
-                    onClicked: renameDialog.close()
-                }
-                Button {
-                    objectName: "renameApplyButton"
-                    text: "改名"
-                    highlighted: true
-                    onClicked: page.applyRename()
-                }
             }
         }
     }

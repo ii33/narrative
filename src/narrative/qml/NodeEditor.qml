@@ -30,6 +30,10 @@ Dialog {
     property var retractTargets: []
     property string retractLabel: ""
     property string retractReason: ""
+    // 正在改名哪一行：一个方面可能有两个名字，改的是整行。
+    property string renameKey: ""
+    property var renameNames: []
+    property string renameName: ""
 
     readonly property var t: host.t
     readonly property var typeLabels: host.typeLabels
@@ -57,13 +61,41 @@ Dialog {
         retractTargets = []
         retractLabel = ""
         retractReason = ""
+        renameKey = ""
+        renameNames = []
+        renameName = ""
+    }
+
+    // 改名：换的是整个工程里这个名字，不是这一个节点的说法。
+    // 一行里出现两个名字时整行一起换，否则下一条披露会把旧名字带回来。
+    function rowKey(item) {
+        return (item.property_id || "") + "|" + (item.category || "")
+    }
+
+    function startRename(item) {
+        renameKey = rowKey(item)
+        renameNames = (item.property_ids || []).slice()
+        if (renameNames.length === 0 && item.property_id) renameNames = [item.property_id]
+        renameName = ""
+        retractTargets = []
+        editRecordId = ""
+    }
+
+    function submitRename() {
+        var name = renameName.trim()
+        if (name.length === 0) {
+            host.app.toast("请填写新的属性名", true)
+            return
+        }
+        bridge.renameProperty(JSON.stringify(renameNames), name)
+        renameKey = ""
     }
 
     function apply(payload) {
         node = payload.node || ({})
         properties = payload.properties || []
         events = payload.events || []
-        atCut = payload.read_only === true
+        atCut = payload.at_cut === true
         cutName = payload.cut_name || ""
         laterCount = payload.later_count || 0
         cutEventId = payload.cut || ""
@@ -160,6 +192,12 @@ Dialog {
                 if (editor.nodeId === editor.host.selectedId)
                     bridge.loadNodeProperties(editor.nodeId)
             } else if (kind === "property_retract") {
+                editor.reload()
+                editor.host.load()
+                if (editor.nodeId === editor.host.selectedId)
+                    bridge.loadNodeProperties(editor.nodeId)
+            } else if (kind === "property_rename") {
+                editor.host.app.toast("已改名为「" + (payload.to_id || "") + "」", false)
                 editor.reload()
                 editor.host.load()
                 if (editor.nodeId === editor.host.selectedId)
@@ -279,12 +317,18 @@ Dialog {
         }
 
         ScrollView {
+            id: propertyScroll
+            objectName: "editorPropertyScroll"
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
 
+            // 宽度跟视口走，不能跟内容走：绑到 parent.width 时 Flickable 的
+            // contentWidth 会被最长的值撑开，行尾的「更正 / 失效 / 改名」就被推到
+            // 面板外面——看起来就是"节点不能编辑"。
             ColumnLayout {
-                width: parent.width
+                objectName: "editorPropertyList"
+                width: propertyScroll.availableWidth
                 spacing: 4
 
                 Repeater {
@@ -338,6 +382,13 @@ Dialog {
                                 flat: true
                                 font.pixelSize: 10
                                 onClicked: editor.startRetract(modelData)
+                            }
+                            Button {
+                                objectName: "editorRename_" + editor.rowKey(modelData)
+                                text: "改名"
+                                flat: true
+                                font.pixelSize: 10
+                                onClicked: editor.startRename(modelData)
                             }
                         }
 
@@ -450,6 +501,62 @@ Dialog {
                                     font.pixelSize: 10
                                     onClicked: editor.submitEdit()
                                 }
+                            }
+                        }
+
+                        // 改名表单：换的是整个工程里这个方面的名字，取值一条不改。
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Layout.leftMargin: 18
+                            spacing: 4
+                            visible: editor.renameKey.length > 0
+                                && editor.renameKey === editor.rowKey(modelData)
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                Label {
+                                    text: "当前名字"
+                                    color: t.muted
+                                    font.pixelSize: 10
+                                }
+                                Label {
+                                    Layout.preferredWidth: 140
+                                    text: editor.renameNames.join(" / ")
+                                    color: t.ink
+                                    font.pixelSize: 10
+                                    elide: Text.ElideRight
+                                }
+                                TextField {
+                                    objectName: "editorRenameName"
+                                    Layout.fillWidth: true
+                                    text: editor.renameName
+                                    placeholderText: "新名字，例如 出身"
+                                    onTextChanged: editor.renameName = text
+                                    onAccepted: editor.submitRename()
+                                }
+                                Button {
+                                    text: "取消"
+                                    flat: true
+                                    font.pixelSize: 10
+                                    onClicked: editor.renameKey = ""
+                                }
+                                Button {
+                                    objectName: "editorSubmitRename"
+                                    text: "确认改名"
+                                    font.pixelSize: 10
+                                    enabled: editor.renameName.trim().length > 0
+                                    onClicked: editor.submitRename()
+                                }
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                wrapMode: Text.Wrap
+                                text: "改名对整个工程生效，所有用到这个方面的节点都按新名字显示；"
+                                    + "已记下的取值不改写，撤回这次改名就恢复原名。"
+                                    + "想把两个属性合成一个方面，用浏览区的「合并」而不是改名。"
+                                color: t.muted
+                                font.pixelSize: 9
                             }
                         }
 

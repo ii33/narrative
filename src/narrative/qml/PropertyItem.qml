@@ -53,6 +53,7 @@ Column {
                     font.pixelSize: 12
                     Layout.preferredWidth: 92
                     elide: Text.ElideRight
+                    Layout.minimumWidth: 0
                 }
                 Label {
                     text: item.row.valueText
@@ -60,6 +61,7 @@ Column {
                     font.pixelSize: 12
                     font.underline: item.row.valueNodeId.length > 0
                     elide: Text.ElideRight
+                    Layout.minimumWidth: 0
                     Layout.fillWidth: true
 
                     MouseArea {
@@ -76,6 +78,7 @@ Column {
                     // 多作用域时会写成「声称/认知/世界」，不限宽就会把分类标签挤出面板。
                     Layout.maximumWidth: 92
                     elide: Text.ElideRight
+                    Layout.minimumWidth: 0
                 }
                 Label {
                     visible: item.row.holderId.length > 0
@@ -85,6 +88,7 @@ Column {
                     font.underline: true
                     Layout.maximumWidth: 72
                     elide: Text.ElideRight
+                    Layout.minimumWidth: 0
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
@@ -113,21 +117,22 @@ Column {
                         onClicked: item.host.askCategory(item.row.category, item.row.recordIds)
                     }
                 }
-                // 改名入口在展开区（见下方），不塞进这一行：这里已经有分类、scope、
-                // 持有者，窄面板下再多一个标签会把分类挤出可视区。
             }
 
             Label {
                 Layout.fillWidth: true
                 visible: item.row.disclosedText.length > 0 || item.splitHint.length > 0
                     || item.row.retractedText.length > 0
-                text: [item.row.countText, item.row.disclosedText, item.row.laterText,
+                // 只说出处和状态；失效几条、后面还剩几条这类计数不放在这里，
+                // 它们会盖过读者真正要看的那句话。
+                text: [item.row.countText, item.row.disclosedText,
                        item.row.retractedText, item.splitHint]
                     .filter(function (part) { return part.length > 0 }).join(" · ")
                 // 失效是编辑留下的痕迹，用提示色而不是普通说明色。
                 color: item.row.retracted ? item.t.warn : item.t.muted
                 font.pixelSize: 10
                 elide: Text.ElideRight
+                Layout.minimumWidth: 0
             }
             // 一行合了几个属性名时单独说：这是要合并的信号，不该被省略号吞掉。
             RowLayout {
@@ -141,6 +146,7 @@ Column {
                     color: item.t.warn
                     font.pixelSize: 10
                     elide: Text.ElideRight
+                    Layout.minimumWidth: 0
                 }
                 Label {
                     text: "合并…"
@@ -157,35 +163,8 @@ Column {
         }
     }
 
-    // 展开后是这一行的动作：改名换的是整个工程里这个名字，和「合并」不是一回事。
-    RowLayout {
-        x: 18
-        width: item.width - 18
-        spacing: 10
-        visible: item.expanded
-
-        Label {
-            objectName: "propertyRenameAction_" + item.row.key
-            text: "改名…"
-            color: item.t.accent
-            font.pixelSize: 10
-            font.underline: true
-            MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: item.host.askRename(item.row)
-            }
-        }
-        Label {
-            Layout.fillWidth: true
-            text: item.row.names.length > 0
-                ? "改名会连同 " + item.row.names + " 一起换" : ""
-            color: item.t.muted
-            font.pixelSize: 10
-            elide: Text.ElideRight
-        }
-    }
-
+    // 改名在节点编辑器里（它是「改这个方面」的编辑动作，和更正/失效放一起），
+    // 浏览区只负责读，不在这里放编辑入口。
     Repeater {
         model: item.expanded ? item.row.records : []
 
@@ -280,6 +259,7 @@ Column {
                     font.pixelSize: 10
                     font.underline: !!modelData.event_name && modelData.valid
                     elide: Text.ElideRight
+                    Layout.minimumWidth: 0
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
@@ -300,6 +280,7 @@ Column {
                     color: item.t.muted
                     font.pixelSize: 10
                     elide: Text.ElideMiddle
+                    Layout.minimumWidth: 0
                 }
                 Label {
                     visible: !!(modelData.disclosure && modelData.disclosure.source_id)

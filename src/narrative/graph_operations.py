@@ -499,7 +499,10 @@ class GraphOperations:
             "cut": summary.get("cut"),
             "cut_name": names.get(str(summary.get("cut") or ""), ""),
             "later_count": summary.get("later_count", 0),
-            "read_only": bool(cut),
+            # Not read-only: an edit made while looking at the past is written at
+            # the disclosure the reader is standing on. The flag only says the
+            # history is a window, so the pane can say so.
+            "at_cut": bool(cut),
         }
 
     def property_history(

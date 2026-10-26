@@ -245,34 +245,52 @@ def test_merging_two_names_from_the_pane(workspace) -> None:
     assert len(item["records"]) == 2
 
 
-def test_renaming_an_aspect_from_the_pane(workspace) -> None:
+def test_renaming_an_aspect_from_the_editor(workspace) -> None:
+    """改名在节点编辑器里：一个方面铺成两个名字时，整行一起换。"""
     app, _bridge, page, results, _errors = workspace
     page.jumpTo("2")
     _pump(app, results, "detail", "2")
     _pump(app, results, "node_properties", "2")
     app.processEvents()
 
-    rows = _value(page.property("propertyRows"))
-    item = next(row for row in rows if row["label"] == "修为")
-
     del results[:]
-    page.askRename(item)
+    editor = page.findChild(object, "nodeEditor")
+    editor.openFor("2")
+    payload = _pump(app, results, "node_editor")
+    app.processEvents()
+
+    item = next(row for row in payload["properties"] if row["label"] == "修为")
+    editor.startRename(item)
     app.processEvents()
     # 改的是整行：同一方面用了两个名字时，两个名字一起换，否则下一条披露会把旧名字带回来。
-    assert _value(page.property("renameNames")) == ["cultivation", "cultivation_stage"]
-    field = page.findChild(object, "renameField")
-    assert field is not None
-    field.setProperty("text", "修真境界")
-    page.applyRename()
+    assert _value(editor.property("renameNames")) == ["cultivation", "cultivation_stage"]
+
+    editor.setProperty("renameName", "修真境界")
+    del results[:]
+    editor.submitRename()
     renamed = _pump(app, results, "property_rename")
     assert renamed["to_id"] == "修真境界"
-    _pump(app, results, "node_properties", "2")
+
+    payload = _pump(app, results, "node_editor")
+    labels = [row["label"] for row in payload["properties"]]
+    assert "修真境界" in labels
+    assert "修为" not in labels
+
+
+def test_the_editor_fits_its_own_actions(workspace) -> None:
+    """编辑器的属性行不能比面板宽：宽出来的部分会把「更正/失效/改名」推到面板外。"""
+    app, _bridge, page, results, _errors = workspace
+    del results[:]
+    editor = page.findChild(object, "nodeEditor")
+    editor.openFor("1")
+    _pump(app, results, "node_editor")
     app.processEvents()
 
-    rows = _value(page.property("propertyRows"))
-    item = next(row for row in rows if row["label"] == "修真境界")
-    assert item["names"] == ""
-    assert len(item["records"]) == 2
+    scroll = editor.findChild(object, "editorPropertyScroll")
+    listing = editor.findChild(object, "editorPropertyList")
+    assert scroll is not None and listing is not None
+    # 内容宽度跟视口走：绑到 parent.width 时会被最长的值撑开，行尾的动作就看不见了。
+    assert listing.property("width") <= scroll.property("availableWidth") + 1
 
 
 def test_editing_the_vocabulary_changes_the_grouping(workspace) -> None:
@@ -684,7 +702,7 @@ def test_the_node_editor_follows_the_reading_position(workspace) -> None:
     editor.openFor("3")
     payload = _pump(app, results, "node_editor")
 
-    assert payload["read_only"] is True
+    assert payload["at_cut"] is True
     assert payload["cut_name"] == "开场"
     assert payload["later_count"] == 1
     assert {item["label"] for item in _value(editor.property("properties"))} == {"持有者"}
@@ -697,7 +715,7 @@ def test_the_node_editor_follows_the_reading_position(workspace) -> None:
     page.backToLatest()
     _pump(app, results, "browse")
     payload = _pump(app, results, "node_editor")
-    assert payload["read_only"] is False
+    assert payload["at_cut"] is False
     assert {item["label"] for item in _value(editor.property("properties"))} == {
         "持有者", "状态",
     }

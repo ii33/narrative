@@ -72,7 +72,7 @@ def main() -> int:
     parser.add_argument("--scope", default="latest", choices=("latest", "all"),
                         help="属性范围：latest 这一刻的状态，all 历次披露的并集")
     parser.add_argument("--rename", default=None, metavar="NAME",
-                        help="打开「改名」对话框再截图；给个名字就填进输入框（传空串只开框）")
+                        help="在节点编辑器里打开某行的改名表单再截图（需 --editor）")
     args = parser.parse_args()
     project = args.project.resolve()
     if not project.is_file():
@@ -160,16 +160,23 @@ def main() -> int:
         if target is not None:
             page.toggleProperty(target["key"])
         QTest.qWait(400)
+        # 改名在节点编辑器里：打开某一行（默认是 --expand 指的那行）的改名表单。
         if args.rename is not None:
-            if target is None:
-                raise RuntimeError("没有可改名的属性行")
-            page.askRename(target)
+            if not args.editor:
+                raise RuntimeError("--rename 需要同时给 --editor：改名在节点编辑器里")
+            items = editor.property("properties")
+            items = items.toVariant() if hasattr(items, "toVariant") else items
+            wanted = args.expand or (target or {}).get("label", "")
+            item = next(
+                (row for row in items
+                 if (row["label"] or "").startswith(wanted)), None
+            )
+            if item is None:
+                raise RuntimeError("编辑器里没有可改名的属性行")
+            editor.startRename(item)
             QTest.qWait(200)
-            field = window.findChild(object, "renameField")
-            if field is None:
-                raise RuntimeError("改名对话框没有打开")
             if args.rename:
-                field.setProperty("text", args.rename)
+                editor.setProperty("renameName", args.rename)
             QTest.qWait(200)
 
         args.output.parent.mkdir(parents=True, exist_ok=True)

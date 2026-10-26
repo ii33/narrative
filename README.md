@@ -91,7 +91,7 @@ uv run narrative-desktop --projects-dir data/graph-projects --project my-novel
 
 属性分类的完整约定见 [`docs/PROPERTY_CATEGORIES.md`](docs/PROPERTY_CATEGORIES.md)：
 大类只管显示位置，与 `scope`（世界／认知／声称）各管一件事；移动分类不改变取值、
-披露顺序和原文引文。属性名可以改（展开一条属性有「改名…」），改名是读时别名——
+披露顺序和原文引文。属性名可以改（节点编辑器里每条属性右边有「改名」），改名是读时别名——
 取值记录不改写、定义跟着搬到新名字、撤回即恢复原名；把两个名字合成一个方面是「合并」，
 需要确认含义相同后再做。
 
