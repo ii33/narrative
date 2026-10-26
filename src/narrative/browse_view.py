@@ -99,6 +99,56 @@ def steps(snapshot: dict, granularity: str = "scene") -> list[dict]:
     ]
 
 
+def _scene_of(snapshot: dict, event_id: str) -> dict | None:
+    """The scene that lists this event as its own child."""
+    scenes = [
+        node for node in snapshot.get("nodes", [])
+        if node.get("node_type") == "scene"
+        and not node.get("retracted")
+        and event_id in (node.get("events") or [])
+    ]
+    return min(scenes, key=_key) if scenes else None
+
+
+def step_for_granularity(snapshot: dict, step_id: str, granularity: str) -> str:
+    """The step in another granularity that sits at the same reading position.
+
+    The two views are not two facts: a scene is read when its last event is read,
+    so "this scene" and "that scene's last event" are the same position. Going
+    back, an event belongs to the scene that lists it; an event in no scene falls
+    back to the last scene the reader has already finished, because switching
+    granularity must not throw the position away and drop the reader at the end
+    of the book.
+    """
+    if not step_id:
+        return ""
+    kind = granularity if granularity in GRANULARITIES else "scene"
+    nodes = _by_id(snapshot)
+    node = nodes.get(step_id)
+    if node is None:
+        return ""
+    if kind == "event":
+        if node.get("node_type") == "event":
+            return step_id
+        anchor = anchor_event(snapshot, node)
+        return anchor["id"] if anchor.get("node_type") == "event" else ""
+    if node.get("node_type") == "scene":
+        return step_id
+    scene = _scene_of(snapshot, step_id)
+    if scene is not None:
+        return scene["id"]
+    position = _key(node)
+    finished = [
+        candidate for candidate in snapshot.get("nodes", [])
+        if candidate.get("node_type") == "scene"
+        and not candidate.get("retracted")
+        and _key(anchor_event(snapshot, candidate)) <= position
+    ]
+    if not finished:
+        return ""
+    return max(finished, key=lambda item: _key(anchor_event(snapshot, item)))["id"]
+
+
 def _members(nodes: dict[str, dict], node: dict) -> list[dict]:
     """What a scene is made of, at any depth."""
     out: list[dict] = []
@@ -202,6 +252,12 @@ def browse_view(
         # granularity is — the reading position is not the only use of events.
         "events": steps(snapshot, "event"),
         "cut": cut,
+        # The same position in both granularities, so switching the step list
+        # keeps the reader where they were instead of jumping to the last page.
+        "cut_alt": {
+            kind: step_for_granularity(snapshot, cut_id, kind)
+            for kind in GRANULARITIES
+        },
         "nodes": shown,
         "counts": {key: counts.get(key, 0) for key in sorted(counts)},
         "total": len(shown),

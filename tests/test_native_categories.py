@@ -319,6 +319,10 @@ def test_editing_the_vocabulary_changes_the_grouping(workspace) -> None:
 def test_stepping_the_reading_position(workspace) -> None:
     """上一个/下一个按事件走，两头分别接上「最新」和第一个事件。"""
     app, _bridge, page, results, _errors = workspace
+    # 这个用例测的是步进：先关掉默认的相关节点筛选，否则选中节点会被筛出去。
+    del results[:]
+    page.toggleRelated()
+    _pump(app, results, "browse")
     page.select("3")
     _pump(app, results, "detail", "3")
     _pump(app, results, "node_properties", "3")
@@ -376,6 +380,10 @@ def test_inbound_records_follow_the_reading_cut(workspace) -> None:
 def test_the_list_narrows_with_the_time_filter(workspace) -> None:
     """「按时间显示」打开后，列表只列已经出场过的节点。"""
     app, _bridge, page, results, _errors = workspace
+    # 这个用例测的是时间收窄：先关掉默认的相关节点筛选，否则两种收窄混在一起。
+    del results[:]
+    page.toggleRelated()
+    _pump(app, results, "browse")
     assert page.property("total") == 8
 
     # 打开开关但停在「最新」：没有收窄。
@@ -431,19 +439,42 @@ def test_the_granularity_switches_the_step_list(workspace) -> None:
     _pump(app, results, "browse")
     steps = _value(page.property("steps"))
     assert [step["id"] for step in steps] == ["4", "5"]
-    # 换粒度后原来的切点不属于新粒度，回到「最新」。
+    # 停在「最新」时没有位置要保，换粒度还是「最新」。
     assert page.property("cutId") == ""
     assert page.property("cutEventId") == ""
 
 
-def test_related_only_keeps_the_nodes_of_this_step(workspace) -> None:
+def test_switching_granularity_keeps_the_reading_position(workspace) -> None:
+    """场景 7 的切点是它的事件 4；换到事件粒度停在这个事件上，换回来还是场景 7。"""
     app, _bridge, page, results, _errors = workspace
     del results[:]
     page.pickCut(1)
     _pump(app, results, "browse")
+    assert page.property("cutId") == "7"
+    assert page.property("cutEventId") == "4"
 
     del results[:]
-    page.toggleRelated()
+    page.pickGranularity("event")
+    _pump(app, results, "browse")
+    assert page.property("cutId") == "4"
+    assert page.property("cutEventId") == "4"
+    # 下拉停在这个事件上，而不是跳回「最新」。
+    assert page.property("steps")[0]["id"] == "4"
+
+    del results[:]
+    page.pickGranularity("scene")
+    _pump(app, results, "browse")
+    assert page.property("cutId") == "7"
+    assert page.property("cutEventId") == "4"
+
+
+def test_related_only_keeps_the_nodes_of_this_step(workspace) -> None:
+    """默认只列当前这一步的相关节点；关掉才是全书。"""
+    app, _bridge, page, results, _errors = workspace
+    assert page.property("relatedOnly") is True
+
+    del results[:]
+    page.pickCut(1)
     _pump(app, results, "browse")
     app.processEvents()
 
@@ -451,15 +482,38 @@ def test_related_only_keeps_the_nodes_of_this_step(workspace) -> None:
     # 列表是场景 + 它的事件 + 这两个参与者。
     ids = {node["id"] for node in _value(page.property("nodes"))}
     assert ids == {"7", "4", "1", "3"}
-    assert page.property("relatedOnly") is True
     # 侧栏计数也要跟着收，否则数字和列表对不上。
     assert page.property("counts") == {"event": 1, "item": 1, "person": 1, "scene": 1}
 
     del results[:]
     page.toggleRelated()
     _pump(app, results, "browse")
+    assert page.property("relatedOnly") is False
     assert page.property("total") == 8
     assert page.property("counts") == {"event": 2, "item": 2, "person": 2, "scene": 2}
+
+
+def test_jumping_to_a_listed_node_keeps_the_filters(workspace) -> None:
+    """跳到一个已经在列表里的节点，不该顺手把默认的相关节点筛选关掉。"""
+    app, _bridge, page, results, _errors = workspace
+    del results[:]
+    page.pickCut(1)
+    _pump(app, results, "browse")
+    assert page.property("relatedOnly") is True
+
+    # 手镯（3）就是这一步的相关节点，本来就在列表里。
+    del results[:]
+    page.jumpTo("3")
+    _pump(app, results, "detail", "3")
+    _pump(app, results, "browse")
+    assert page.property("relatedOnly") is True
+
+    # 令牌（6）还没出场，不在列表里：这时才清条件，否则跳过去看不见。
+    del results[:]
+    page.jumpTo("6")
+    _pump(app, results, "detail", "6")
+    _pump(app, results, "browse")
+    assert page.property("relatedOnly") is False
 
 
 def test_the_pane_separates_the_latest_state_from_every_disclosure(workspace) -> None:

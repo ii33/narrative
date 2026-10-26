@@ -67,7 +67,9 @@ def main() -> int:
     parser.add_argument("--granularity", default="scene", choices=("scene", "event"),
                         help="事件等级：按场景还是按事件切")
     parser.add_argument("--time", action="store_true", help="同时把节点列表也收窄到该阅读位置")
-    parser.add_argument("--related", action="store_true", help="只显示当前步骤的相关节点")
+    parser.add_argument("--related", action="store_true",
+                        help="只显示当前步骤的相关节点（界面默认就是开的，这里只保证是开的）")
+    parser.add_argument("--all-nodes", action="store_true", help="关掉相关节点，列出全书")
     parser.add_argument("--editor", action="store_true", help="打开节点编辑器再截图")
     parser.add_argument("--scope", default="latest", choices=("latest", "all"),
                         help="属性范围：latest 这一刻的状态，all 历次披露的并集")
@@ -133,7 +135,10 @@ def main() -> int:
         if args.time:
             page.toggleTimeFilter()
             wait_for("browse")
-        if args.related:
+        if args.related and not page.property("relatedOnly"):
+            page.toggleRelated()
+            wait_for("browse")
+        if args.all_nodes and page.property("relatedOnly"):
             page.toggleRelated()
             wait_for("browse")
         app.processEvents()

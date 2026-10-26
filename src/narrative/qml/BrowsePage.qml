@@ -76,8 +76,11 @@ Item {
     property string cutEventId: ""
     property string cutName: ""
     property int cutLater: 0
-    // 勾选后只列当前这一步的相关节点。
-    property bool relatedOnly: false
+    // 默认只列当前这一步的相关节点：读者看某一步时，要的是这一步里的人、物、事，
+    // 不是全书 164 个节点。没有选步骤（停在「最新」）时不筛。
+    property bool relatedOnly: true
+    // 同一个阅读位置在两种粒度下的编号：切粒度时停在这里，不跳回「最新」。
+    property var cutAlt: ({})
     // 节点列表是否跟着阅读位置收窄。默认全部显示。
     property bool timeFilter: false
     // 属性区上一次用的切点：搜索时切点没变就不重载，展开状态得以保留。
@@ -112,6 +115,7 @@ Item {
         var cut = payload.cut || null
         cutEventId = cut ? cut.event_id : ""
         cutName = cut ? cut.step_name : ""
+        cutAlt = payload.cut_alt || ({})
         if (!cut) cutLater = 0
 
         var index = page.nameIndex
@@ -187,11 +191,13 @@ Item {
         page.load()
     }
 
-    // 事件等级切换后原来的切点不再属于新的粒度，回到「最新」。
+    // 换粒度时停在同一个阅读位置：场景的切点是它的最后一个事件，事件的切点是
+    // 包含它的场景。位置由后端算好（cut_alt），界面只负责换成那个编号。
     function pickGranularity(value) {
         if (page.granularity === value) return
+        var alt = page.cutAlt || ({})
         page.granularity = value
-        page.cutId = ""
+        page.cutId = alt[value] || ""
         page.appliedCut = ""
         page.load()
     }
@@ -432,8 +438,12 @@ Item {
 
     function jumpTo(id) {
         if (!id) return
-        // 目标节点可能被当前条件挡在列表外：先清掉条件，再跳过去。
-        if (page.selectedType.length > 0 || page.query.length > 0 || page.relatedOnly) {
+        // 目标节点可能被当前条件挡在列表外：只有真的挡住了才清条件。
+        // 「相关节点」现在是默认开的，无条件清掉会让默认筛选项被一次跳转悄悄关掉。
+        var listed = false
+        for (var i = 0; i < page.nodes.length; ++i)
+            if (page.nodes[i].id === id) { listed = true; break }
+        if (!listed) {
             page.selectedType = ""
             page.query = ""
             page.relatedOnly = false
@@ -473,7 +483,8 @@ Item {
                 page.cutName = ""
                 page.cutLater = 0
                 page.appliedCut = ""
-                page.relatedOnly = false
+                page.cutAlt = ({})
+                page.relatedOnly = true
                 page.timeFilter = false
                 page.granularity = "scene"
                 page.load()

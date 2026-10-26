@@ -7,7 +7,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from narrative.browse_view import browse_view, cut_for, related_nodes, steps
+from narrative.browse_view import (
+    browse_view,
+    cut_for,
+    related_nodes,
+    step_for_granularity,
+    steps,
+)
 from narrative.project_catalog import create_graph_project
 
 
@@ -117,3 +123,39 @@ def test_query_matches_aliases(tmp_path: Path) -> None:
     _ops, snapshot = _project(tmp_path / "alias.sqlite3")
 
     assert [node["id"] for node in browse_view(snapshot, query="陈总")["nodes"]] == ["2"]
+
+
+def test_switching_granularity_keeps_the_reading_position(tmp_path: Path) -> None:
+    """场景的切点是它的最后一个事件，事件的切点是包含它的场景——同一个位置，两种说法。"""
+    _ops, snapshot = _project(tmp_path / "alt.sqlite3")
+
+    assert step_for_granularity(snapshot, "4", "event") == "6"
+    assert step_for_granularity(snapshot, "6", "scene") == "4"
+    # 已经是目标粒度时就是它自己。
+    assert step_for_granularity(snapshot, "4", "scene") == "4"
+    assert step_for_granularity(snapshot, "6", "event") == "6"
+    # 停在「最新」时两边都是「最新」，不该凭空选一个步骤。
+    assert step_for_granularity(snapshot, "", "event") == ""
+    assert step_for_granularity(snapshot, "", "scene") == ""
+    # 不认识的编号就是没有对应步骤。
+    assert step_for_granularity(snapshot, "99", "scene") == ""
+
+
+def test_an_event_outside_every_scene_lands_on_the_scene_it_finished() -> None:
+    """换粒度不能把读者丢到全书末尾：没有所属场景就退到已经读完的那个场景。"""
+    snapshot = {
+        "nodes": [
+            {"id": "1", "node_type": "scene", "name": "开场", "events": ["2"]},
+            {"id": "2", "node_type": "event", "name": "进门"},
+            {"id": "3", "node_type": "event", "name": "幕间的独白"},
+        ]
+    }
+    assert step_for_granularity(snapshot, "3", "scene") == "1"
+
+
+def test_the_payload_carries_both_granularities_of_the_cut(tmp_path: Path) -> None:
+    ops, _snapshot = _project(tmp_path / "cutalt.sqlite3")
+
+    view = browse_view(ops.graph_snapshot(), cut_id="4")
+    assert view["cut_alt"] == {"scene": "4", "event": "6"}
+    assert browse_view(ops.graph_snapshot())["cut_alt"] == {"scene": "", "event": ""}
