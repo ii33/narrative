@@ -725,10 +725,13 @@ class NativeBridge(QObject):
 
     @Slot(str, "QVariantMap")
     def correctPropertyRecord(self, record_id: str, payload: dict) -> None:
-        """Correct one disclosure by appending a new one, optionally retracting the old.
+        """Correct one disclosure: append the right one, take the wrong one back.
 
-        Both records go into one candidate, so a correction can never land
-        without its retraction (or the other way round).
+        A record is never rewritten, so a correction is two records in one
+        candidate — the corrected disclosure and the retraction of the one it
+        replaces. They travel together, so a correction can never land without
+        its retraction. The retraction carries no event: the old record was
+        misread, so it never counted, anywhere.
         """
         from uuid import uuid4
 
@@ -742,14 +745,12 @@ class NativeBridge(QObject):
             problem = self._place_evidence(ops, record, payload)
             if problem:
                 raise ValueError(problem)
-            records: list[dict] = []
-            if payload.get("retract_old"):
-                records.append({
-                    "kind": "property_retraction",
-                    "id": f"retract_{uuid4().hex[:12]}",
-                    "target_id": record_id,
-                    "reason": str(payload.get("reason") or "更正：以新记录为准"),
-                })
+            records: list[dict] = [{
+                "kind": "property_retraction",
+                "id": f"retract_{uuid4().hex[:12]}",
+                "target_id": record_id,
+                "reason": str(payload.get("reason") or "更正：以新记录为准"),
+            }]
             records.append(record)
             return records, f"更正 {record['property_id']}"
 

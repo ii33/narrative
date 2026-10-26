@@ -750,7 +750,6 @@ def test_the_node_editor_corrects_and_invalidates(workspace) -> None:
     editor.startEdit(item, record)
     assert editor.property("editRecordId") == record["id"]
     editor.setProperty("editValue", "完好如初")
-    editor.setProperty("editRetractOld", True)
     del results[:]
     editor.submitEdit()
     corrected = _pump(app, results, "property_correct")
@@ -1105,6 +1104,45 @@ def test_a_retraction_counts_from_where_it_was_made(workspace) -> None:
     _pump(app, results, "node_properties", "1")
     app.processEvents()
     assert len(state_rows()) == 2
+
+
+def test_a_correction_always_takes_the_old_record_back(workspace) -> None:
+    """更正就是「追加对的 + 撤回错的」，两半绑在一起，没有「保留原记录」这个选项。"""
+    app, _bridge, page, results, _errors = workspace
+    del results[:]
+    page.select("3")
+    _pump(app, results, "detail", "3")
+    _pump(app, results, "node_properties", "3")
+    editor = page.findChild(object, "nodeEditor")
+    editor.openFor("3")
+    payload = _pump(app, results, "node_editor")
+    app.processEvents()
+
+    item = next(entry for entry in payload["properties"] if entry["property_id"] == "state")
+    editor.startEdit(item, item["records"][-1])
+    editor.setProperty("editValue", "完好如初")
+    del results[:]
+    editor.submitEdit()
+    assert _pump(app, results, "property_correct")["status"] == "accepted"
+
+    # 编辑器只列站得住的记录：只剩更正后的那一条，说明原记录已经失效。
+    del results[:]
+    editor.reload()
+    payload = _pump(app, results, "node_editor")
+    app.processEvents()
+    item = next(entry for entry in payload["properties"] if entry["property_id"] == "state")
+    assert [row["value"] for row in item["records"]] == ["完好如初"]
+    assert all(row["valid"] for row in item["records"])
+
+    # 浏览区的「全部」里，原记录还在，标着失效。
+    del results[:]
+    page.togglePropertyScope("all")
+    _pump(app, results, "property_scope")
+    _pump(app, results, "node_properties", "3")
+    app.processEvents()
+    everything = _value(page.property("propertyRows"))
+    all_records = [row for entry in everything for row in entry["records"]]
+    assert any(not row["valid"] for row in all_records)
 
 
 def test_the_node_editor_follows_the_reading_position(workspace) -> None:

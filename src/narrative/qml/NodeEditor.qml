@@ -31,7 +31,6 @@ Dialog {
     property string editValue: ""
     property int editEventIndex: 0
     property string editQuote: ""
-    property bool editRetractOld: true
     property var retractTargets: []
     property string retractKey: ""
     property string retractLabel: ""
@@ -135,7 +134,6 @@ Dialog {
         var here = atCut ? eventIndex(cutEventId) : -1
         editEventIndex = here >= 0 ? here : eventIndex(record.event_id)
         editQuote = record.evidence ? record.evidence.quote : ""
-        editRetractOld = true
         retractTargets = []
         retractKey = ""
     }
@@ -159,8 +157,7 @@ Dialog {
             value: editValue,
             event_id: event.id || "",
             quote: editQuote,
-            source_id: editSourceId,
-            retract_old: editRetractOld
+            source_id: editSourceId
         })
         // 提交之后表单就收起：editRecordId 已经清空，留着表单的话再点一次
         // 就是拿空 id 去更正，只会得到一句看不懂的预检错误。
@@ -529,14 +526,16 @@ Dialog {
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 6
-                                CheckBox {
-                                    objectName: "editorRetractOld"
-                                    text: "同时把原记录设为失效"
-                                    checked: editor.editRetractOld
-                                    font.pixelSize: 10
-                                    onToggled: editor.editRetractOld = checked
+                                // 更正一定带回原记录：记录不原地改，所以「追加新的 + 撤回旧的」
+                                // 是同一件事的两半，不该让人选。
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: "提交后原记录同时失效——它本来就是读错的那条"
+                                    color: t.muted
+                                    font.pixelSize: 9
+                                    elide: Text.ElideRight
+                                    Layout.minimumWidth: 0
                                 }
-                                Item { Layout.fillWidth: true }
                                 Button {
                                     text: "取消"
                                     flat: true
