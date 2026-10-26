@@ -16,6 +16,7 @@ _KINDS = {
     "property_value",
     "property_categorization",
     "property_merge",
+    "property_rename",
     "property_retraction",
 }
 # "any" means the shape is not fixed: one property may hold a number, a
@@ -42,6 +43,11 @@ _FIELDS = {
     # Two names for one aspect, merged: `alias_id` is read as `target_id`.
     # Nothing is rewritten; the alias definition and its records stay as they are.
     "property_merge": _COMMON | {"alias_id", "target_id", "note"},
+    # One aspect under a new name: `from_id` reads as `to_id` from now on.
+    # Also a read-time alias, but the definition moves with it — a rename says
+    # "this aspect is called that", not "these two names are the same aspect".
+    # `to_id` may be a name that did not exist yet; that is the difference.
+    "property_rename": _COMMON | {"from_id", "to_id", "note"},
     # Two ways to invalidate a record, told apart by `event_id`:
     #   without it — the record was wrong, it never counted (a correction);
     #   with it    — the record was true, but from this reading position it is no
@@ -93,12 +99,138 @@ def _active(records: list[dict]) -> tuple[list[dict], set[str]]:
     return [r for r in records if isinstance(r, dict) and r.get("id") not in retracted], retracted
 
 
+def _alias_edges(records: list[dict]) -> dict[str, str]:
+    """One name read as another: a merge and a rename are both read-time aliases."""
+    edges: dict[str, str] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        kind = record.get("kind")
+        if kind == "property_merge":
+            source, target = record.get("alias_id"), record.get("target_id")
+        elif kind == "property_rename":
+            source, target = record.get("from_id"), record.get("to_id")
+        else:
+            continue
+        if isinstance(source, str) and source and isinstance(target, str) and target:
+            edges[source] = target
+    return edges
+
+
+def alias_map(records: list[dict]) -> dict[str, str]:
+    """Alias → canonical name, following chains.
+
+    A merge and a rename both say "read this name as that one"; the difference is
+    what happens to the definition, and that is decided where definitions are
+    built. Chains are followed so `a→b` then `b→c` reads `a` as `c`, and a cycle
+    (only reachable from damaged input) stops at the first name it repeats.
+    """
+    edges = _alias_edges(records)
+    resolved: dict[str, str] = {}
+    for alias in edges:
+        seen = {alias}
+        cursor = edges[alias]
+        while cursor in edges and cursor not in seen:
+            seen.add(cursor)
+            cursor = edges[cursor]
+        resolved[alias] = cursor
+    return resolved
+
+
+def canonical_definitions(records: list[dict]) -> dict[str, dict]:
+    """Definitions under the name they are read by.
+
+    A renamed aspect keeps its shape (value type, cardinality, persistence) under
+    the new name. A merged alias lends its shape to the target only when the
+    target has no definition of its own; either way it stops being a definition
+    of its own, because it is no longer a separate aspect.
+    """
+    aliases = alias_map(records)
+    definitions: dict[str, dict] = {}
+    for record in records:
+        if record.get("kind") != "property_definition":
+            continue
+        name = record.get("id")
+        if isinstance(name, str) and name not in aliases:
+            definitions.setdefault(name, record)
+    for record in records:
+        if record.get("kind") != "property_definition":
+            continue
+        name = record.get("id")
+        if isinstance(name, str) and name in aliases:
+            canonical = aliases[name]
+            if canonical not in definitions:
+                definitions[canonical] = record | {"id": canonical}
+    return definitions
+
+
+def canonical_records(records: list[dict]) -> list[dict]:
+    """The same records, read under canonical names.
+
+    Values keep their id — a retraction points at it — and only the name changes,
+    so a projection can group, label and audit by aspect without the caller
+    knowing that a rename or a merge happened. Definitions follow their name; an
+    alias that has a real definition of its own is dropped, because two names for
+    one aspect would otherwise be counted as one aspect plus one unused name.
+    """
+    aliases = alias_map(records)
+    if not aliases:
+        return records
+    definitions = {
+        record["id"]: record for record in records
+        if record.get("kind") == "property_definition"
+        and isinstance(record.get("id"), str)
+    }
+    # A name that is nobody's alias owns its definition. An aliased name lends its
+    # shape to the name it reads as, but only when that name has no definition.
+    owned = set(definitions) - set(aliases)
+    moved: dict[str, str] = {}
+    for name in definitions:
+        if name in aliases and aliases[name] not in owned:
+            moved[name] = aliases[name]
+            owned.add(aliases[name])
+    result: list[dict] = []
+    for record in records:
+        kind = record.get("kind")
+        if kind == "property_definition":
+            name = record.get("id")
+            if not isinstance(name, str):
+                result.append(record)
+            elif name in moved:
+                result.append(record | {"id": moved[name]})
+            elif name in aliases:
+                continue  # the same aspect under a name that already has one
+            else:
+                result.append(record)
+        elif kind == "property_value":
+            name = record.get("property_id")
+            if isinstance(name, str) and name in aliases:
+                record = record | {"property_id": aliases[name]}
+            result.append(record)
+        else:
+            result.append(record)
+    return result
+
+
 def _definition_map(records: list[dict]) -> dict[str, dict]:
-    return {
+    """Definitions by every name they answer to.
+
+    A value may still be stored under a name that has since been merged or
+    renamed away; it has to validate against the same shape, so both spellings
+    resolve to one definition here.
+    """
+    definitions = {
         r["id"]: r
         for r in records
         if r.get("kind") == "property_definition" and isinstance(r.get("id"), str)
     }
+    result = dict(definitions)
+    for alias, canonical in alias_map(records).items():
+        shape = definitions.get(canonical) or definitions.get(alias)
+        if shape is not None:
+            result.setdefault(canonical, shape)
+            result.setdefault(alias, shape)
+    return result
 
 
 def _valid_value(value: Any, definition: dict, graph_nodes: dict[str, dict]) -> bool:
@@ -251,6 +383,7 @@ def validate_records(
             "property_value": {"node_id", "property_id", "value", "event_id"},
             "property_categorization": {"target_id", "category"},
             "property_merge": {"alias_id", "target_id"},
+            "property_rename": {"from_id", "to_id"},
             "property_retraction": {"target_id", "reason"},
         }[kind] - set(record)
         if extra:
@@ -365,6 +498,49 @@ def validate_records(
             note = record.get("note")
             if note is not None and not isinstance(note, str):
                 issues.append(_issue("MERGE", "note must be a string", rid))
+            continue
+        if kind == "property_rename":
+            from_id = record.get("from_id")
+            to_id = record.get("to_id")
+            if not isinstance(from_id, str) or not from_id.strip():
+                issues.append(_issue("RENAME", "rename needs the name it starts from", rid))
+            if not isinstance(to_id, str) or not to_id.strip():
+                issues.append(_issue("RENAME", "rename needs a new name", rid))
+            elif len(to_id.strip()) > 40:
+                issues.append(_issue("RENAME", "new property name is too long", rid))
+            elif from_id == to_id:
+                issues.append(_issue("RENAME", "rename needs two different names", rid))
+            # The old name has to be something: a definition, or a name an
+            # earlier rename/merge already produces. A rename to a name nobody
+            # has does not need a definition — creating it is the point. The
+            # record under validation is left out of the alias graph, or it would
+            # vouch for the very name it starts from.
+            others = [item for item in combined if item is not record]
+            aliases = alias_map(others)
+            known = set(defs) | set(aliases) | set(aliases.values())
+            if isinstance(from_id, str) and from_id.strip() and from_id not in known:
+                issues.append(
+                    _issue("RENAME", "rename must start from an existing property name", rid)
+                )
+            # A cycle would make the canonical name depend on reading order.
+            chained: set[str] = set()
+            cursor = to_id
+            while isinstance(cursor, str) and cursor not in chained:
+                chained.add(cursor)
+                cursor = next(
+                    (item.get("to_id") if item.get("kind") == "property_rename"
+                     else item.get("target_id")
+                    for item in others
+                     if item.get("kind") in {"property_rename", "property_merge"}
+                     and (item.get("from_id") or item.get("alias_id")) == cursor),
+                    None,
+                )
+                if cursor == from_id:
+                    issues.append(_issue("RENAME", "rename would create a cycle", rid))
+                    break
+            note = record.get("note")
+            if note is not None and not isinstance(note, str):
+                issues.append(_issue("RENAME", "note must be a string", rid))
             continue
         if kind == "property_retraction":
             target_id = record.get("target_id")

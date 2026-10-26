@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-from . import property_categories
+from . import property_categories, property_core
 from .order_ids import order_key
 
 ERROR = "error"
@@ -399,6 +399,9 @@ def audit_candidate(ops: Any, built: dict) -> dict:
     records = list(ops.property_records(include_retracted=True)) + list(
         built.get("property_records", [])
     )
+    # A name that was renamed or merged away is not a second aspect here either:
+    # the candidate is judged under the names the reader will see.
+    records = property_core.canonical_records(records)
     node_ids = {
         obj["id"] for obj in built.get("objects", [])
         if obj.get("kind") == "node"

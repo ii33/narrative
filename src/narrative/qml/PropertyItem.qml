@@ -73,6 +73,9 @@ Column {
                     text: item.row.scopeText
                     color: item.t.accent
                     font.pixelSize: 10
+                    // 多作用域时会写成「声称/认知/世界」，不限宽就会把分类标签挤出面板。
+                    Layout.maximumWidth: 92
+                    elide: Text.ElideRight
                 }
                 Label {
                     visible: item.row.holderId.length > 0
@@ -80,6 +83,8 @@ Column {
                     color: item.t.accent
                     font.pixelSize: 10
                     font.underline: true
+                    Layout.maximumWidth: 72
+                    elide: Text.ElideRight
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
@@ -108,6 +113,8 @@ Column {
                         onClicked: item.host.askCategory(item.row.category, item.row.recordIds)
                     }
                 }
+                // 改名入口在展开区（见下方），不塞进这一行：这里已经有分类、scope、
+                // 持有者，窄面板下再多一个标签会把分类挤出可视区。
             }
 
             Label {
@@ -147,6 +154,35 @@ Column {
                     }
                 }
             }
+        }
+    }
+
+    // 展开后是这一行的动作：改名换的是整个工程里这个名字，和「合并」不是一回事。
+    RowLayout {
+        x: 18
+        width: item.width - 18
+        spacing: 10
+        visible: item.expanded
+
+        Label {
+            objectName: "propertyRenameAction_" + item.row.key
+            text: "改名…"
+            color: item.t.accent
+            font.pixelSize: 10
+            font.underline: true
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: item.host.askRename(item.row)
+            }
+        }
+        Label {
+            Layout.fillWidth: true
+            text: item.row.names.length > 0
+                ? "改名会连同 " + item.row.names + " 一起换" : ""
+            color: item.t.muted
+            font.pixelSize: 10
+            elide: Text.ElideRight
         }
     }
 

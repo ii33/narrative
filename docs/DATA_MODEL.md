@@ -127,8 +127,8 @@ v6 图项目。两层：来源、对象。对象之间不再有断言层——�
 现在图里只有节点、语境、时间轴、来源顺序和属性记录。场景与事件的包含关系用节点字段
 `events`——一条记录说清"这个场景里有哪些事"，不另建边。
 
-属性记录有四种：`property_definition`、`property_value`、`property_categorization`、
-`property_retraction`。旧的 `property_initial` / `property_observation` / `event_change`
+属性记录有六种：`property_definition`、`property_value`、`property_categorization`、
+`property_merge`、`property_rename`、`property_retraction`。旧的 `property_initial` / `property_observation` / `event_change`
 已从代码中删除——包括校验、求值和示例。前期开发不保留兼容路径，留着只会让人误以为还能用。
 
 ## 陈述层之二：属性记录
@@ -140,7 +140,14 @@ v6 图项目。两层：来源、对象。对象之间不再有断言层——�
 | `property_definition` | 值类型、基数、持续性 |
 | `property_value` | `node_id` + `property_id` + `value` + `event_id` + `anchor_basis` + 可选 `applies_to` / `source` / `related_nodes` / `scope` / `holder_id` / `category` + 证据 |
 | `property_categorization` | 把某条取值记录移到另一个显示大类：`target_id` + `category`。整理动作，不是披露，没有证据 |
+| `property_merge` | 两个名字读作同一个方面：`alias_id` → `target_id`。读时别名，记录不改名 |
+| `property_rename` | 一个方面换个名字：`from_id` → `to_id`。读时别名，定义跟着搬到新名字 |
 | `property_retraction` | 把序列里的某一条设为失效：`target_id` + `reason` + 可选 `event_id` / `disclosure` / `basis` |
+
+归并和改名都**不改写取值记录**：记录保留采集时的名字，投影按别名读。
+区别在定义：归并让旧名字继续作为独立定义存在（它仍然是那个方面的一个拼法），
+改名把定义搬到新名字下（形状沿用），所以改名可以落到一个还不存在的名字上，
+而落到另一个方面的名字上会被拒绝——那是归并，不该静默发生。
 
 `property_retraction` **没有自己的节点和属性名**：它是编辑动作，不是披露。
 节点、方面、作用域一律从 `target_id` 指向的那条记录读，两处因此不会互相矛盾。

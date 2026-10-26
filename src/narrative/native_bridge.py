@@ -550,6 +550,32 @@ class NativeBridge(QObject):
 
         self._project_task("property_merge", work)
 
+    @Slot(str, str)
+    def renameProperty(self, names_json: str, to_id: str) -> None:
+        """Give an aspect a new name; the records keep the name they were captured under.
+
+        ``names_json`` is the whole row, because one aspect may be spread over two
+        spellings and renaming the line has to move both.
+        """
+        try:
+            names = json.loads(names_json)
+        except json.JSONDecodeError as exc:
+            self.errorOccurred.emit("property_rename", f"属性名列表无效：{exc.msg}")
+            return
+        if isinstance(names, str):
+            names = [names]
+        if not isinstance(names, list) or not all(isinstance(item, str) for item in names):
+            self.errorOccurred.emit("property_rename", "请提供属性名数组")
+            return
+        if not to_id.strip():
+            self.errorOccurred.emit("property_rename", "请填写新的属性名")
+            return
+
+        def work(ops) -> dict:
+            return ops.property_rename([str(item) for item in names], to_id.strip())
+
+        self._project_task("property_rename", work)
+
     def _manual_record(self, payload: dict) -> dict:
         """One hand-written disclosure from a QVariantMap.
 

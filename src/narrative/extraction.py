@@ -381,12 +381,16 @@ def known_properties(ops) -> list[dict]:
     snapshot = ops.graph_snapshot()
     nodes = {node["id"]: node for node in snapshot.get("nodes", [])}
     config = ops.property_categories()
+    # Names in use are the canonical ones: a name that was merged or renamed away
+    # must not be handed back to the model, or the next chapter reintroduces it.
+    aliases = ops.property_aliases()
     seen: dict[tuple[str, str], int] = {}
     for record in ops.property_records():
         if record.get("kind") != "property_value":
             continue
         node_type = (nodes.get(record.get("node_id")) or {}).get("node_type") or "other"
-        key = (record.get("property_id") or "", node_type)
+        name = record.get("property_id") or ""
+        key = (aliases.get(name, name), node_type)
         seen[key] = seen.get(key, 0) + 1
     return [
         {
@@ -772,8 +776,12 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
     used_ids: set[str] = set()
     skipped: list[dict] = []
     records: list[dict] = []
+    # The model may hand back a spelling that was merged or renamed away. Reading
+    # it as the name in use keeps one aspect from growing a second definition the
+    # moment a human renames it.
+    aliases = ops.property_aliases()
     definitions: dict[str, str] = {
-        item["id"]: item.get("value_type", "string")
+        aliases.get(item["id"], item["id"]): item.get("value_type", "string")
         for item in ops.property_records()
         if item["kind"] == "property_definition"
     }
@@ -792,6 +800,7 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
         if node_id is None:
             continue
         property_id = prop["property"]
+        property_id = aliases.get(property_id, property_id)
         known_type = definitions.get(property_id)
         if known_type is None:
             definitions[property_id] = prop["value_type"]

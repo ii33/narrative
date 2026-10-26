@@ -152,6 +152,12 @@ class GraphPropertyFacade:
     def merge(self, alias_id: str, target_id: str, note: str = "") -> dict:
         return self.properties.merge(alias_id, target_id, note)
 
+    def rename(self, names: object, to_id: str, note: str = "") -> dict:
+        return self.properties.rename(names, to_id, note)
+
+    def aliases(self) -> dict[str, str]:
+        return self.properties.aliases()
+
     def retract(
         self, targets: list[str], reason: str, *, event_id: str | None = None,
         basis: str = "human",

@@ -245,6 +245,36 @@ def test_merging_two_names_from_the_pane(workspace) -> None:
     assert len(item["records"]) == 2
 
 
+def test_renaming_an_aspect_from_the_pane(workspace) -> None:
+    app, _bridge, page, results, _errors = workspace
+    page.jumpTo("2")
+    _pump(app, results, "detail", "2")
+    _pump(app, results, "node_properties", "2")
+    app.processEvents()
+
+    rows = _value(page.property("propertyRows"))
+    item = next(row for row in rows if row["label"] == "修为")
+
+    del results[:]
+    page.askRename(item)
+    app.processEvents()
+    # 改的是整行：同一方面用了两个名字时，两个名字一起换，否则下一条披露会把旧名字带回来。
+    assert _value(page.property("renameNames")) == ["cultivation", "cultivation_stage"]
+    field = page.findChild(object, "renameField")
+    assert field is not None
+    field.setProperty("text", "修真境界")
+    page.applyRename()
+    renamed = _pump(app, results, "property_rename")
+    assert renamed["to_id"] == "修真境界"
+    _pump(app, results, "node_properties", "2")
+    app.processEvents()
+
+    rows = _value(page.property("propertyRows"))
+    item = next(row for row in rows if row["label"] == "修真境界")
+    assert item["names"] == ""
+    assert len(item["records"]) == 2
+
+
 def test_editing_the_vocabulary_changes_the_grouping(workspace) -> None:
     app, _bridge, page, results, _errors = workspace
     del results[:]

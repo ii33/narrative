@@ -443,6 +443,19 @@ class GraphOperations:
         """Read one property name as another. A separate act from moving a category."""
         return self.properties.merge(alias_id, target_id, note)
 
+    def property_rename(self, names: object, to_id: str, note: str = "") -> dict:
+        """Give an aspect a new name.
+
+        Editorial, not a disclosure: records keep the name they were captured
+        under and only the reading changes, so retracting the rename restores it.
+        ``names`` may be the whole row, when one aspect was spelled two ways.
+        """
+        return self.properties.rename(names, to_id, note)
+
+    def property_aliases(self) -> dict[str, str]:
+        """Alias → current name, so a caller can speak the names in use now."""
+        return self.properties.aliases()
+
     def property_retract(
         self, targets: list[str], reason: str, *, event_id: str | None = None
     ) -> dict:

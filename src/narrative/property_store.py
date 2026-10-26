@@ -94,10 +94,12 @@ def supersede_plan(
     """
     from .property_categories import aspect_of
 
-    definitions = {
-        record["id"]: record for record in list(accepted) + list(batch)
-        if record.get("kind") == "property_definition"
-    }
+    everything = list(accepted) + list(batch)
+    # A renamed or merged name is the same aspect: superseding has to see through
+    # the alias, or the first value after a rename would never replace the last
+    # value before it.
+    aliases = _core().alias_map(everything)
+    definitions = _core().canonical_definitions(everything)
     # A record already marked invalid keeps that mark; a second one would say
     # nothing new and would double the reason in the history.
     marked = {
@@ -105,15 +107,17 @@ def supersede_plan(
         if record.get("kind") == "property_retraction"
     }
     groups: dict[tuple, list[dict]] = {}
-    for record in list(accepted) + list(batch):
+    for record in everything:
         if record.get("kind") != "property_value" or record.get("id") in marked:
             continue
-        definition = definitions.get(record.get("property_id") or "")
+        name = record.get("property_id") or ""
+        canonical = aliases.get(name, name)
+        definition = definitions.get(canonical)
         if definition is not None and definition.get("cardinality") == "many":
             continue
         key = (
             record.get("node_id"),
-            aspect_of(record.get("property_id") or ""),
+            aspect_of(canonical),
             record.get("scope", "world"),
             record.get("holder_id"),
         )
@@ -190,47 +194,14 @@ def _categorization_overrides(records: list[dict]) -> dict[str, str]:
     return overrides
 
 
-def _merge_map(records: list[dict]) -> dict[str, str]:
-    """Alias → canonical property name, following chains.
-
-    A merge is a read-time alias: the records keep the name they were captured
-    under, so nothing has to be rewritten and a wrong merge is undone by
-    retracting one record.
-    """
-    direct = {
-        record["alias_id"]: record["target_id"]
-        for record in records
-        if record.get("kind") == "property_merge"
-        and isinstance(record.get("alias_id"), str)
-        and isinstance(record.get("target_id"), str)
-    }
-    resolved: dict[str, str] = {}
-    for alias in direct:
-        seen = {alias}
-        cursor = direct[alias]
-        while cursor in direct and cursor not in seen:
-            seen.add(cursor)
-            cursor = direct[cursor]
-        resolved[alias] = cursor
-    return resolved
+def _alias_map(records: list[dict]) -> dict[str, str]:
+    """Alias → canonical name, following chains (a merge and a rename alike)."""
+    return _core().alias_map(records)
 
 
-def _with_canonical_names(records: list[dict], merges: dict[str, str]) -> list[dict]:
-    """Read merged value records under their canonical name.
-
-    Copies only the records whose name was merged; everything else is passed
-    through, so callers keep working with the same objects they were given.
-    """
-    if not merges:
-        return records
-    result: list[dict] = []
-    for record in records:
-        if record.get("kind") == "property_value":
-            name = record.get("property_id")
-            if isinstance(name, str) and name in merges:
-                record = record | {"property_id": merges[name]}
-        result.append(record)
-    return result
+def _canonical(records: list[dict]) -> list[dict]:
+    """The same records read under canonical names; definitions move with them."""
+    return _core().canonical_records(records)
 
 
 class PropertyStore:
@@ -694,12 +665,14 @@ class PropertyStore:
         all_records = self.accepted_records(include_retracted=True)
         invalid = invalid_at(all_records, cut_position)
         records = [item for item in all_records if item.get("id") not in invalid]
-        merges = _merge_map(all_records)
-        wanted = merges.get(property_id, property_id)
+        # A rename that was taken back stops applying here too, so the alias map
+        # is built from what still stands rather than from every record ever.
+        aliases = _alias_map(records)
+        wanted = aliases.get(property_id, property_id)
 
         def name_of(record: dict) -> str:
             name = record.get("property_id")
-            return merges.get(name, name) if isinstance(name, str) else ""
+            return aliases.get(name, name) if isinstance(name, str) else ""
 
         values = [
             record for record in records
@@ -746,7 +719,7 @@ class PropertyStore:
         )
         # History is the audit trail: retracted entries belong in it.
         records = self.accepted_records(include_retracted=True)
-        records = _with_canonical_names(records, _merge_map(records))
+        records = _canonical(records)
         return _core().history(records, node_id, property_id, **kwargs)
 
     def audit(
@@ -765,7 +738,7 @@ class PropertyStore:
         )
         # An alias that was merged is no longer a separate name: auditing it as
         # one would keep reporting the split the human already resolved.
-        records = _with_canonical_names(records, _merge_map(records))
+        records = _canonical(records)
         return audit_properties(
             records,
             snapshot.get("nodes", []),
@@ -913,6 +886,97 @@ class PropertyStore:
             "target_id": target_id,
         }
 
+    def rename(self, names: object, to_id: str, note: str = "") -> dict:
+        """Give one aspect a new name.
+
+        A rename is a read-time alias like a merge, but it says something else:
+        not "these two names are one aspect" but "this aspect is called that
+        now". So the new name does not have to exist yet — creating it is the
+        point — and the definition moves with it, keeping the shape the values
+        were validated against. Nothing is rewritten: records keep the name they
+        were captured under, and retracting this record restores the old name.
+
+        ``names`` is the whole row: an aspect may be spread over two names
+        (`cultivation`, `cultivation_stage`), and renaming the line has to move
+        all of them, otherwise the next disclosure reintroduces the old spelling.
+        Renaming onto another aspect's name is refused — that is a merge, and a
+        silent one would hide which aspect just absorbed which.
+        """
+        from uuid import uuid4
+
+        if isinstance(names, str):
+            names = [names]
+        if not isinstance(names, (list, tuple)):
+            raise ValueError("请提供要改的属性名")
+        sources = [item.strip() for item in names if isinstance(item, str) and item.strip()]
+        to_id = (to_id or "").strip()
+        if not sources:
+            raise ValueError("请提供要改的属性名")
+        if not to_id:
+            raise ValueError("请填写新的属性名")
+        if len(to_id) > 40:
+            raise ValueError("属性名最长 40 个字符")
+
+        records = self.accepted_records(include_retracted=True)
+        invalid = invalid_at(records, None)
+        live = [record for record in records if record.get("id") not in invalid]
+        aliases = _alias_map(live)
+        definitions = {
+            record["id"] for record in live
+            if record.get("kind") == "property_definition"
+        }
+        known = definitions | set(aliases) | set(aliases.values())
+        unknown = [name for name in sources if name not in known]
+        if unknown:
+            raise ValueError(f"属性名不存在：{'、'.join(unknown[:3])}")
+
+        canonical = {aliases.get(name, name) for name in sources}
+        target = aliases.get(to_id, to_id)
+        if target in canonical:
+            # The new name is one this aspect already answers to: point the rest
+            # at it instead of inventing a third spelling.
+            to_id = target
+        else:
+            taken = (definitions | set(aliases.values())) - canonical
+            if to_id in taken:
+                raise ValueError(
+                    f"「{to_id}」已经是另一个属性的名字；要合成一个方面请用「合并」"
+                )
+        pending = [
+            {
+                "kind": "property_rename",
+                "id": f"rename_{uuid4().hex[:12]}",
+                "from_id": name,
+                "to_id": to_id,
+                **({"note": note} if note else {}),
+            }
+            for name in dict.fromkeys(sources)
+            if name != to_id
+        ]
+        if not pending:
+            raise ValueError("新旧名字相同")
+        revision = self.store.revision
+        candidate = self.propose(
+            pending, revision, source="correction",
+            note=note or f"改名：{'、'.join(sources)} → {to_id}",
+        )
+        return {
+            "revision": self.accept(candidate, 1),
+            "renamed": [record["from_id"] for record in pending],
+            "to_id": to_id,
+        }
+
+    def aliases(self) -> dict[str, str]:
+        """Alias → canonical name for the whole project (merges and renames).
+
+        Read once by anything that has to speak the current names: the extraction
+        prompt lists them so the next chapter does not reinvent a name that was
+        just renamed away.
+        """
+        records = self.accepted_records(include_retracted=True)
+        invalid = invalid_at(records, None)
+        return _alias_map([item for item in records if item.get("id") not in invalid])
+
     def retract(
         self,
         targets: list[str],
@@ -954,9 +1018,10 @@ class PropertyStore:
             if record is None:
                 raise ValueError(f"记录不存在：{target}")
             if record.get("kind") not in {
-                "property_value", "property_categorization", "property_merge"
+                "property_value", "property_categorization", "property_merge",
+                "property_rename",
             }:
-                raise ValueError("只有取值、分类或归并记录可以撤回")
+                raise ValueError("只有取值、分类、归并或改名记录可以撤回")
             if target in already:
                 continue
             item: dict = {
@@ -1084,10 +1149,14 @@ class PropertyStore:
         invalid = invalid_at(all_records, cut_position)
         records = all_records
         config = property_categories.load(self.store)
-        definitions = {
-            record["id"]: record for record in records
-            if record.get("kind") == "property_definition"
-        }
+        # A move, a merge or a rename that has been invalidated stops applying:
+        # these are editorial records too, and taking one back must restore what
+        # came before. So names are resolved from what still stands.
+        editorial = [item for item in records if item.get("id") not in invalid]
+        # Definitions are keyed by the name the reader sees, so a renamed aspect
+        # keeps its shape (a node-valued property stays node-valued) and a merged
+        # alias no longer counts as a definition of its own.
+        definitions = _core().canonical_definitions(editorial)
         # Names are resolved here so a reader never sees a bare id: the event a
         # disclosure hangs on, and every node the record points at.
         nodes = {node["id"]: node for node in snapshot.get("nodes", [])}
@@ -1101,15 +1170,12 @@ class PropertyStore:
         }
         node = nodes.get(node_id, {})
         node_type = node.get("node_type")
-        # A move or a merge that has been invalidated stops applying: these are
-        # editorial records too, and taking one back must restore what came before.
-        editorial = [item for item in records if item.get("id") not in invalid]
         # A move is one record pointing at one disclosure; the last accepted one
         # is the current grouping, so moving twice keeps the second answer.
         overrides = _categorization_overrides(editorial)
         # A merged alias reads as its canonical name everywhere: one aspect, one
         # line, one label, without rewriting the records that used the old name.
-        merges = _merge_map(editorial)
+        aliases = _alias_map(editorial)
 
         def node_ref(value: object) -> dict | None:
             """A node-valued property stores an id; the reader wants the name."""
@@ -1139,7 +1205,7 @@ class PropertyStore:
                 record, node_type, config, overrides
             )
             raw_name = record.get("property_id")
-            name = merges.get(raw_name, raw_name) if isinstance(raw_name, str) else ""
+            name = aliases.get(raw_name, raw_name) if isinstance(raw_name, str) else ""
             aspect = property_categories.aspect_of(name)
             lines.setdefault((aspect, category), []).append({
                 "record": record,
@@ -1367,9 +1433,12 @@ class PropertyStore:
             category, category_source = property_categories.resolve(
                 record, owner_type, config, overrides
             )
+            raw_name = record.get("property_id")
+            name = aliases.get(raw_name, raw_name) if isinstance(raw_name, str) else ""
             inbound.append({
                 "record_id": record.get("id"),
-                "property_id": record.get("property_id"),
+                "property_id": name,
+                "property_label": property_labels.label_for(name),
                 "category": property_categories.inverse_category(category, node_type, config),
                 "source_category": category,
                 "category_source": category_source,

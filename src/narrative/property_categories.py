@@ -69,6 +69,11 @@ _NAME_HINTS: dict[str, dict[str, str]] = {
         "organization": "身份与经历", "sect": "身份与经历", "school": "身份与经历",
         "origin": "身份与经历", "background": "身份与经历",
         "family_background": "身份与经历", "education": "身份与经历",
+        # 属性名可以改成人话（`family_background` → 出身），推断也得认得这些写法，
+        # 否则改名之后新披露会掉进「其他」，同一个方面分成两行。
+        "出身": "身份与经历", "家世": "身份与经历", "背景": "身份与经历",
+        "经历": "身份与经历", "学历": "身份与经历", "身份": "身份与经历",
+        "职业": "身份与经历", "名声": "身份与经历", "来历": "身份与经历",
         "experience": "身份与经历", "escape_experience": "身份与经历",
         "reputation": "身份与经历", "fame": "身份与经历", "deed": "身份与经历",
         "treasure_loss": "身份与经历", "training_time": "身份与经历",
