@@ -768,9 +768,58 @@ class NativeBridge(QObject):
             return
 
         def work(ops) -> dict:
-            return ops.property_retract([str(item) for item in targets], reason)
+            # 失效从读者站的位置起算：后面的状态不能回头改写前面的。
+            # 「读错了，从来不算」是更正那条路（追加新值 + 撤回旧值），不是这里。
+            return ops.property_retract(
+                [str(item) for item in targets], reason,
+                event_id=self._reading_anchor(ops),
+            )
 
         self._project_task("property_retract", work)
+
+    def _reading_anchor(self, ops) -> str:
+        """读者现在站在哪：停在某个阅读位置就用它，停在「最新」就用最后一个事件。
+
+        失效和撤销失效都落在这个位置上——状态是一段接一段叠出来的，
+        写在后面的记录不该回头改写前面已经读过的。
+        """
+        from .browse_view import steps
+
+        event_id = str(self._state_cut or "")
+        if event_id:
+            return event_id
+        all_events = steps(ops.graph_snapshot(), "event")
+        return all_events[-1]["id"] if all_events else ""
+
+    @Slot(str, str)
+    def restorePropertyRecords(self, targets_json: str, reason: str) -> None:
+        """Take a retraction back, counting again from where the reader stands.
+
+        ``targets_json`` is a list of *retraction* records, not values: undoing
+        the statement, not the value. The position is the current reading cut;
+        at 最新 it is the last event, so the value is back for the reader now.
+        """
+        try:
+            targets = json.loads(targets_json)
+        except json.JSONDecodeError as exc:
+            self.errorOccurred.emit("property_restore", f"记录 ID 列表无效：{exc.msg}")
+            return
+        if not isinstance(targets, list) or not all(isinstance(item, str) for item in targets):
+            self.errorOccurred.emit("property_restore", "请提供失效记录 ID 数组")
+            return
+        if not reason.strip():
+            self.errorOccurred.emit("property_restore", "撤销失效需要写清原因")
+            return
+
+        def work(ops) -> dict:
+            event_id = self._reading_anchor(ops)
+            if not event_id:
+                raise ValueError("工程里还没有事件，撤销失效无从落点")
+            return ops.property_restore(
+                [str(item) for item in targets], reason.strip(), event_id=event_id
+            )
+
+        self._project_task("property_restore", work)
 
     @Slot(str)
     def applySuperseded(self, pairs_json: str) -> None:

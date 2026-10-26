@@ -69,6 +69,10 @@ Item {
     property var expandedProps: ({})
     property var pickerTargets: []
     property var mergeNames: []
+    // 撤销失效：指向那条「失效」记录，而不是取值记录。
+    property string restoreTarget: ""
+    property string restoreValue: ""
+    property string restoreReason: ""
     // 事件等级：场景 / 事件。默认场景（粒度更粗，一次读一段）。
     property string granularity: "scene"
     // 阅读位置：cutId 是场景或事件的编号，空串表示看到最新。
@@ -356,6 +360,27 @@ Item {
         mergeDialog.close()
     }
 
+    // 撤销失效：撤的是「这条不算数」这句话，记录和值都还在。
+    function askRestore(record) {
+        if (!record || !record.invalidated_by) return
+        restoreTarget = record.invalidated_by
+        restoreValue = String(record.value === null || record.value === undefined
+            ? "" : record.value)
+        restoreReason = ""
+        restoreDialog.open()
+    }
+
+    function submitRestore() {
+        if (restoreTarget.length === 0) return
+        var reason = restoreReason.trim()
+        if (reason.length === 0) {
+            app.toast("请写清撤销的原因", true)
+            return
+        }
+        bridge.restorePropertyRecords(JSON.stringify([restoreTarget]), reason)
+        restoreDialog.close()
+    }
+
     function openSource(sourceId, start) {
         app.openSource(sourceId, start)
     }
@@ -513,6 +538,10 @@ Item {
                 app.toast(removed > 0
                     ? "已撤回 " + removed + " 条记录"
                     : "这些记录已经失效过，不用再撤", removed === 0)
+                if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
+            } else if (kind === "property_restore") {
+                var restored = (payload.restored || []).length
+                app.toast(restored > 0 ? "已撤销失效" : "这条失效已经撤销过了", restored === 0)
                 if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
             } else if (kind === "node_properties") {
                 page.applyProperties(payload)
@@ -1230,6 +1259,60 @@ Item {
                 flat: true
                 text: "取消"
                 onClicked: mergeDialog.close()
+            }
+        }
+    }
+
+    // 撤销失效：说清楚撤的是判断，不是值；从当前位置起重新算。
+    Dialog {
+        id: restoreDialog
+        objectName: "restoreDialog"
+        title: "撤销失效"
+        modal: true
+        anchors.centerIn: parent
+        width: 430
+
+        contentItem: ColumnLayout {
+            spacing: 6
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: "这条记录：" + (page.restoreValue.length > 0 ? page.restoreValue : "（空）")
+                color: t.ink
+                font.pixelSize: 12
+            }
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: "撤销的是「这条不算数」这个判断，记录和值一直都在。"
+                    + "从当前阅读位置「" + (page.cutName || "最新") + "」起重新算状态，"
+                    + "之前那段仍然没有它——后面的状态基于前面的，不会回头改写。"
+                    + "撤销本身不能再被撤销。"
+                color: t.muted
+                font.pixelSize: 11
+            }
+            TextField {
+                id: restoreReasonField
+                objectName: "restoreReasonField"
+                Layout.fillWidth: true
+                placeholderText: "为什么撤销（必填）"
+                onTextChanged: page.restoreReason = text
+                onAccepted: page.submitRestore()
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: "取消"
+                    flat: true
+                    onClicked: restoreDialog.close()
+                }
+                Button {
+                    objectName: "restoreApplyButton"
+                    text: "撤销失效"
+                    highlighted: true
+                    onClicked: page.submitRestore()
+                }
             }
         }
     }

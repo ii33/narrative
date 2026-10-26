@@ -164,6 +164,14 @@ class GraphPropertyFacade:
     ) -> dict:
         return self.properties.retract(targets, reason, event_id=event_id, basis=basis)
 
+    def restore(
+        self, targets: list[str], reason: str, *, event_id: str | None = None,
+        basis: str = "human",
+    ) -> dict:
+        return self.properties.restore(
+            targets, reason, event_id=event_id, basis=basis
+        )
+
     def supersede(self, pairs: list[dict], note: str = "") -> dict:
         return self.properties.supersede(pairs, note)
 

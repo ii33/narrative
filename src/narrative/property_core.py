@@ -18,6 +18,7 @@ _KINDS = {
     "property_merge",
     "property_rename",
     "property_retraction",
+    "property_restoration",
 }
 # "any" means the shape is not fixed: one property may hold a number, a
 # description and a relative phrase over time.
@@ -56,6 +57,14 @@ _FIELDS = {
     "property_retraction": _COMMON | {
         "target_id", "reason", "event_id", "disclosure", "basis",
     },
+    # Taking a retraction back. It points at one retraction record, not at a
+    # value, and it counts from its own disclosure on: the stretch where the
+    # value was gone stays gone, because a later state is built on the earlier
+    # one and never rewrites it. A restoration is the end of the line — nothing
+    # may target it, so there is no undo of an undo.
+    "property_restoration": _COMMON | {
+        "target_id", "reason", "event_id", "disclosure", "basis",
+    },
 }
 
 
@@ -65,7 +74,9 @@ def _record_scope(record: dict) -> str:
 
 
 def _scope_matches(record: dict, scope: str, holder_id: str | None) -> bool:
-    if record.get("kind") in {"property_definition", "property_retraction"}:
+    if record.get("kind") in {
+        "property_definition", "property_retraction", "property_restoration",
+    }:
         return True
     if _record_scope(record) != scope:
         return False
@@ -358,6 +369,11 @@ def validate_records(
     ]
     active, retracted = _active(combined)
     defs = _definition_map(active)
+    # 只看已接受的：本批里的那条恢复不能把自己算成「已经撤销过」。
+    restored = {
+        r.get("target_id") for r in accepted_records
+        if isinstance(r, dict) and r.get("kind") == "property_restoration"
+    }
     existing_ids = {r.get("id") for r in accepted_records if isinstance(r, dict)}
     seen: set[str] = set()
     for record in records:
@@ -385,6 +401,7 @@ def validate_records(
             "property_merge": {"alias_id", "target_id"},
             "property_rename": {"from_id", "to_id"},
             "property_retraction": {"target_id", "reason"},
+            "property_restoration": {"target_id", "reason", "event_id"},
         }[kind] - set(record)
         if extra:
             issues.append(_issue("FORMAT", f"unexpected fields: {', '.join(sorted(extra))}", rid))
@@ -572,6 +589,36 @@ def validate_records(
             if basis is not None and basis not in {"audit", "human"}:
                 issues.append(_issue(
                     "RETRACTION_BASIS", "retraction basis must be audit or human", rid
+                ))
+            continue
+        if kind == "property_restoration":
+            target_id = record.get("target_id")
+            target = next((item for item in combined if item.get("id") == target_id), None)
+            # 只能撤销「失效」，不能撤销别的，更不能撤销「撤销」——没有撤销叠撤销。
+            if target is None or target.get("kind") != "property_retraction":
+                issues.append(_issue(
+                    "RESTORATION_TARGET", "restoration must target a retraction", rid
+                ))
+            elif target_id in restored:
+                issues.append(_issue(
+                    "RESTORATION_TARGET", "that retraction is already taken back", rid
+                ))
+            if not isinstance(record.get("reason"), str) or not record.get("reason", "").strip():
+                issues.append(_issue(
+                    "RESTORATION_REASON", "restoration requires a non-empty reason", rid
+                ))
+            # 从哪个披露起重新算：这是必填的。没有位置就等于让后面的状态改写前面的，
+            # 而状态只能是一段接一段叠出来的。
+            anchor = record.get("event_id")
+            event = nodes.get(anchor) if isinstance(anchor, str) else None
+            if event is None or event.get("node_type") != "event":
+                issues.append(_issue(
+                    "RESTORATION_ANCHOR", "restoration must say from which event it counts", rid
+                ))
+            basis = record.get("basis")
+            if basis is not None and basis not in {"audit", "human"}:
+                issues.append(_issue(
+                    "RESTORATION_BASIS", "restoration basis must be audit or human", rid
                 ))
             continue
         node_id = (

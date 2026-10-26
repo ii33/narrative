@@ -295,6 +295,20 @@ Column {
                                                         modelData.disclosure.start)
                     }
                 }
+                // 撤销失效：撤的是「这条不算数」这句话，不是值。
+                // 从当前位置起重新算，之前那段仍然是空的。
+                Label {
+                    visible: !modelData.valid && !!modelData.invalidated_by
+                    text: "撤销失效"
+                    color: item.t.accent
+                    font.pixelSize: 10
+                    font.underline: true
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: item.host.askRestore(modelData)
+                    }
+                }
             }
 
             RowLayout {

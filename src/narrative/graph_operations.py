@@ -466,6 +466,16 @@ class GraphOperations:
         """
         return self.properties.retract(targets, reason, event_id=event_id)
 
+    def property_restore(
+        self, targets: list[str], reason: str, *, event_id: str | None = None
+    ) -> dict:
+        """Take a retraction back, counting again from this disclosure on.
+
+        ``targets`` are retraction records. The restoration has its own position,
+        so what was already read stays as it was read.
+        """
+        return self.properties.restore(targets, reason, event_id=event_id)
+
     def property_supersede(self, pairs: list[dict], note: str = "") -> dict:
         """Mark older values invalid from the disclosure that replaced them."""
         return self.properties.supersede(pairs, note)

@@ -55,6 +55,25 @@ def record_position(record: dict) -> tuple:
     return (key or (999,), offset if isinstance(offset, int) else 0)
 
 
+def _statement_position(record: dict) -> tuple:
+    """一条失效/恢复记录落在披露链的哪里。
+
+    没有 ``event_id`` 的撤回是「读错了，从来不算」，所以排在任何披露之前；
+    其余按 (事件编号, 该事件内的位置) 排。
+    """
+    if not isinstance(record.get("event_id"), str):
+        return ((0,), 0)
+    return record_position(record)
+
+
+def _applies(record: dict, cut: tuple | None) -> bool:
+    """这条记录在当前位置算不算数：有位置的就看位置，没位置的（读错了）到处都算。"""
+    anchor = record.get("event_id")
+    if isinstance(anchor, str) and cut is not None:
+        return record_position(record) <= cut
+    return True
+
+
 def invalid_at(records: list[dict], cut: tuple | None) -> dict[str, dict]:
     """Records that no longer count at this reading position, and why.
 
@@ -62,19 +81,35 @@ def invalid_at(records: list[dict], cut: tuple | None) -> dict[str, dict]:
     at every position. One with an event says "from here this is no longer the
     state", so before that position the old value is still what the reader knows.
     ``cut=None`` means "as of the last thing disclosed".
+
+    The answer is a fold over the disclosure chain, not a vote: each retraction
+    takes a record out from its own position on, and a restoration puts it back
+    from *its* position on. Nothing reaches backwards — the stretch where a value
+    was gone stays gone, because a later state is built on the earlier one.
     """
+    # 按披露位置排，不按写入顺序排：状态是从前一段叠出来的，
+    # 写在后头的记录不能改写前面那一段。
+    statements = [
+        record for record in records
+        if record.get("kind") in {"property_retraction", "property_restoration"}
+        and _applies(record, cut)
+    ]
+    statements.sort(key=_statement_position)
+
     result: dict[str, dict] = {}
-    for record in records:
-        if record.get("kind") != "property_retraction":
+    for record in statements:
+        if record.get("kind") == "property_restoration":
+            undone = record.get("target_id")
+            if not isinstance(undone, str):
+                continue
+            # 这条撤回被撤销了：从这一刻起它不再让任何记录失效。
+            for value_id, retraction in list(result.items()):
+                if retraction.get("id") == undone:
+                    del result[value_id]
             continue
         target = record.get("target_id")
-        if not isinstance(target, str):
-            continue
-        anchor = record.get("event_id")
-        if isinstance(anchor, str) and cut is not None:
-            if record_position(record) > cut:
-                continue
-        result[target] = record
+        if isinstance(target, str):
+            result[target] = record
     return result
 
 
@@ -348,17 +383,23 @@ class PropertyStore:
     ) -> list[dict]:
         """Validate records against a supplied snapshot (used by unified changes)."""
         snapshot = snapshot or self.store.snapshot()
+        # 撤回过的记录也要在场，否则指向它们的失效/撤销/更正会报「目标不是属性记录」。
         return self._diagnostics(
             records,
             expected_revision,
             snapshot,
-            self.accepted_records(snapshot["revision"]),
+            self.accepted_records(snapshot["revision"], include_retracted=True),
         )
 
     def precheck(self, records: list[dict], expected_revision: int) -> list[dict]:
         snapshot = self.store.snapshot()
+        # 撤回过的记录也要在场：指向它们的失效、撤销失效、更正都得能验通过。
+        # 只看「还站得住的」会让第二次撤回报「目标不是属性记录」。
         return self._diagnostics(
-            records, expected_revision, snapshot, self.accepted_records(snapshot["revision"])
+            records,
+            expected_revision,
+            snapshot,
+            self.accepted_records(snapshot["revision"], include_retracted=True),
         )
 
     # -- pending candidates -------------------------------------------
@@ -375,7 +416,10 @@ class PropertyStore:
             raise ValueError("属性候选来源无效")
         snapshot = self.store.snapshot()
         diagnostics = self._diagnostics(
-            records, expected_revision, snapshot, self.accepted_records(snapshot["revision"])
+            records,
+            expected_revision,
+            snapshot,
+            self.accepted_records(snapshot["revision"], include_retracted=True),
         )
         errors = [item["message"] for item in diagnostics if item["severity"] == "error"]
         if errors:
@@ -1008,16 +1052,19 @@ class PropertyStore:
         by_id = {
             record["id"]: record for record in records if isinstance(record.get("id"), str)
         }
-        # 一个目标现有的那条撤回。同一个说法不用说第二遍，但「从某处起不算」和
-        # 「从来不算」是两句话——站在更早的阅读位置上撤一条已经被取代的记录，
-        # 说的是后者；不写进去，读者在那个位置怎么点都撤不动。
-        already: dict[str, dict] = {}
-        for record in records:
-            if (
-                record.get("kind") == "property_retraction"
-                and isinstance(record.get("target_id"), str)
-            ):
-                already[record["target_id"]] = record
+        # 现在还活着的撤回（撤销过的不算，撤销之后可以重新撤）。
+        # 同一个说法不用说第二遍，但「从某处起不算」和「从来不算」是两句话——
+        # 站在更早的阅读位置上撤一条已经被取代的记录，说的是后者；
+        # 不写进去，读者在那个位置怎么点都撤不动。
+        undone = {
+            record.get("target_id") for record in records
+            if record.get("kind") == "property_restoration"
+        }
+        live = [
+            record for record in records
+            if record.get("kind") == "property_retraction"
+            and record.get("id") not in undone
+        ]
         pending: list[dict] = []
         for target in dict.fromkeys(targets):
             record = by_id.get(target)
@@ -1028,11 +1075,14 @@ class PropertyStore:
                 "property_rename",
             }:
                 raise ValueError("只有取值、分类、归并或改名记录可以撤回")
-            existing = already.get(target)
-            if existing is not None:
-                # 已经是「从来不算」，或者这次也是「从某个事件起不算」：没有新说法。
-                if existing.get("event_id") is None or event_id is not None:
-                    continue
+            existing = [
+                record for record in live if record.get("target_id") == target
+            ]
+            # 已经说过「从来不算」，或者这次也是「从某个事件起不算」：没有新说法。
+            if any(record.get("event_id") is None for record in existing):
+                continue
+            if existing and event_id is not None:
+                continue
             item: dict = {
                 "kind": "property_retraction",
                 "id": f"retract_{uuid4().hex[:12]}",
@@ -1060,6 +1110,78 @@ class PropertyStore:
         return {
             "revision": self.accept(candidate, 1),
             "retracted": [record["target_id"] for record in pending],
+            "reason": reason,
+        }
+
+    def restore(
+        self,
+        targets: list[str],
+        reason: str,
+        *,
+        event_id: str | None = None,
+        basis: str = "human",
+    ) -> dict:
+        """Take a retraction back, counting again from this disclosure on.
+
+        ``targets`` are retraction records, not values: what is undone is the
+        statement "this stopped counting", not the value. The restoration has its
+        own position, so the stretch where the value was gone stays gone — a
+        later state is built on the earlier one and never rewrites it.
+
+        A restoration cannot itself be undone. That is the shape of the chain
+        rather than a missing feature: the answer to "I was wrong to retract" is
+        a new statement about the value, not another layer of undoing.
+        """
+        from uuid import uuid4
+
+        reason = (reason or "").strip()
+        if not reason:
+            raise ValueError("撤销失效需要写清原因")
+        if not isinstance(targets, list) or not targets:
+            raise ValueError("请提供要撤销的失效记录")
+        if not event_id:
+            raise ValueError("撤销失效要从某次披露起算，请提供事件")
+        records = self.accepted_records(include_retracted=True)
+        by_id = {
+            record["id"]: record for record in records if isinstance(record.get("id"), str)
+        }
+        undone = {
+            record.get("target_id") for record in records
+            if record.get("kind") == "property_restoration"
+        }
+        pending: list[dict] = []
+        for target in dict.fromkeys(targets):
+            record = by_id.get(target)
+            if record is None:
+                raise ValueError(f"记录不存在：{target}")
+            if record.get("kind") != "property_retraction":
+                raise ValueError("只能撤销失效记录")
+            if target in undone:
+                continue
+            item: dict = {
+                "kind": "property_restoration",
+                "id": f"restore_{uuid4().hex[:12]}",
+                "target_id": target,
+                "reason": reason,
+                "event_id": event_id,
+                "basis": basis,
+            }
+            disclosure = record.get("disclosure") or {}
+            if isinstance(disclosure.get("source_id"), str):
+                item["disclosure"] = {
+                    "source_id": disclosure["source_id"],
+                    "start": record_position(record)[1],
+                }
+            pending.append(item)
+        if not pending:
+            return {"revision": self.store.revision, "restored": [], "reason": reason}
+        revision = self.store.revision
+        candidate = self.propose(
+            pending, revision, source="correction", note=f"撤销失效：{reason}"
+        )
+        return {
+            "revision": self.accept(candidate, 1),
+            "restored": [record["target_id"] for record in pending],
             "reason": reason,
         }
 
@@ -1313,6 +1435,8 @@ class PropertyStore:
                     "invalidated_at": names.get(gone.get("event_id") or "") or "",
                     "invalid_reason": gone.get("reason"),
                     "invalid_basis": gone.get("basis"),
+                    # 是哪条撤回让它失效的：撤销失效要指向这条记录。
+                    "invalidated_by": gone.get("id"),
                 })
             latest = decorated[-1]
             valid_rows = [row for row in decorated if row["valid"]]

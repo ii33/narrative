@@ -951,7 +951,8 @@ def test_retracting_once_closes_the_form(workspace) -> None:
     editor.setProperty("retractReason", "这条读错了")
     del results[:]
     editor.submitRetract()
-    _pump(app, results, "property_retract")
+    retracted = _pump(app, results, "property_retract")
+    assert retracted["retracted"]
     assert editor.property("retractKey") == ""
     assert _value(editor.property("retractTargets")) == []
 
@@ -1016,6 +1017,94 @@ def test_a_failed_add_keeps_the_dialog(workspace) -> None:
     # 框还开着，填好的内容还在。
     assert page.findChild(object, "addPropertyDialog").property("opened") is True
     assert page.findChild(object, "addValueField").property("text") == "站着没动"
+
+
+def test_restoring_a_retraction_from_the_pane(workspace) -> None:
+    """失效的那条在「全部」里带着「撤销失效」；撤销之后它又算数了。"""
+    app, _bridge, page, results, _errors = workspace
+    del results[:]
+    page.select("3")
+    _pump(app, results, "detail", "3")
+    _pump(app, results, "node_properties", "3")
+
+    editor = page.findChild(object, "nodeEditor")
+    editor.openFor("3")
+    payload = _pump(app, results, "node_editor")
+    app.processEvents()
+    item = next(entry for entry in payload["properties"] if entry["property_id"] == "holder")
+    editor.startRetract(item)
+    editor.setProperty("retractReason", "这条读错了")
+    del results[:]
+    editor.submitRetract()
+    retracted = _pump(app, results, "property_retract")
+    assert retracted["retracted"]
+
+    # 切到「全部」：失效的记录还在，并指向那条失效记录。
+    del results[:]
+    page.togglePropertyScope("all")
+    _pump(app, results, "property_scope")
+    _pump(app, results, "node_properties", "3")
+    app.processEvents()
+    rows = _value(page.property("propertyRows"))
+    record = next(
+        row for entry in rows for row in entry["records"] if not row["valid"]
+    )
+    assert record["invalidated_by"]
+    assert record["invalid_reason"] == "这条读错了"
+
+    del results[:]
+    page.askRestore(record)
+    app.processEvents()
+    assert page.property("restoreTarget") == record["invalidated_by"]
+    page.setProperty("restoreReason", "其实没读错")
+    page.submitRestore()
+    restored = _pump(app, results, "property_restore")
+    assert restored["restored"] == [record["invalidated_by"]]
+
+    _pump(app, results, "node_properties", "3")
+    app.processEvents()
+    rows = _value(page.property("propertyRows"))
+    assert all(
+        row["valid"] for entry in rows for row in entry["records"]
+    )
+
+
+def test_a_retraction_counts_from_where_it_was_made(workspace) -> None:
+    """失效从你站的位置起算：站在「最新」撤，回到前面的位置仍然看得到它。"""
+    app, _bridge, page, results, _errors = workspace
+    del results[:]
+    editor = page.findChild(object, "nodeEditor")
+    editor.openFor("1")
+    payload = _pump(app, results, "node_editor")
+    app.processEvents()
+    item = next(entry for entry in payload["properties"] if entry["property_id"] == "state")
+    editor.startRetract(item)
+    editor.setProperty("retractReason", "这句读错了")
+    del results[:]
+    editor.submitRetract()
+    assert _pump(app, results, "property_retract")["retracted"]
+
+    def state_rows() -> list:
+        return [
+            entry for entry in _value(page.property("propertyRows"))
+            if entry["label"] == "状态"
+        ]
+
+    # 停在「最新」：这一行没了（同一个 state 还留在另一个大类下）。
+    del results[:]
+    page.select("1")
+    _pump(app, results, "detail", "1")
+    _pump(app, results, "node_properties", "1")
+    app.processEvents()
+    assert len(state_rows()) == 1
+
+    # 回到第一个场景（事件 4）：那次失效落在事件 5，前面这一段不受影响。
+    del results[:]
+    page.pickCut(1)
+    _pump(app, results, "browse")
+    _pump(app, results, "node_properties", "1")
+    app.processEvents()
+    assert len(state_rows()) == 2
 
 
 def test_the_node_editor_follows_the_reading_position(workspace) -> None:
