@@ -508,7 +508,11 @@ Item {
                     app.toast("更正未通过预检：" + (problem.message || "未知原因"), true)
                 }
             } else if (kind === "property_retract") {
-                app.toast("已撤回 " + (payload.retracted || []).length + " 条记录", false)
+                var removed = (payload.retracted || []).length
+                // 0 条不是「成功了但没说」，是「这些记录本来就已经失效过」。
+                app.toast(removed > 0
+                    ? "已撤回 " + removed + " 条记录"
+                    : "这些记录已经失效过，不用再撤", removed === 0)
                 if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
             } else if (kind === "node_properties") {
                 page.applyProperties(payload)

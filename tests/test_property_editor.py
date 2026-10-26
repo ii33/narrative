@@ -135,3 +135,55 @@ def test_an_aspect_with_nothing_left_is_gone_from_the_pane(tmp_path: Path) -> No
         ("二十九岁", False), ("三十岁", False),
     ]
     assert {row["invalid_reason"] for row in union[0]["records"]} == {"两句都读错了"}
+
+
+def test_a_superseded_record_can_be_taken_back_at_an_earlier_cut(tmp_path: Path) -> None:
+    """更早的阅读位置上，被取代的记录仍是读者看到的值：这时撤它说的是「从来不算」。
+
+    只有「从事件 3 起不算」那一条时，站在事件 2 上点失效会被当成重复而静默跳过，
+    看起来就是「失效没用」。
+    """
+    ops = create_graph_project(tmp_path / "earlier.sqlite3")
+    ops.graph_accept(
+        ops.graph_propose(
+            [
+                {"kind": "node", "id": "1", "node_type": "person", "name": "林舟"},
+                {"kind": "node", "id": "2", "node_type": "event", "name": "交代年龄"},
+                {"kind": "node", "id": "3", "node_type": "event", "name": "过了几年"},
+            ],
+            ops.graph_project_info()["revision"],
+        ),
+        1,
+    )
+    ops.property_accept(
+        ops.property_propose(
+            [
+                {"kind": "property_definition", "id": "age", "value_type": "string",
+                 "cardinality": "one", "persistence": "until_changed"},
+                {"kind": "property_value", "id": "v1", "node_id": "1",
+                 "property_id": "age", "value": "二十九岁", "event_id": "2"},
+                {"kind": "property_value", "id": "v2", "node_id": "1",
+                 "property_id": "age", "value": "三十岁", "event_id": "3"},
+            ],
+            ops.graph_project_info()["revision"],
+            source="manual",
+        ),
+        1,
+    )
+    # 从事件 3 起，二十九岁不再是状态。
+    ops.property_supersede(
+        [{"target_id": "v1", "event_id": "3", "reason": "被后一条披露取代"}]
+    )
+
+    # 站在事件 2：读者看到的还是二十九岁。
+    item = ops.property_node_summary("1", cut="2")["properties"][0]
+    assert [row["value"] for row in item["records"]] == ["二十九岁"]
+
+    # 在这里撤它，说的是「从来不算」——这是另一句话，要写得进去。
+    assert ops.property_retract(["v1"], "这句读错了")["retracted"] == ["v1"]
+    assert ops.property_node_summary("1", cut="2")["properties"] == []
+
+    # 再说一遍就真的没意义了。
+    assert ops.property_retract(["v1"], "再说一次")["retracted"] == []
+
+

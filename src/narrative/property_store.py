@@ -1008,10 +1008,16 @@ class PropertyStore:
         by_id = {
             record["id"]: record for record in records if isinstance(record.get("id"), str)
         }
-        already = {
-            record.get("target_id") for record in records
-            if record.get("kind") == "property_retraction"
-        }
+        # 一个目标现有的那条撤回。同一个说法不用说第二遍，但「从某处起不算」和
+        # 「从来不算」是两句话——站在更早的阅读位置上撤一条已经被取代的记录，
+        # 说的是后者；不写进去，读者在那个位置怎么点都撤不动。
+        already: dict[str, dict] = {}
+        for record in records:
+            if (
+                record.get("kind") == "property_retraction"
+                and isinstance(record.get("target_id"), str)
+            ):
+                already[record["target_id"]] = record
         pending: list[dict] = []
         for target in dict.fromkeys(targets):
             record = by_id.get(target)
@@ -1022,8 +1028,11 @@ class PropertyStore:
                 "property_rename",
             }:
                 raise ValueError("只有取值、分类、归并或改名记录可以撤回")
-            if target in already:
-                continue
+            existing = already.get(target)
+            if existing is not None:
+                # 已经是「从来不算」，或者这次也是「从某个事件起不算」：没有新说法。
+                if existing.get("event_id") is None or event_id is not None:
+                    continue
             item: dict = {
                 "kind": "property_retraction",
                 "id": f"retract_{uuid4().hex[:12]}",
