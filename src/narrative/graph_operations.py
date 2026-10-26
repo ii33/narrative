@@ -471,12 +471,18 @@ class GraphOperations:
         return self.properties.supersede(pairs, note)
 
     def node_editor(self, node_id: str, cut: object = None) -> dict:
-        """Everything the node editor needs: the node, its history, the events.
+        """Everything the node editor needs: the node, its properties, the events.
 
-        With a reading cut the history is what the reader had met by then: later
-        disclosures are not shown, and a record invalidated after that point still
-        counts. That view is read-only — editing belongs to the present, and an
-        edit made while looking at the past would land outside the window.
+        The editor is about the present: only what still stands at the reading
+        position is listed, and an aspect with no standing value is not listed at
+        all — there is nothing left to correct, and a row that can only be looked
+        at invites edits that go nowhere. Invalidated disclosures are not lost:
+        the browsing pane's 「全部」 answers what was said over time and why a
+        record stopped counting.
+
+        With a reading cut the properties are what the reader had met by then.
+        That view is a window, not a lock: an edit made while looking at the past
+        is written at the disclosure the reader is standing on.
         """
         from .browse_view import steps
 
@@ -487,13 +493,14 @@ class GraphOperations:
         if node is None:
             raise ValueError("节点不存在")
         summary = self.properties.node_properties(
-            node_id, cut=cut, include_retracted=True
+            node_id, cut=cut, include_retracted=False
         )
+        properties = [item for item in summary["properties"] if not item.get("retracted")]
         names = {item["id"]: item.get("name") or item["id"] for item in snapshot["nodes"]}
         return {
             "node_id": node_id,
             "node": node,
-            "properties": summary["properties"],
+            "properties": properties,
             "events": steps(snapshot, "event"),
             "revision": summary["revision"],
             "cut": summary.get("cut"),

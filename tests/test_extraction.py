@@ -777,12 +777,14 @@ def test_node_properties_orders_by_reading_not_write_order(tmp_path: Path) -> No
     assert item["invalid_count"] == 1
     assert item["value"] == "三十三岁"
 
-    # 编辑器看全历史：失效的那条还在，并带着失效的时间点。
+    # 编辑器只管现在：失效的那条不在列表里，但记录本身没有被删掉。
     rows = ops.node_editor("1")["properties"][0]["records"]
-    assert [(row["value"], row["valid"], row["invalidated_at"]) for row in rows] == [
-        ("二十九岁", False, "交代年龄"),
-        ("三十三岁", True, ""),
+    assert [(row["value"], row["valid"]) for row in rows] == [("三十三岁", True)]
+    stored = [
+        record for record in ops.property_records(include_retracted=True)
+        if record.get("kind") == "property_value"
     ]
+    assert {record["value"] for record in stored} == {"二十九岁", "三十三岁"}
 
 
 def test_node_properties_keeps_one_line_per_aspect(tmp_path: Path) -> None:

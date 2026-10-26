@@ -1218,12 +1218,6 @@ class PropertyStore:
 
         items: list[dict] = []
         hidden_total = 0
-        # An aspect can span two categories (state = 脸色铁青 in 外貌, state = 笑了
-        # in 心理与意图). A slice with nothing left earns a line only when the
-        # aspect as a whole has no valid value; otherwise the survivors already
-        # say what is known, and a ghost row would just repeat the edit.
-        standing: dict[str, int] = {}
-        newest: dict[str, tuple[tuple, str]] = {}
         # One aspect has one state, even when its records were classified into two
         # categories. Which record holds it is decided here, across slices, so the
         # other slice cannot claim a current value of its own.
@@ -1232,17 +1226,13 @@ class PropertyStore:
             for entry in entries:
                 record_id = entry["record"].get("id")
                 key = position(entry["record"])
-                # The ghost line belongs to the slice the reader actually reached,
-                # not to a record beyond the cut.
+                # Only the disclosures the reader has already reached count.
                 if cut_position is not None and key > cut_position:
                     continue
                 if record_id not in invalid:
-                    standing[aspect_key] = standing.get(aspect_key, 0) + 1
                     if aspect_key not in holding or key > holding[aspect_key][0]:
                         holding[aspect_key] = (key, record_id)
                     shown_categories.setdefault(aspect_key, set()).add(category_key)
-                if aspect_key not in newest or key > newest[aspect_key][0]:
-                    newest[aspect_key] = (key, category_key)
 
         for (aspect, category), line in lines.items():
             ordered = sorted(line, key=lambda entry: position(entry["record"]))
@@ -1271,43 +1261,8 @@ class PropertyStore:
                 1 for entry in ordered if entry["record"].get("id") in invalid
             )
             if not kept:
-                # One line for the aspect, in the category of its newest record —
-                # not one ghost per category it used to sit in.
-                if standing.get(aspect, 0) > 0 or newest.get(aspect, (None, ""))[1] != category:
-                    continue
-                property_ids = sorted({entry["property_id"] for entry in ordered})
-                items.append({
-                    "property_id": property_ids[-1],
-                    "property_ids": property_ids,
-                    "aspect": aspect,
-                    "label": property_labels.label_for(
-                        aspect if aspect in property_ids else property_ids[-1]
-                    ),
-                    "category": category,
-                    "category_source": ordered[-1]["category_source"],
-                    "other_categories": sorted(
-                        shown_categories.get(aspect, set()) - {category}
-                    ),
-                    "value": None,
-                    "value_node": None,
-                    "value_type": None,
-                    "scope": None,
-                    "scopes": sorted({
-                        entry["record"].get("scope", "world") for entry in ordered
-                    }),
-                    "holder_id": None,
-                    "holder_name": None,
-                    "event_id": None,
-                    "start": None,
-                    "disclosed_at": None,
-                    "is_current": False,
-                    "retracted": True,
-                    "valid_count": 0,
-                    "invalid_count": invalid_count,
-                    "record_count": 0,
-                    "later_count": later,
-                    "records": [],
-                })
+                # 「最新」只回答「现在是什么」：一条都不剩的方面不在这里出现。
+                # 它说过什么、为什么不算数，去「全部」看——那里失效的会逐条列出。
                 continue
             ordered = kept
             property_ids = sorted({entry["property_id"] for entry in ordered})

@@ -730,17 +730,38 @@ def test_the_node_editor_corrects_and_invalidates(workspace) -> None:
     retracted = _pump(app, results, "property_retract")
     assert retracted["retracted"]
 
-    # 撤回之后编辑器仍然看得到那条记录，并带着原因。
+    # 撤回之后这条属性从编辑器里消失：编辑器只回答「现在是什么」。
     del results[:]
     editor.reload()
     payload = _pump(app, results, "node_editor")
-    item = next(
-        entry for entry in _value(editor.property("properties"))
-        if entry["label"] == "持有者"
-    )
-    assert all(not row["valid"] for row in item["records"])
-    assert item["records"][0]["invalid_reason"] == "这条读错了"
+    labels = {entry["label"] for entry in _value(editor.property("properties"))}
+    assert "持有者" not in labels
 
+
+
+def test_two_rows_of_one_aspect_do_not_both_open_the_form(workspace) -> None:
+    """同一个 state 分在两个大类下时，行头文字一样：表单只能开在点的那一行。"""
+    app, _bridge, page, results, _errors = workspace
+    del results[:]
+    editor = page.findChild(object, "nodeEditor")
+    editor.openFor("1")
+    payload = _pump(app, results, "node_editor")
+    app.processEvents()
+
+    rows = [item for item in payload["properties"] if item["property_id"] == "state"]
+    assert len(rows) == 2
+    # 两行的 label 都是「状态」——按名字匹配会让两个表单同时出现。
+    assert {item["label"] for item in rows} == {"状态"}
+    keys = {item["property_id"] + "|" + item["category"] for item in rows}
+    assert len(keys) == 2
+
+    editor.startRetract(rows[0])
+    assert editor.property("retractKey") == rows[0]["property_id"] + "|" + rows[0]["category"]
+    # 只有一行对得上这个 key。
+    assert sum(
+        1 for item in rows
+        if item["property_id"] + "|" + item["category"] == editor.property("retractKey")
+    ) == 1
 
 
 def test_the_node_editor_follows_the_reading_position(workspace) -> None:

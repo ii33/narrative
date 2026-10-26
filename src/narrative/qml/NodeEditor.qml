@@ -20,7 +20,9 @@ Dialog {
     property string cutEventId: ""
 
     // 正在更正哪条记录；正在失效哪条属性。
+    // 归属用「行」而不是属性名：同一个 state 可能分在两个大类下，按名字匹配会同时开出两个表单。
     property string editRecordId: ""
+    property string editKey: ""
     property string editPropertyId: ""
     property string editSourceId: ""
     property string editValue: ""
@@ -28,6 +30,7 @@ Dialog {
     property string editQuote: ""
     property bool editRetractOld: true
     property var retractTargets: []
+    property string retractKey: ""
     property string retractLabel: ""
     property string retractReason: ""
     // 正在改名哪一行：一个方面可能有两个名字，改的是整行。
@@ -57,8 +60,10 @@ Dialog {
 
     function resetForms() {
         editRecordId = ""
+        editKey = ""
         editPropertyId = ""
         retractTargets = []
+        retractKey = ""
         retractLabel = ""
         retractReason = ""
         renameKey = ""
@@ -118,6 +123,7 @@ Dialog {
 
     function startEdit(item, record) {
         editRecordId = record.id
+        editKey = rowKey(item)
         editPropertyId = item.property_id
         editSourceId = record.disclosure ? (record.disclosure.source_id || "") : ""
         editValue = String(record.value === null || record.value === undefined ? "" : record.value)
@@ -128,6 +134,7 @@ Dialog {
         editQuote = record.evidence ? record.evidence.quote : ""
         editRetractOld = true
         retractTargets = []
+        retractKey = ""
     }
 
     function submitEdit() {
@@ -149,9 +156,11 @@ Dialog {
         for (var i = 0; i < (item.records || []).length; ++i)
             if (item.records[i].valid) ids.push(item.records[i].id)
         retractTargets = ids
+        retractKey = rowKey(item)
         retractLabel = item.label || item.property_id
         retractReason = ""
         editRecordId = ""
+        editKey = ""
     }
 
     function submitRetract() {
@@ -354,12 +363,13 @@ Dialog {
                             }
                             Label {
                                 Layout.fillWidth: true
-                                text: modelData.retracted ? "（已失效）" : editor.host.valueText(modelData)
-                                color: modelData.retracted ? t.muted : t.body
+                                text: editor.host.valueText(modelData)
+                                color: t.body
                                 font.pixelSize: 12
                                 elide: Text.ElideRight
                             }
                             Label {
+                                visible: (modelData.records || []).length > 1
                                 text: (modelData.records || []).length + " 条"
                                 color: t.muted
                                 font.pixelSize: 10
@@ -392,7 +402,8 @@ Dialog {
                             }
                         }
 
-                        // 记录历史：哪条当前、哪条被撤回、撤回原因。
+                        // 这一行现在还站得住的披露。失效的不在这里：它们属于浏览区的「全部」，
+                        // 编辑器只回答「现在是什么」。
                         Repeater {
                             model: modelData.records || []
 
@@ -403,23 +414,11 @@ Dialog {
                                 Layout.leftMargin: 18
                                 spacing: 6
                                 Label {
-                                    Layout.preferredWidth: 34
-                                    // 有效就是有效，不分「当前/历史」：谁被取代由记录上的
-                                    // 失效标记说，不由位置推算。
-                                    text: modelData.valid ? "有效" : "失效"
-                                    color: modelData.valid ? t.ok : t.bad
-                                    font.pixelSize: 9
-                                }
-                                Label {
                                     Layout.fillWidth: true
                                     text: String(modelData.value === null || modelData.value === undefined
                                         ? "（空）" : modelData.value)
                                         + (modelData.event_name ? " · " + modelData.event_name : "")
-                                        + (!modelData.valid && modelData.invalidated_at
-                                            ? " · 失效于「" + modelData.invalidated_at + "」" : "")
-                                        + (!modelData.valid && modelData.invalid_reason
-                                            ? "：" + modelData.invalid_reason : "")
-                                    color: modelData.valid ? t.body : t.muted
+                                    color: t.body
                                     font.pixelSize: 10
                                     elide: Text.ElideRight
                                 }
@@ -431,8 +430,8 @@ Dialog {
                             Layout.fillWidth: true
                             Layout.leftMargin: 18
                             spacing: 4
-                            visible: editor.editPropertyId === modelData.property_id
-                                && editor.editRecordId.length > 0
+                            visible: editor.editKey.length > 0
+                                && editor.editKey === editor.rowKey(modelData)
 
                             RowLayout {
                                 Layout.fillWidth: true
@@ -443,6 +442,7 @@ Dialog {
                                     Layout.fillWidth: true
                                     text: editor.editValue
                                     onTextChanged: editor.editValue = text
+                                    onAccepted: editor.submitEdit()
                                 }
                             }
                             RowLayout {
@@ -476,6 +476,7 @@ Dialog {
                                     text: editor.editQuote
                                     placeholderText: "逐字复制；留空则不校验"
                                     onTextChanged: editor.editQuote = text
+                                    onAccepted: editor.submitEdit()
                                 }
                             }
                             RowLayout {
@@ -565,8 +566,8 @@ Dialog {
                             Layout.fillWidth: true
                             Layout.leftMargin: 18
                             spacing: 4
-                            visible: editor.retractTargets.length > 0
-                                && editor.retractLabel === (modelData.label || modelData.property_id)
+                            visible: editor.retractKey.length > 0
+                                && editor.retractKey === editor.rowKey(modelData)
 
                             RowLayout {
                                 Layout.fillWidth: true
@@ -584,6 +585,10 @@ Dialog {
                                     placeholderText: "原因（必填）"
                                     text: editor.retractReason
                                     onTextChanged: editor.retractReason = text
+                                    onAccepted: {
+                                        if (editor.retractReason.trim().length > 0)
+                                            editor.submitRetract()
+                                    }
                                 }
                                 Button {
                                     text: "取消"

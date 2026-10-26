@@ -57,7 +57,8 @@ def test_retracting_a_record_hides_it_from_reading(tmp_path: Path) -> None:
     assert item["value"] == "二十九岁"
 
 
-def test_the_editor_sees_what_was_retracted(tmp_path: Path) -> None:
+def test_the_editor_lists_only_what_still_stands(tmp_path: Path) -> None:
+    """编辑器回答「现在是什么」：失效的披露不进列表，但记录一条都没删。"""
     ops = _project(tmp_path / "editor.sqlite3")
     ops.property_retract(["v2"], "读错了")
 
@@ -66,12 +67,23 @@ def test_the_editor_sees_what_was_retracted(tmp_path: Path) -> None:
     assert payload["node"]["name"] == "林舟"
     assert [event["name"] for event in payload["events"]] == ["交代年龄"]
     item = payload["properties"][0]
-    rows = {row["id"]: row for row in item["records"]}
-    assert rows["v2"]["valid"] is False
-    assert rows["v2"]["invalid_reason"] == "读错了"
-    # 没给时间点的失效是「读错了」，不是「被取代」：它在任何阅读位置都不算数。
-    assert rows["v2"]["invalidated_at"] == ""
-    assert rows["v1"]["valid"] is True
+    assert [(row["id"], row["value"]) for row in item["records"]] == [("v1", "二十九岁")]
+    # 撤回不是删除：记录还在库里，带着原因，只是不再进编辑器。
+    stored = {
+        record["id"]: record for record in ops.property_records(include_retracted=True)
+    }
+    assert stored["v2"]["value"] == "三十岁"
+
+
+def test_an_aspect_with_nothing_left_is_not_listed(tmp_path: Path) -> None:
+    ops = _project(tmp_path / "empty.sqlite3")
+    ops.property_retract(["v1", "v2"], "整条读错了")
+
+    assert ops.node_editor("1")["properties"] == []
+    # 浏览区的「全部」仍然看得到它说过什么、为什么不算数。
+    everything = ops.property_node_summary("1", include_invalid=True)["properties"]
+    assert [row["value"] for row in everything[0]["records"]] == ["二十九岁", "三十岁"]
+    assert [row["valid"] for row in everything[0]["records"]] == [False, False]
 
 
 def test_retraction_needs_a_reason_and_a_real_record(tmp_path: Path) -> None:
@@ -107,26 +119,19 @@ def test_a_partial_retraction_keeps_the_line_and_counts_the_loss(tmp_path: Path)
     assert [row["value"] for row in item["records"]] == ["二十九岁"]
 
 
-def test_an_aspect_with_nothing_left_says_so_instead_of_vanishing(tmp_path: Path) -> None:
-    """整条失效是一句答案，不能让它悄悄消失——否则看不见自己做过什么。"""
+def test_an_aspect_with_nothing_left_is_gone_from_the_pane(tmp_path: Path) -> None:
+    """整条失效之后，「最新」不再列它：这一刻它什么都没有，空行只会像还能编辑。"""
     ops = _project(tmp_path / "gone.sqlite3")
     ops.property_retract(["v1", "v2"], "两句都读错了")
 
-    items = ops.property_node_summary("1")["properties"]
-    assert len(items) == 1
-    item = items[0]
-    assert item["label"] == "年龄"
-    assert item["retracted"] is True
-    # 值不再可见，但「失效了几条」还在。
-    assert item["value"] is None
-    assert item["record_count"] == 0
-    assert item["invalid_count"] == 2
-    assert item["records"] == []
+    assert ops.property_node_summary("1")["properties"] == []
+    assert ops.node_editor("1")["properties"] == []
 
-    # 编辑器里仍然看得见这两条和原因。
-    rows = ops.node_editor("1")["properties"][0]["records"]
-    assert [(row["value"], row["valid"]) for row in rows] == [
+    # 记录没有被删掉：「全部」里两条都在，逐条标失效并带着原因。
+    union = ops.property_node_summary("1", include_invalid=True)["properties"]
+    assert len(union) == 1
+    assert union[0]["retracted"] is True
+    assert [(row["value"], row["valid"]) for row in union[0]["records"]] == [
         ("二十九岁", False), ("三十岁", False),
     ]
-    assert {row["invalid_reason"] for row in rows} == {"两句都读错了"}
-
+    assert {row["invalid_reason"] for row in union[0]["records"]} == {"两句都读错了"}
