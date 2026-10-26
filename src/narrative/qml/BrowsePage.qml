@@ -416,7 +416,7 @@ Item {
             quote: addQuoteField.text,
             source_id: sourceId || ""
         })
-        addPropertyDialog.close()
+        // 不在这里关：预检没过时要把填好的内容留在框里，等结果再决定。
     }
 
     function saveCategorySettings() {
@@ -520,6 +520,7 @@ Item {
                 if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
             } else if (kind === "property_add") {
                 if (payload.status === "accepted") {
+                    addPropertyDialog.close()
                     app.toast(page.editToast("补录已生效", payload), payload.outside_window === true)
                     if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
                 } else {

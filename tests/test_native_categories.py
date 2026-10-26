@@ -862,6 +862,124 @@ def test_two_rows_of_one_aspect_do_not_both_open_the_form(workspace) -> None:
     ) == 1
 
 
+def test_correcting_twice_works(workspace) -> None:
+    """第一次更正之后表单收起，第二次还能接着改——不能拿着空 id 再提交一次。"""
+    app, _bridge, page, results, _errors = workspace
+    del results[:]
+    editor = page.findChild(object, "nodeEditor")
+    editor.openFor("3")
+    _pump(app, results, "node_editor")
+    app.processEvents()
+
+    def row():
+        items = _value(editor.property("properties"))
+        return next(entry for entry in items if entry["property_id"] == "state")
+
+    item = row()
+    editor.startEdit(item, item["records"][-1])
+    editor.setProperty("editValue", "完好如初")
+    del results[:]
+    editor.submitEdit()
+    assert _pump(app, results, "property_correct")["status"] == "accepted"
+    # 提交即收起：留着表单再点一次，就会拿空 id 去更正。
+    assert editor.property("editKey") == ""
+    assert editor.property("editRecordId") == ""
+    _pump(app, results, "node_editor")
+
+    item = row()
+    editor.startEdit(item, item["records"][-1])
+    editor.setProperty("editValue", "略有磨损")
+    del results[:]
+    editor.submitEdit()
+    assert _pump(app, results, "property_correct")["status"] == "accepted"
+    _pump(app, results, "node_editor")
+    app.processEvents()
+    assert row()["value"] == "略有磨损"
+
+
+def test_retracting_once_closes_the_form(workspace) -> None:
+    """失效提交之后收起表单：不留一个「0 条记录」的空表单让人再点。"""
+    app, _bridge, page, results, _errors = workspace
+    del results[:]
+    editor = page.findChild(object, "nodeEditor")
+    editor.openFor("3")
+    payload = _pump(app, results, "node_editor")
+    app.processEvents()
+
+    item = next(entry for entry in payload["properties"] if entry["property_id"] == "holder")
+    editor.startRetract(item)
+    assert _value(editor.property("retractTargets")) == [item["records"][0]["id"]]
+
+    editor.setProperty("retractReason", "这条读错了")
+    del results[:]
+    editor.submitRetract()
+    _pump(app, results, "property_retract")
+    assert editor.property("retractKey") == ""
+    assert _value(editor.property("retractTargets")) == []
+
+
+def test_a_row_without_valid_records_cannot_open_the_retract_form(workspace) -> None:
+    """界面还是旧数据时，点「失效」不能打开一个 0 条记录的表单。"""
+    app, _bridge, page, results, _errors = workspace
+    del results[:]
+    editor = page.findChild(object, "nodeEditor")
+    editor.openFor("1")
+    _pump(app, results, "node_editor")
+    app.processEvents()
+
+    stale = {
+        "property_id": "state", "category": "外貌", "label": "状态",
+        "records": [{"id": "v1", "value": "脸色铁青", "valid": False}],
+    }
+    editor.startRetract(stale)
+    assert editor.property("retractKey") == ""
+    assert _value(editor.property("retractTargets")) == []
+
+
+def test_a_failed_correction_keeps_the_form(workspace) -> None:
+    """预检没过时表单要留在原样：值还在，改一处就能再交，不用重打。"""
+    app, _bridge, page, results, _errors = workspace
+    del results[:]
+    editor = page.findChild(object, "nodeEditor")
+    editor.openFor("3")
+    payload = _pump(app, results, "node_editor")
+    app.processEvents()
+
+    item = next(entry for entry in payload["properties"] if entry["property_id"] == "state")
+    record = item["records"][-1]
+    editor.startEdit(item, record)
+    # 夹具里的记录没有 disclosure，手动给它一个源，才能用「引文不在原文里」触发预检失败。
+    editor.setProperty("editSourceId", payload["node"]["disclosure"]["source_id"])
+    editor.setProperty("editValue", "完好如初")
+    editor.setProperty("editQuote", "原文里没有这句话")
+    del results[:]
+    editor.submitEdit()
+    failed = _pump(app, results, "property_correct")
+    assert failed["status"] == "precheck_failed"
+
+    assert editor.property("editKey") == item["property_id"] + "|" + item["category"]
+    assert editor.property("editRecordId") == record["id"]
+    assert editor.property("editValue") == "完好如初"
+
+
+def test_a_failed_add_keeps_the_dialog(workspace) -> None:
+    app, _bridge, page, results, _errors = workspace
+    del results[:]
+    page.openAddProperty()
+    app.processEvents()
+    page.findChild(object, "addPropertyField").setProperty("text", "state")
+    page.findChild(object, "addValueField").setProperty("text", "站着没动")
+    page.findChild(object, "addQuoteField").setProperty("text", "原文里没有这句话")
+    app.processEvents()
+
+    page.submitAddProperty()
+    failed = _pump(app, results, "property_add")
+    assert failed["status"] == "precheck_failed"
+    # 框还开着，填好的内容还在。
+    assert page.findChild(object, "addPropertyDialog").property("opened") is True
+    assert page.findChild(object, "addValueField").property("text") == "站着没动"
+
+
 def test_the_node_editor_follows_the_reading_position(workspace) -> None:
     """按阅读位置看时，编辑器只列那一刻已经读到的属性，并且只读。"""
     app, _bridge, page, results, _errors = workspace

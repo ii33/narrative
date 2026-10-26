@@ -23,6 +23,9 @@ Dialog {
     // 归属用「行」而不是属性名：同一个 state 可能分在两个大类下，按名字匹配会同时开出两个表单。
     property string editRecordId: ""
     property string editKey: ""
+    // 提交中的那一条：预检没过时用它把表单原样放回来，不用重打一遍。
+    property string editPendingId: ""
+    property string editPendingKey: ""
     property string editPropertyId: ""
     property string editSourceId: ""
     property string editValue: ""
@@ -137,8 +140,19 @@ Dialog {
         retractKey = ""
     }
 
+    // 这一行还有没有站得住的记录。编辑器的列表本来只列站得住的，
+    // 但表单是异步重载的，旧数据还在屏幕上时不能让人点进一个空表单。
+    function hasValid(item) {
+        for (var i = 0; i < (item.records || []).length; ++i)
+            if (item.records[i].valid) return true
+        return false
+    }
+
     function submitEdit() {
+        if (editRecordId.length === 0) return
         var event = events[editEventIndex] || ({})
+        editPendingId = editRecordId
+        editPendingKey = editKey
         bridge.correctPropertyRecord(editRecordId, {
             node_id: nodeId,
             property_id: editPropertyId,
@@ -148,13 +162,31 @@ Dialog {
             source_id: editSourceId,
             retract_old: editRetractOld
         })
+        // 提交之后表单就收起：editRecordId 已经清空，留着表单的话再点一次
+        // 就是拿空 id 去更正，只会得到一句看不懂的预检错误。
         editRecordId = ""
+        editKey = ""
+    }
+
+    // 预检没过：把表单和原来的记录放回去，值还在，改一处再交。
+    function restoreEdit() {
+        if (editPendingId.length === 0) return
+        editRecordId = editPendingId
+        editKey = editPendingKey
+        editPendingId = ""
     }
 
     function startRetract(item) {
         var ids = []
         for (var i = 0; i < (item.records || []).length; ++i)
             if (item.records[i].valid) ids.push(item.records[i].id)
+        if (ids.length === 0) {
+            // 没有可失效的记录：不打开一个「0 条记录」的空表单。
+            retractKey = ""
+            retractTargets = []
+            host.app.toast("这条属性现在没有有效记录", true)
+            return
+        }
         retractTargets = ids
         retractKey = rowKey(item)
         retractLabel = item.label || item.property_id
@@ -167,6 +199,9 @@ Dialog {
         if (retractTargets.length === 0) return
         bridge.retractPropertyRecords(JSON.stringify(retractTargets), retractReason)
         retractTargets = []
+        // 同上：收起表单，别让人对着「0 条记录」再点一次。
+        retractKey = ""
+        retractReason = ""
     }
 
     function submitNode() {
@@ -194,6 +229,14 @@ Dialog {
                     if (editor.visible) editor.reload()
                 }
             } else if (kind === "property_correct" || kind === "property_add") {
+                if (payload.status !== "accepted") {
+                    var problem = (payload.diagnostics || [])[0] || ({})
+                    editor.host.app.toast((kind === "property_add" ? "补录" : "更正")
+                        + "未通过预检：" + (problem.message || "未知原因"), true)
+                    editor.restoreEdit()
+                    return
+                }
+                editPendingId = ""
                 editor.host.notifyEdit(kind === "property_add" ? "补录已生效" : "更正已生效",
                                        payload)
                 editor.reload()
@@ -394,6 +437,7 @@ Dialog {
                                 text: "失效"
                                 flat: true
                                 font.pixelSize: 10
+                                enabled: editor.hasValid(modelData)
                                 onClicked: editor.startRetract(modelData)
                             }
                             Button {
