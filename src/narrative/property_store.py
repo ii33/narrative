@@ -95,30 +95,20 @@ def invalid_at(records: list[dict], cut: tuple | None) -> dict[str, dict]:
     ``cut=None`` means "as of the last thing disclosed".
 
     The answer is a fold over the disclosure chain, not a vote: each retraction
-    takes a record out from its own position on, and a restoration puts it back
-    from *its* position on. Nothing reaches backwards — the stretch where a value
-    was gone stays gone, because a later state is built on the earlier one.
+    takes a record out from its own position on. Nothing reaches backwards — the
+    stretch where a value was gone stays gone, because a later state is built on
+    the earlier one.
     """
     # 按披露位置排，不按写入顺序排：状态是从前一段叠出来的，
     # 写在后头的记录不能改写前面那一段。
     statements = [
         record for record in records
-        if record.get("kind") in {"property_retraction", "property_restoration"}
-        and _applies(record, cut)
+        if record.get("kind") == "property_retraction" and _applies(record, cut)
     ]
     statements.sort(key=_statement_position)
 
     result: dict[str, dict] = {}
     for record in statements:
-        if record.get("kind") == "property_restoration":
-            undone = record.get("target_id")
-            if not isinstance(undone, str):
-                continue
-            # 这条撤回被撤销了：从这一刻起它不再让任何记录失效。
-            for value_id, retraction in list(result.items()):
-                if retraction.get("id") == undone:
-                    del result[value_id]
-            continue
         target = record.get("target_id")
         if isinstance(target, str):
             result[target] = record
@@ -1064,18 +1054,12 @@ class PropertyStore:
         by_id = {
             record["id"]: record for record in records if isinstance(record.get("id"), str)
         }
-        # 现在还活着的撤回（撤销过的不算，撤销之后可以重新撤）。
-        # 同一个说法不用说第二遍，但「从某处起不算」和「从来不算」是两句话——
-        # 站在更早的阅读位置上撤一条已经被取代的记录，说的是后者；
+        # 已经有过的撤回。同一个说法不用说第二遍，但「从某处起不算」和「从来不算」
+        # 是两句话——站在更早的阅读位置上撤一条已经被取代的记录，说的是后者；
         # 不写进去，读者在那个位置怎么点都撤不动。
-        undone = {
-            record.get("target_id") for record in records
-            if record.get("kind") == "property_restoration"
-        }
         live = [
             record for record in records
             if record.get("kind") == "property_retraction"
-            and record.get("id") not in undone
         ]
         pending: list[dict] = []
         for target in dict.fromkeys(targets):
@@ -1124,78 +1108,6 @@ class PropertyStore:
         return {
             "revision": self.accept(candidate, 1),
             "retracted": [record["target_id"] for record in pending],
-            "reason": reason,
-        }
-
-    def restore(
-        self,
-        targets: list[str],
-        reason: str,
-        *,
-        event_id: str | None = None,
-        basis: str = "human",
-    ) -> dict:
-        """Take a retraction back, counting again from this disclosure on.
-
-        ``targets`` are retraction records, not values: what is undone is the
-        statement "this stopped counting", not the value. The restoration has its
-        own position, so the stretch where the value was gone stays gone — a
-        later state is built on the earlier one and never rewrites it.
-
-        A restoration cannot itself be undone. That is the shape of the chain
-        rather than a missing feature: the answer to "I was wrong to retract" is
-        a new statement about the value, not another layer of undoing.
-        """
-        from uuid import uuid4
-
-        reason = (reason or "").strip()
-        if not reason:
-            raise ValueError("撤销失效需要写清原因")
-        if not isinstance(targets, list) or not targets:
-            raise ValueError("请提供要撤销的失效记录")
-        if not event_id:
-            raise ValueError("撤销失效要从某次披露起算，请提供事件")
-        records = self.accepted_records(include_retracted=True)
-        by_id = {
-            record["id"]: record for record in records if isinstance(record.get("id"), str)
-        }
-        undone = {
-            record.get("target_id") for record in records
-            if record.get("kind") == "property_restoration"
-        }
-        pending: list[dict] = []
-        for target in dict.fromkeys(targets):
-            record = by_id.get(target)
-            if record is None:
-                raise ValueError(f"记录不存在：{target}")
-            if record.get("kind") != "property_retraction":
-                raise ValueError("只能撤销失效记录")
-            if target in undone:
-                continue
-            item: dict = {
-                "kind": "property_restoration",
-                "id": f"restore_{uuid4().hex[:12]}",
-                "target_id": target,
-                "reason": reason,
-                "event_id": event_id,
-                "basis": basis,
-            }
-            disclosure = record.get("disclosure") or {}
-            if isinstance(disclosure.get("source_id"), str):
-                item["disclosure"] = {
-                    "source_id": disclosure["source_id"],
-                    "start": record_position(record)[1],
-                }
-            pending.append(item)
-        if not pending:
-            return {"revision": self.store.revision, "restored": [], "reason": reason}
-        revision = self.store.revision
-        candidate = self.propose(
-            pending, revision, source="correction", note=f"撤销失效：{reason}"
-        )
-        return {
-            "revision": self.accept(candidate, 1),
-            "restored": [record["target_id"] for record in pending],
             "reason": reason,
         }
 
@@ -1262,8 +1174,6 @@ class PropertyStore:
         node_id: str,
         as_of_revision: int | None = None,
         cut: object = None,
-        *,
-        include_retracted: bool = False,
     ) -> dict:
         """Every property a node carries, grouped for reading.
 
@@ -1279,6 +1189,10 @@ class PropertyStore:
         human move wins, then what the extractor wrote, then a name/value hint,
         then 其他; a record whose category differs from its neighbours is shown
         under both headings, each carrying only its own records.
+
+        **一条记录只有一件事要回答：还算不算数。** 失效的既不删除也不标记，
+        直接不出现——`valid` 是唯一的那个字段，行上不再有失效条数、失效于哪次披露、
+        失效原因这些派生的说法。
         """
         snapshot = self.store.snapshot(as_of_revision)
         # Read the whole history even when the caller only wants what stands: a
@@ -1392,22 +1306,12 @@ class PropertyStore:
                 ordered = visible
                 if not ordered:
                     continue
-            # Validity is explicit, never derived from the next disclosure. An
-            # invalid record is still a disclosure: it is hidden here, not
-            # deleted, and the editor shows it with the reason it went.
+            # 失效的不显示：它还在库里（撤回不删行），只是这里不出现。
             kept = [
                 entry for entry in ordered
-                if include_retracted or entry["record"].get("id") not in invalid
+                if entry["record"].get("id") not in invalid
             ]
-            # Counted per line, not per aspect: each row says how many of its own
-            # records went, which is what the reader is looking at. It is the same
-            # number whether or not the invalid rows themselves are listed.
-            invalid_count = sum(
-                1 for entry in ordered if entry["record"].get("id") in invalid
-            )
             if not kept:
-                # 「最新」只回答「现在是什么」：一条都不剩的方面不在这里出现。
-                # 它说过什么、为什么不算数，去「全部」看——那里失效的会逐条列出。
                 continue
             ordered = kept
             property_ids = sorted({entry["property_id"] for entry in ordered})
@@ -1416,7 +1320,6 @@ class PropertyStore:
             decorated: list[dict] = []
             for entry in ordered:
                 row = entry["record"]
-                gone = invalid.get(row.get("id")) or {}
                 decorated.append({
                     "id": row.get("id"),
                     "kind": row.get("kind"),
@@ -1442,25 +1345,12 @@ class PropertyStore:
                     "property_label": property_labels.label_for(entry["property_id"]),
                     "category": category,
                     "category_source": entry["category_source"],
-                    # Explicit invalidation. `invalidated_at` is the disclosure
-                    # that ended it; empty means "read wrong", which applies
-                    # everywhere instead of from a point on.
-                    "valid": not gone,
-                    "invalidated_at": names.get(gone.get("event_id") or "") or "",
-                    "invalid_reason": gone.get("reason"),
-                    "invalid_basis": gone.get("basis"),
-                    # 是哪条撤回让它失效的：撤销失效要指向这条记录。
-                    "invalidated_by": gone.get("id"),
+                    # 唯一的有效性字段。走到这里的记录都还算数。
+                    "valid": True,
                 })
             latest = decorated[-1]
-            valid_rows = [row for row in decorated if row["valid"]]
-            # The state is what still counts, not what was said last: a value the
-            # audit invalidated is history even if nothing newer replaced it.
-            current = valid_rows[-1] if valid_rows else None
-            # In the union view a row can be listed with no valid value left. The
-            # headline then shows the last thing said, and the row says it no
-            # longer counts — better than an empty row that hides its own content.
-            headline = current or latest
+            current = latest
+            headline = latest
             # Only the slice holding the aspect's state is current; the other one is
             # the same aspect seen through another category, so it says it is
             # history. Two values disclosed at the same position are both current —
@@ -1499,9 +1389,6 @@ class PropertyStore:
                 "start": (headline["disclosure"] or {}).get("start"),
                 "disclosed_at": headline["event_name"],
                 "is_current": is_current,
-                "retracted": current is None,
-                "valid_count": len(valid_rows),
-                "invalid_count": invalid_count,
                 "record_count": len(decorated),
                 # Disclosures after the cut: the pane says how many it is not
                 # showing instead of pretending this is everything.

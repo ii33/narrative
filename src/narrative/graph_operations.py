@@ -410,20 +410,15 @@ class GraphOperations:
 
         return browse_view(self.graph_snapshot(), **spec)
 
-    def property_node_summary(
-        self, node_id: str, cut: object = None, *, include_invalid: bool = False
-    ) -> dict:
+    def property_node_summary(self, node_id: str, cut: object = None) -> dict:
         """Read-only: every property of one node, with its disclosure sequence.
 
         ``cut`` is an event id: the projection then answers "what was known when
         the reader reached that event" instead of "what is known now".
-        ``include_invalid`` switches the answer from "the state at that point" to
-        "every disclosure up to it" — the union of what was said over time, with
-        each record marked valid or invalid.
+
+        失效的记录不出现——撤回不删行，但它不再是这个节点的一个说法。
         """
-        return self.properties.node_properties(
-            node_id, cut=cut, include_retracted=include_invalid
-        )
+        return self.properties.node_properties(node_id, cut=cut)
 
     def property_categories(self) -> dict[str, list[str]]:
         """Display categories per node type; loose groupings, editable at will."""
@@ -466,16 +461,6 @@ class GraphOperations:
         """
         return self.properties.retract(targets, reason, event_id=event_id)
 
-    def property_restore(
-        self, targets: list[str], reason: str, *, event_id: str | None = None
-    ) -> dict:
-        """Take a retraction back, counting again from this disclosure on.
-
-        ``targets`` are retraction records. The restoration has its own position,
-        so what was already read stays as it was read.
-        """
-        return self.properties.restore(targets, reason, event_id=event_id)
-
     def property_supersede(self, pairs: list[dict], note: str = "") -> dict:
         """Mark older values invalid from the disclosure that replaced them."""
         return self.properties.supersede(pairs, note)
@@ -502,10 +487,8 @@ class GraphOperations:
         )
         if node is None:
             raise ValueError("节点不存在")
-        summary = self.properties.node_properties(
-            node_id, cut=cut, include_retracted=False
-        )
-        properties = [item for item in summary["properties"] if not item.get("retracted")]
+        summary = self.properties.node_properties(node_id, cut=cut)
+        properties = summary["properties"]
         names = {item["id"]: item.get("name") or item["id"] for item in snapshot["nodes"]}
         return {
             "node_id": node_id,

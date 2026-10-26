@@ -143,12 +143,10 @@ def test_an_invalid_value_still_counts_before_the_disclosure_that_ended_it(
     early = ops.property_node_summary("1", cut="2")["properties"][0]
     assert [row["value"] for row in early["records"]] == ["矮小"]
     assert early["value"] == "矮小"
-    assert early["invalid_count"] == 0
 
-    # 读到事件 3：旧值失效，新值接手。
+    # 读到事件 3：旧值不再显示，新值接手。
     late = ops.property_node_summary("1")["properties"][0]
     assert [row["value"] for row in late["records"]] == ["变高了"]
-    assert late["invalid_count"] == 1
     assert late["value"] == "变高了"
 
 
@@ -214,8 +212,8 @@ def test_a_judgment_that_cannot_be_located_is_dropped(tmp_path: Path) -> None:
 
 # -- 两个问题，两种回答 ----------------------------------------------------
 
-def test_the_projection_answers_state_or_union(tmp_path: Path) -> None:
-    """「最新」是这一刻的状态，「全部」是历次披露的并集。"""
+def test_an_invalidated_value_is_not_shown_at_all(tmp_path: Path) -> None:
+    """失效只有一个结果：不显示。没有并集视图，也没有失效条数、失效于哪次披露。"""
     ops, source = _project(tmp_path / "union.sqlite3")
     ops.property_accept(
         ops.property_propose(
@@ -234,35 +232,16 @@ def test_the_projection_answers_state_or_union(tmp_path: Path) -> None:
     ops.property_supersede([{"target_id": "v1", "event_id": "3", "reason": "被取代"}])
 
     state = ops.property_node_summary("1")["properties"][0]
+    # 只剩站得住的那条；被取代的那条不出现，行上也没有任何失效的派生说法。
     assert [row["value"] for row in state["records"]] == ["变高了"]
-    assert (state["valid_count"], state["invalid_count"]) == (1, 1)
+    assert set(state) & {"invalid_count", "valid_count", "retracted"} == set()
+    assert all(row["valid"] for row in state["records"])
 
-    union = ops.property_node_summary("1", include_invalid=True)["properties"][0]
-    # 并集：两条都在，各自标着有效/失效。
-    assert [row["value"] for row in union["records"]] == ["矮小", "变高了"]
-    assert [row["valid"] for row in union["records"]] == [False, True]
-    assert union["records"][0]["invalidated_at"] == "他笑了"
-    # 失效的那条仍然算在这一行里，不是被抹掉。
-    assert (union["valid_count"], union["invalid_count"]) == (1, 1)
+    # 记录本身还在库里：撤回不删行。
+    stored = [
+        record["value"] for record in ops.property_records(include_retracted=True)
+        if record.get("kind") == "property_value"
+    ]
+    assert stored == ["矮小", "变高了"]
 
 
-def test_the_union_view_keeps_the_headline_of_a_fully_invalid_row(tmp_path: Path) -> None:
-    """整条失效的行在并集里仍然显示它说过的最后一句，而不是一个空行。"""
-    ops, source = _project(tmp_path / "gone.sqlite3")
-    ops.property_accept(
-        ops.property_propose(
-            [_definition("height"),
-             _value("v1", "矮小", "2", 0, property_id="height", source_id=source,
-                    evidence={"source_id": source, "quote": "林舟脸色铁青"})],
-            ops.graph_project_info()["revision"],
-            source="manual",
-        ),
-        1,
-    )
-    ops.property_retract(["v1"], "原文没说身高")
-
-    union = ops.property_node_summary("1", include_invalid=True)["properties"][0]
-    assert union["retracted"] is True
-    assert union["value"] == "矮小"
-    assert union["record_count"] == 1
-    assert union["invalid_count"] == 1

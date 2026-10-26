@@ -765,16 +765,14 @@ def test_node_properties_orders_by_reading_not_write_order(tmp_path: Path) -> No
     # 有效期不再算：两条都还是有效记录，谁被取代要由失效标记来说。
     assert item["disclosed_at"] == "交代年龄"
     assert [row["valid"] for row in item["records"]] == [True, True]
-    assert (item["valid_count"], item["invalid_count"]) == (2, 0)
 
     # 审核轮判定「旧值已被取代」之后，早的那条从取代它的披露起不再算数。
     ops.property_supersede([
         {"target_id": item["records"][0]["id"], "event_id": "2", "reason": "被后一条披露取代"}
     ])
     item = ops.property_node_summary("1")["properties"][0]
-    # 浏览区只显示站得住的那条，失效的条数说清楚。
+    # 浏览区只显示站得住的那条；失效的那条不出现，也不标注。
     assert [row["value"] for row in item["records"]] == ["三十三岁"]
-    assert item["invalid_count"] == 1
     assert item["value"] == "三十三岁"
 
     # 编辑器只管现在：失效的那条不在列表里，但记录本身没有被删掉。

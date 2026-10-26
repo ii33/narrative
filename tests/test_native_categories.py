@@ -558,53 +558,6 @@ def test_jumping_to_a_listed_node_keeps_the_filters(workspace) -> None:
     assert page.property("relatedOnly") is False
 
 
-def test_the_pane_separates_the_latest_state_from_every_disclosure(workspace) -> None:
-    """「最新」是这一刻的状态，「全部」是历次披露的并集——能失效之后两者不是一回事。"""
-    app, bridge, page, results, _errors = workspace
-
-    # 让林舟的「脸色铁青」从事件 5 起失效：最新只剩一条，全部仍是两条。
-    del results[:]
-    bridge.applySuperseded(json.dumps([
-        {"target_id": "v1", "event_id": "5", "reason": "后来又过了些日子"}
-    ]))
-    _pump(app, results, "property_supersede")
-
-    page.jumpTo("1")
-    _pump(app, results, "browse")
-    _pump(app, results, "detail", "1")
-    _pump(app, results, "node_properties", "1")
-    app.processEvents()
-
-    latest = _value(page.property("propertyRows"))
-    assert page.property("propertyScope") == "latest"
-    assert [row["valueText"] for row in latest] == ["身受重伤"]
-    assert [len(row["records"]) for row in latest] == [1]
-
-    del results[:]
-    page.togglePropertyScope("all")
-    _pump(app, results, "property_scope")
-    _pump(app, results, "node_properties", "1")
-    app.processEvents()
-
-    everything = _value(page.property("propertyRows"))
-    assert page.property("propertyScope") == "all"
-    # 并集：失效的那条也列出来（它单独在一个大类下），带着标记和失效时点。
-    assert len(everything) == 2
-    assert {row["valueText"] for row in everything} == {"脸色铁青", "身受重伤"}
-    invalid = next(row for row in everything if row["valueText"] == "脸色铁青")
-    assert [record["valid"] for record in invalid["records"]] == [False]
-    assert invalid["records"][0]["invalidated_at"] == "后来又过了些日子"
-    assert invalid["countText"] == "共 1 条"
-
-    # 回到「最新」，失效的那条不再列出。
-    del results[:]
-    page.togglePropertyScope("latest")
-    _pump(app, results, "property_scope")
-    _pump(app, results, "node_properties", "1")
-    app.processEvents()
-    assert len(_value(page.property("propertyRows"))[0]["records"]) == 1
-
-
 def test_a_reading_cut_switches_the_state(tmp_path: Path) -> None:
     """切到某个事件，右侧只显示读到这里时已经披露的内容。"""
     app = QApplication.instance() or QApplication([])
@@ -1018,56 +971,6 @@ def test_a_failed_add_keeps_the_dialog(workspace) -> None:
     assert page.findChild(object, "addValueField").property("text") == "站着没动"
 
 
-def test_restoring_a_retraction_from_the_pane(workspace) -> None:
-    """失效的那条在「全部」里带着「撤销失效」；撤销之后它又算数了。"""
-    app, _bridge, page, results, _errors = workspace
-    del results[:]
-    page.select("3")
-    _pump(app, results, "detail", "3")
-    _pump(app, results, "node_properties", "3")
-
-    editor = page.findChild(object, "nodeEditor")
-    editor.openFor("3")
-    payload = _pump(app, results, "node_editor")
-    app.processEvents()
-    item = next(entry for entry in payload["properties"] if entry["property_id"] == "holder")
-    editor.startRetract(item)
-    editor.setProperty("retractReason", "这条读错了")
-    del results[:]
-    editor.submitRetract()
-    retracted = _pump(app, results, "property_retract")
-    assert retracted["retracted"]
-
-    # 切到「全部」：失效的记录还在，并指向那条失效记录。
-    del results[:]
-    page.togglePropertyScope("all")
-    _pump(app, results, "property_scope")
-    _pump(app, results, "node_properties", "3")
-    app.processEvents()
-    rows = _value(page.property("propertyRows"))
-    record = next(
-        row for entry in rows for row in entry["records"] if not row["valid"]
-    )
-    assert record["invalidated_by"]
-    assert record["invalid_reason"] == "这条读错了"
-
-    del results[:]
-    page.askRestore(record)
-    app.processEvents()
-    assert page.property("restoreTarget") == record["invalidated_by"]
-    page.setProperty("restoreReason", "其实没读错")
-    page.submitRestore()
-    restored = _pump(app, results, "property_restore")
-    assert restored["restored"] == [record["invalidated_by"]]
-
-    _pump(app, results, "node_properties", "3")
-    app.processEvents()
-    rows = _value(page.property("propertyRows"))
-    assert all(
-        row["valid"] for entry in rows for row in entry["records"]
-    )
-
-
 def test_a_retraction_counts_from_where_it_was_made(workspace) -> None:
     """失效从你站的位置起算：站在「最新」撤，回到前面的位置仍然看得到它。"""
     app, _bridge, page, results, _errors = workspace
@@ -1134,15 +1037,14 @@ def test_a_correction_always_takes_the_old_record_back(workspace) -> None:
     assert [row["value"] for row in item["records"]] == ["完好如初"]
     assert all(row["valid"] for row in item["records"])
 
-    # 浏览区的「全部」里，原记录还在，标着失效。
+    # 浏览区也一样：原记录不再显示。
     del results[:]
-    page.togglePropertyScope("all")
-    _pump(app, results, "property_scope")
+    _bridge.loadNodeProperties("3")
     _pump(app, results, "node_properties", "3")
     app.processEvents()
-    everything = _value(page.property("propertyRows"))
-    all_records = [row for entry in everything for row in entry["records"]]
-    assert any(not row["valid"] for row in all_records)
+    rows = _value(page.property("propertyRows"))
+    state = next(entry for entry in rows if entry["label"] == "状态")
+    assert [row["value"] for row in state["records"]] == ["完好如初"]
 
 
 def test_retracting_at_a_cut_works_when_it_was_superseded_later(workspace) -> None:

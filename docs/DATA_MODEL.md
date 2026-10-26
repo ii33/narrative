@@ -127,8 +127,8 @@ v6 图项目。两层：来源、对象。对象之间不再有断言层——�
 现在图里只有节点、语境、时间轴、来源顺序和属性记录。场景与事件的包含关系用节点字段
 `events`——一条记录说清"这个场景里有哪些事"，不另建边。
 
-属性记录有七种：`property_definition`、`property_value`、`property_categorization`、
-`property_merge`、`property_rename`、`property_retraction`、`property_restoration`。旧的 `property_initial` / `property_observation` / `event_change`
+属性记录有六种：`property_definition`、`property_value`、`property_categorization`、
+`property_merge`、`property_rename`、`property_retraction`。旧的 `property_initial` / `property_observation` / `event_change`
 已从代码中删除——包括校验、求值和示例。前期开发不保留兼容路径，留着只会让人误以为还能用。
 
 ## 陈述层之二：属性记录
@@ -143,7 +143,6 @@ v6 图项目。两层：来源、对象。对象之间不再有断言层——�
 | `property_merge` | 两个名字读作同一个方面：`alias_id` → `target_id`。读时别名，记录不改名 |
 | `property_rename` | 一个方面换个名字：`from_id` → `to_id`。读时别名，定义跟着搬到新名字 |
 | `property_retraction` | 把序列里的某一条设为失效：`target_id` + `reason` + 可选 `event_id` / `disclosure` / `basis` |
-| `property_restoration` | 撤销一条失效：`target_id`（指向撤回记录）+ `reason` + `event_id`（从哪次披露起重新算） |
 
 归并和改名都**不改写取值记录**：记录保留采集时的名字，投影按别名读。
 区别在定义：归并让旧名字继续作为独立定义存在（它仍然是那个方面的一个拼法），
@@ -161,17 +160,11 @@ v6 图项目。两层：来源、对象。对象之间不再有断言层——�
 **有效期不再计算。** 一条值什么时候结束，由这条失效记录说，不由「下一条披露」推出来。
 投影只回答两件事：这条记录现在还有效吗（`valid`）、它在哪个披露失效（`invalidated_at`）。
 
-### 撤销失效（`property_restoration`）
+**失效只有一个结果：不显示。** 撤回不删行——记录还在库里、审计还能看到——但它不再出现在
+节点的属性里：没有「已失效」标记，没有失效条数，也没有「失效于哪次披露」。一条记录只有
+一个字段回答这件事：还算不算数（`valid`），不算就不出现。
 
-撤销指向的是**那条失效记录**，不是取值记录：撤销的是「这条不算数」这个判断。
-它自带位置，所以从它自己的披露起才重新算——之前那段仍然是空的。
-状态是一段接一段叠出来的，写在后面的记录不回头改写前面已经读过的。
-
-**没有撤销叠撤销**：恢复记录不能再被撤，也不能被任何记录指向。一条撤回最多被撤销一次，
-再说一次什么也不会发生。要改主意，只能对值本身再说一句（新披露、新失效）。
-
-于是 `invalid_at` 是沿披露链的一次折叠，不是投票：每条失效从自己的位置把记录拿出去，
-每条恢复从自己的位置把它放回来；`cut` 决定折叠到哪一步为止。
+`invalid_at` 是沿披露链的一次折叠：每条失效从自己的位置把记录拿出去，`cut` 决定折叠到哪一步。
 界面上的「失效」落在读者当前站的位置（停在「最新」就是最后一个事件），
 「读错了，从来不算」走更正那条路（追加新值 + 撤回旧值）。
 

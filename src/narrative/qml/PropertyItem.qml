@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// 一条属性：当前披露、有效期、完整披露序列。
+// 一条属性：当前值、它披露在哪一次、完整披露序列。失效的记录不出现。
 // 分类只影响显示位置：点分类标签可以把它移到另一个大类，取值本身不动。
 Column {
     id: item
@@ -122,14 +122,10 @@ Column {
             Label {
                 Layout.fillWidth: true
                 visible: item.row.disclosedText.length > 0 || item.splitHint.length > 0
-                    || item.row.retractedText.length > 0
-                // 只说出处和状态；失效几条、后面还剩几条这类计数不放在这里，
-                // 它们会盖过读者真正要看的那句话。
-                text: [item.row.countText, item.row.disclosedText,
-                       item.row.retractedText, item.splitHint]
+                // 只说这句是哪一次披露的。失效的不在这里出现，所以也不提。
+                text: [item.row.disclosedText, item.splitHint]
                     .filter(function (part) { return part.length > 0 }).join(" · ")
-                // 失效是编辑留下的痕迹，用提示色而不是普通说明色。
-                color: item.row.retracted ? item.t.warn : item.t.muted
+                color: item.t.muted
                 font.pixelSize: 10
                 elide: Text.ElideRight
                 Layout.minimumWidth: 0
@@ -181,13 +177,7 @@ Column {
                 width: parent.width - parent.leftPadding
                 spacing: 6
 
-                Label {
-                    // 有效/失效是记录上的标记，不是按位置推的「当前/历史」。
-                    text: modelData.valid ? "有效" : "失效"
-                    color: modelData.valid ? item.t.ok : item.t.bad
-                    font.pixelSize: 10
-                    Layout.preferredWidth: 28
-                }
+                // 失效的不列出来，所以这里也不标「有效」——写出来的都算数。
                 // 这一行合了多个属性名时，标出这条记录用的是哪个。
                 Label {
                     visible: item.row.names.length > 0
@@ -251,13 +241,10 @@ Column {
                 Label {
                     Layout.fillWidth: true
                     // 只写披露在哪个事件；不再声称「到某处为止」，那是算出来的。
-                    text: (modelData.event_name || modelData.event_id || "—")
-                        + (modelData.valid ? "" : "  · 失效")
-                        + (!modelData.valid && modelData.invalidated_at
-                            ? "于「" + modelData.invalidated_at + "」" : "")
-                    color: modelData.valid ? item.t.accent : item.t.muted
+                    text: modelData.event_name || modelData.event_id || "—"
+                    color: item.t.accent
                     font.pixelSize: 10
-                    font.underline: !!modelData.event_name && modelData.valid
+                    font.underline: !!modelData.event_name
                     elide: Text.ElideRight
                     Layout.minimumWidth: 0
                     MouseArea {
@@ -293,20 +280,6 @@ Column {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: item.host.openSource(modelData.disclosure.source_id,
                                                         modelData.disclosure.start)
-                    }
-                }
-                // 撤销失效：撤的是「这条不算数」这句话，不是值。
-                // 从当前位置起重新算，之前那段仍然是空的。
-                Label {
-                    visible: !modelData.valid && !!modelData.invalidated_by
-                    text: "撤销失效"
-                    color: item.t.accent
-                    font.pixelSize: 10
-                    font.underline: true
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: item.host.askRestore(modelData)
                     }
                 }
             }

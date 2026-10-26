@@ -65,14 +65,9 @@ Item {
     property bool groupByCategory: true
     // 属性区回答哪个问题：latest = 这一刻的状态；all = 到这里为止说过的全部，
     // 失效的也列出来并逐条标注。两者在能失效之后就不是一回事了。
-    property string propertyScope: "latest"
     property var expandedProps: ({})
     property var pickerTargets: []
     property var mergeNames: []
-    // 撤销失效：指向那条「失效」记录，而不是取值记录。
-    property string restoreTarget: ""
-    property string restoreValue: ""
-    property string restoreReason: ""
     // 事件等级：场景 / 事件。默认场景（粒度更粗，一次读一段）。
     property string granularity: "scene"
     // 阅读位置：cutId 是场景或事件的编号，空串表示看到最新。
@@ -258,9 +253,6 @@ Item {
     }
 
     function valueText(item) {
-        // 整条一条都不剩（连记录都被过滤掉）时没有值可显示；「全部」里失效的行
-        // 仍然显示它说过的最后一句，由副行说明它已经不算数。
-        if (item.record_count === 0 && item.retracted) return "（已失效）"
         if (item.value_node) return item.value_node.name
         if (item.value === null || item.value === undefined) return "（空）"
         return String(item.value)
@@ -297,13 +289,6 @@ Item {
                 || (item.holder_id ? page.nameOf(item.holder_id) : ""),
             // 有效与否是记录上的显式标记，不是算出来的区间：这里只说披露在哪儿。
             disclosedText: item.retracted ? "" : ("披露于 " + (item.disclosed_at || "—")),
-            // 「全部」列出历次披露：先说这条一共几条，再说其中失效几条。
-            countText: page.propertyScope === "all" && records.length > 0
-                ? "共 " + records.length + " 条" : "",
-            // 失效是编辑动作，不是披露：只说这一行还有没有有效值。
-            // 失效几条、后面还剩几条这类计数不往行上放——它们每行都出现，
-            // 反而盖住读者真正要看的那句话。
-            retractedText: item.retracted ? "已失效，当前没有有效值" : "",
             records: records
         }
     }
@@ -360,27 +345,6 @@ Item {
         mergeDialog.close()
     }
 
-    // 撤销失效：撤的是「这条不算数」这句话，记录和值都还在。
-    function askRestore(record) {
-        if (!record || !record.invalidated_by) return
-        restoreTarget = record.invalidated_by
-        restoreValue = String(record.value === null || record.value === undefined
-            ? "" : record.value)
-        restoreReason = ""
-        restoreDialog.open()
-    }
-
-    function submitRestore() {
-        if (restoreTarget.length === 0) return
-        var reason = restoreReason.trim()
-        if (reason.length === 0) {
-            app.toast("请写清撤销的原因", true)
-            return
-        }
-        bridge.restorePropertyRecords(JSON.stringify([restoreTarget]), reason)
-        restoreDialog.close()
-    }
-
     function openSource(sourceId, start) {
         app.openSource(sourceId, start)
     }
@@ -394,13 +358,6 @@ Item {
 
     function notifyEdit(prefix, payload) {
         app.toast(page.editToast(prefix, payload), payload.outside_window === true)
-    }
-
-    function togglePropertyScope(scope) {
-        if (page.propertyScope === scope) return
-        page.propertyScope = scope
-        bridge.setPropertyScope(scope)
-        if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
     }
 
     function openCategorySettings() {
@@ -538,10 +495,6 @@ Item {
                 app.toast(removed > 0
                     ? "已撤回 " + removed + " 条记录"
                     : "这些记录已经失效过，不用再撤", removed === 0)
-                if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
-            } else if (kind === "property_restore") {
-                var restored = (payload.restored || []).length
-                app.toast(restored > 0 ? "已撤销失效" : "这条失效已经撤销过了", restored === 0)
                 if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
             } else if (kind === "node_properties") {
                 page.applyProperties(payload)
@@ -943,8 +896,7 @@ Item {
                                 Layout.topMargin: 2
                                 visible: page.cutEventId.length > 0
                                 wrapMode: Text.Wrap
-                                text: "读到「" + (page.cutName || page.cutEventId) + "」"
-                                    + (page.propertyScope === "all" ? "为止的全部披露" : "时的状态")
+                                text: "读到「" + (page.cutName || page.cutEventId) + "」时的状态"
                                     + (cutBox.currentIndex > 0
                                         ? "（第 " + cutBox.currentIndex + " / "
                                             + page.steps.length + " 个"
@@ -954,11 +906,10 @@ Item {
                                 font.pixelSize: 11
                             }
 
-                            // 属性标题、范围切换和整理动作分成两行：详情栏固定 440 宽，
-                            // 六个按钮挤在一行时整行最小宽度会超过栏宽，行尾的按钮被推出面板。
+                            // 属性标题 + 整理动作一行放得下（详情栏窄时会被压，按钮各自有下限）。
                             RowLayout {
                                 Layout.fillWidth: true
-                                spacing: 8
+                                spacing: 6
                                 Label {
                                     text: "属性"
                                     color: t.ink
@@ -970,28 +921,6 @@ Item {
                                     color: t.muted
                                     font.pixelSize: 11
                                 }
-                                Item { Layout.fillWidth: true }
-                                // 范围：最新 = 这一刻的状态；全部 = 历次披露的并集。
-                                Button {
-                                    objectName: "propertyScopeLatest"
-                                    text: "最新"
-                                    flat: page.propertyScope !== "latest"
-                                    highlighted: page.propertyScope === "latest"
-                                    font.pixelSize: 10
-                                    onClicked: page.togglePropertyScope("latest")
-                                }
-                                Button {
-                                    objectName: "propertyScopeAll"
-                                    text: "全部"
-                                    flat: page.propertyScope !== "all"
-                                    highlighted: page.propertyScope === "all"
-                                    font.pixelSize: 10
-                                    onClicked: page.togglePropertyScope("all")
-                                }
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 6
                                 Item { Layout.fillWidth: true }
                                 Button {
                                     objectName: "categoryModeButton"
@@ -1016,16 +945,6 @@ Item {
                                     enabled: page.selectedId.length > 0 && page.events.length > 0
                                     onClicked: page.openAddProperty()
                                 }
-                            }
-
-                            // 「全部」不是「最新」的同义词：它把失效的披露也列出来。
-                            Label {
-                                Layout.fillWidth: true
-                                visible: page.propertyScope === "all"
-                                wrapMode: Text.Wrap
-                                text: "全部：到这里为止的每一次披露，失效的也在内，逐条标注有效或失效"
-                                color: t.muted
-                                font.pixelSize: 10
                             }
 
                             // 按大类：一个大类一行标题，下面是它底下的属性。
@@ -1259,60 +1178,6 @@ Item {
                 flat: true
                 text: "取消"
                 onClicked: mergeDialog.close()
-            }
-        }
-    }
-
-    // 撤销失效：说清楚撤的是判断，不是值；从当前位置起重新算。
-    Dialog {
-        id: restoreDialog
-        objectName: "restoreDialog"
-        title: "撤销失效"
-        modal: true
-        anchors.centerIn: parent
-        width: 430
-
-        contentItem: ColumnLayout {
-            spacing: 6
-            Label {
-                Layout.fillWidth: true
-                wrapMode: Text.Wrap
-                text: "这条记录：" + (page.restoreValue.length > 0 ? page.restoreValue : "（空）")
-                color: t.ink
-                font.pixelSize: 12
-            }
-            Label {
-                Layout.fillWidth: true
-                wrapMode: Text.Wrap
-                text: "撤销的是「这条不算数」这个判断，记录和值一直都在。"
-                    + "从当前阅读位置「" + (page.cutName || "最新") + "」起重新算状态，"
-                    + "之前那段仍然没有它——后面的状态基于前面的，不会回头改写。"
-                    + "撤销本身不能再被撤销。"
-                color: t.muted
-                font.pixelSize: 11
-            }
-            TextField {
-                id: restoreReasonField
-                objectName: "restoreReasonField"
-                Layout.fillWidth: true
-                placeholderText: "为什么撤销（必填）"
-                onTextChanged: page.restoreReason = text
-                onAccepted: page.submitRestore()
-            }
-            RowLayout {
-                Layout.fillWidth: true
-                Item { Layout.fillWidth: true }
-                Button {
-                    text: "取消"
-                    flat: true
-                    onClicked: restoreDialog.close()
-                }
-                Button {
-                    objectName: "restoreApplyButton"
-                    text: "撤销失效"
-                    highlighted: true
-                    onClicked: page.submitRestore()
-                }
             }
         }
     }

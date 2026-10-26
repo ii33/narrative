@@ -206,13 +206,12 @@ def test_a_new_value_under_the_new_name_supersedes_the_old_one(tmp_path: Path) -
     assert latest["value"] == "小康"
     assert [row["value"] for row in latest["records"]] == ["小康"]
 
-    everything = next(
-        row for row in ops.property_node_summary("1", include_invalid=True)["properties"]
-        if row["property_id"] == "出身"
-    )
-    assert [(row["value"], row["valid"]) for row in everything["records"]] == [
-        ("贫寒", False), ("小康", True),
+    # 被取代的那条不再显示，但记录还在库里。
+    stored = [
+        record["value"] for record in ops.property_records(include_retracted=True)
+        if record.get("kind") == "property_value"
     ]
+    assert {"贫寒", "小康"} <= set(stored)
 
 
 def test_the_new_name_validates_as_the_same_aspect() -> None:

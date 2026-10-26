@@ -56,7 +56,6 @@ class NativeBridge(QObject):
         self._detail_node = ""
         self._reading_cut: dict = {}
         self._state_cut: str = ""
-        self._property_scope: str = "latest"
         self._closed = False
         self._workerDone.connect(self._on_worker_done)
 
@@ -473,25 +472,9 @@ class NativeBridge(QObject):
         """Every property of one node, read-only; used by the browsing detail pane."""
 
         def work(ops) -> dict:
-            return ops.property_node_summary(
-                node_id,
-                cut=self._state_cut or None,
-                include_invalid=self._property_scope == "all",
-            )
+            return ops.property_node_summary(node_id, cut=self._state_cut or None)
 
         self._project_task("node_properties", work)
-
-    @Slot(str)
-    def setPropertyScope(self, scope: str) -> None:
-        """What the property pane answers: the state now, or everything ever said.
-
-        ``latest`` keeps only the records that still count at the reading
-        position; ``all`` is the union of every disclosure up to it, each one
-        marked valid or invalid. They stopped being the same thing the moment a
-        value could be invalidated without being replaced.
-        """
-        self._property_scope = "all" if scope == "all" else "latest"
-        self.resultReady.emit("property_scope", {"scope": self._property_scope})
 
     @Slot()
     def loadPropertyCategories(self) -> None:
@@ -791,36 +774,6 @@ class NativeBridge(QObject):
             return event_id
         all_events = steps(ops.graph_snapshot(), "event")
         return all_events[-1]["id"] if all_events else ""
-
-    @Slot(str, str)
-    def restorePropertyRecords(self, targets_json: str, reason: str) -> None:
-        """Take a retraction back, counting again from where the reader stands.
-
-        ``targets_json`` is a list of *retraction* records, not values: undoing
-        the statement, not the value. The position is the current reading cut;
-        at 最新 it is the last event, so the value is back for the reader now.
-        """
-        try:
-            targets = json.loads(targets_json)
-        except json.JSONDecodeError as exc:
-            self.errorOccurred.emit("property_restore", f"记录 ID 列表无效：{exc.msg}")
-            return
-        if not isinstance(targets, list) or not all(isinstance(item, str) for item in targets):
-            self.errorOccurred.emit("property_restore", "请提供失效记录 ID 数组")
-            return
-        if not reason.strip():
-            self.errorOccurred.emit("property_restore", "撤销失效需要写清原因")
-            return
-
-        def work(ops) -> dict:
-            event_id = self._reading_anchor(ops)
-            if not event_id:
-                raise ValueError("工程里还没有事件，撤销失效无从落点")
-            return ops.property_restore(
-                [str(item) for item in targets], reason.strip(), event_id=event_id
-            )
-
-        self._project_task("property_restore", work)
 
     @Slot(str)
     def applySuperseded(self, pairs_json: str) -> None:
