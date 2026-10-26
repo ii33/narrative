@@ -66,6 +66,18 @@ def _statement_position(record: dict) -> tuple:
     return record_position(record)
 
 
+def _statement_event(record: dict) -> tuple:
+    """一条失效/恢复落在哪个事件上（不算事件内的偏移）。
+
+    判「这句话是不是已经说过了」只看事件：同一事件里的先后只影响记录自己的排序。
+    没有 ``event_id`` 的撤回是「从来不算」，排在最前。
+    """
+    anchor = record.get("event_id")
+    if not isinstance(anchor, str):
+        return (0,)
+    return order_key(anchor) or (0,)
+
+
 def _applies(record: dict, cut: tuple | None) -> bool:
     """这条记录在当前位置算不算数：有位置的就看位置，没位置的（读错了）到处都算。"""
     anchor = record.get("event_id")
@@ -1078,10 +1090,12 @@ class PropertyStore:
             existing = [
                 record for record in live if record.get("target_id") == target
             ]
-            # 已经说过「从来不算」，或者这次也是「从某个事件起不算」：没有新说法。
-            if any(record.get("event_id") is None for record in existing):
-                continue
-            if existing and event_id is not None:
+            # 只在「比现有的更早」时才写：已经有一条落在更早位置的失效（含「从来不算」，
+            # 它的位置排在最前），这次就没有新信息。反过来，站在更早的阅读位置上撤
+            # 一条后来才被取代的记录，是在说「从这里起也不算」——那是新说法，要写进去，
+            # 否则读者在那个位置上怎么点都撤不动。
+            new_event = _statement_event({"event_id": event_id})
+            if any(_statement_event(record) <= new_event for record in existing):
                 continue
             item: dict = {
                 "kind": "property_retraction",

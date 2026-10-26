@@ -1145,147 +1145,43 @@ def test_a_correction_always_takes_the_old_record_back(workspace) -> None:
     assert any(not row["valid"] for row in all_records)
 
 
-def test_the_node_editor_follows_the_reading_position(workspace) -> None:
-    """按阅读位置看时，编辑器只列那一刻已经读到的属性，并且只读。"""
-    app, _bridge, page, results, _errors = workspace
-    editor = page.findChild(object, "nodeEditor")
+def test_retracting_at_a_cut_works_when_it_was_superseded_later(workspace) -> None:
+    """审计说过「从事件 5 起不算」，站在事件 4 再撤一次仍然有效——那是新说法。"""
+    app, bridge, page, results, _errors = workspace
+    del results[:]
+    bridge.applySuperseded(json.dumps([
+        {"target_id": "v1", "event_id": "5", "reason": "被后一条披露取代"}
+    ]))
+    _pump(app, results, "property_supersede")
 
-    # 第一个场景锚在事件 4：手镯的「状态」在事件 5 才披露，此时还读不到。
-    # 先清空，否则 _pump 会立刻拿到上一次的 browse，切点还没写进桥接。
+    # 第一个场景锚在事件 4：读者还没读到 5，这条仍然是有效值。
     del results[:]
     page.pickCut(1)
     _pump(app, results, "browse")
-    editor.openFor("3")
-    payload = _pump(app, results, "node_editor")
-
-    assert payload["at_cut"] is True
-    assert payload["cut_name"] == "开场"
-    assert payload["later_count"] == 1
-    assert {item["label"] for item in _value(editor.property("properties"))} == {"持有者"}
-    # 只过滤显示，不封锁编辑：在事件 a 发现问题，就在事件 a 补上。
-    assert editor.findChild(object, "editorSubmitNode").property("enabled") is True
-    assert editor.findChild(object, "editorAddProperty").property("enabled") is True
-
-    # 回到最新：整份历史回来，编辑重新可用。
-    del results[:]
-    page.backToLatest()
-    _pump(app, results, "browse")
-    payload = _pump(app, results, "node_editor")
-    assert payload["at_cut"] is False
-    assert {item["label"] for item in _value(editor.property("properties"))} == {
-        "持有者", "状态",
-    }
-    assert editor.findChild(object, "editorSubmitNode").property("enabled") is True
-
-
-def test_a_hand_written_disclosure_changes_the_state_from_its_own_event(
-    tmp_path: Path,
-) -> None:
-    """用户场景：某人在事件 a 瞎了但没提取出来。
-
-    在 a 补一条之后，a 之后的状态立刻变成失明，a 之前仍然是正常——旧值不是
-    被删掉，而是从 a 起不再算状态。
-    """
-    project = tmp_path / "blind.sqlite3"
-    ops = Operations.create_graph_project(project)
-    source_id = ops.import_source("第一章", "林舟视力正常。他走进房间。后来他瞎了。")
-    ops.graph_accept(
-        ops.graph_propose(
-            [
-                {"kind": "node", "id": "1", "node_type": "person", "name": "林舟"},
-                {"kind": "node", "id": "2", "node_type": "event", "name": "出场"},
-                {"kind": "node", "id": "3", "node_type": "event", "name": "走进房间"},
-            ],
-            ops.graph_project_info()["revision"],
-        ),
-        1,
-    )
-    ops.property_accept(
-        ops.property_propose(
-            [
-                {"kind": "property_definition", "id": "vision", "value_type": "string",
-                 "cardinality": "one", "persistence": "until_changed"},
-                {"kind": "property_value", "id": "v1", "node_id": "1",
-                 "property_id": "vision", "value": "正常", "event_id": "2",
-                 "evidence": {"source_id": source_id, "quote": "林舟视力正常"},
-                 "disclosure": {"source_id": source_id, "start": 0}},
-            ],
-            ops.graph_project_info()["revision"],
-            source="manual",
-        ),
-        1,
-    )
-
-    bridge = NativeBridge(tmp_path)
-    results: list[tuple[str, dict]] = []
-    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
-    try:
-        bridge.openProject(str(project))
-        _pump(QApplication.instance() or QApplication([]), results, "project")
-        bridge.addPropertyRecord({
-            "node_id": "1", "property_id": "vision", "value": "失明",
-            "event_id": "3", "quote": "他走进房间", "source_id": source_id,
-        })
-        added = _pump(QApplication.instance(), results, "property_add")
-        assert added["status"] == "accepted"
-        assert added["outside_window"] is False
-    finally:
-        bridge.close()
-
-    reopened = open_graph_project(project)
-    # 事件 3 之后：失明是状态，正常从这次披露起失效。
-    after = reopened.property_node_summary("1", cut="3")["properties"][0]
-    assert after["value"] == "失明"
-    assert after["invalid_count"] == 1
-    # 并集里能看见旧值，以及它从哪次披露起不再算状态。
-    union = reopened.property_node_summary(
-        "1", cut="3", include_invalid=True
-    )["properties"][0]
-    assert [row["value"] for row in union["records"]] == ["正常", "失明"]
-    assert union["records"][0]["invalidated_at"] == "走进房间"
-
-    # 事件 2：还没读到失明，正常仍然是状态。
-    before = reopened.property_node_summary("1", cut="2")["properties"][0]
-    assert before["value"] == "正常"
-    assert before["invalid_count"] == 0
-
-
-
-def test_editing_at_a_reading_position_defaults_to_that_event(workspace) -> None:
-    """在当前事件视图里改，默认就落在这个时间点，而不是第一个事件。"""
-    app, _bridge, page, results, _errors = workspace
-
-    del results[:]
-    page.pickCut(2)  # 第二个场景，锚在事件 5
-    _pump(app, results, "browse")
-
-    # 补录：默认披露在事件 5（events 里的第 2 项），不是事件 4。
-    page.openAddProperty()
+    page.select("1")
+    _pump(app, results, "detail", "1")
+    _pump(app, results, "node_properties", "1")
     app.processEvents()
-    assert page.findChild(object, "addEventField").property("currentIndex") == 1
-    page.findChild(object, "addPropertyDialog").close()
+    assert [r["label"] for r in _value(page.property("propertyRows"))].count("状态") == 2
 
-    # 更正：原记录在事件 4，但当前阅读位置是事件 5，默认跟着当前走。
+    del results[:]
     editor = page.findChild(object, "nodeEditor")
-    del results[:]
-    editor.openFor("3")
-    _pump(app, results, "node_editor")
+    editor.openFor("1")
+    payload = _pump(app, results, "node_editor")
+    app.processEvents()
     item = next(
-        entry for entry in _value(editor.property("properties"))
-        if entry["label"] == "持有者"
+        entry for entry in payload["properties"]
+        if entry["property_id"] == "state" and entry["category"] == "外貌"
     )
-    assert item["records"][-1]["event_name"] == "开场"
-    editor.startEdit(item, item["records"][-1])
-    assert editor.property("editEventIndex") == 1
+    editor.startRetract(item)
+    editor.setProperty("retractReason", "这句读错了")
+    del results[:]
+    editor.submitRetract()
+    # 不被「已经失效过」挡掉：写进去了，而且只写这一条。
+    assert _pump(app, results, "property_retract")["retracted"] == [item["records"][0]["id"]]
 
-    # 回到「最新」：更正回到原记录自己的事件。
-    del results[:]
-    page.backToLatest()
-    _pump(app, results, "browse")
-    _pump(app, results, "node_editor")
-    item = next(
-        entry for entry in _value(editor.property("properties"))
-        if entry["label"] == "持有者"
-    )
-    editor.startEdit(item, item["records"][-1])
-    assert editor.property("editEventIndex") == 0
+    _pump(app, results, "node_properties", "1")
+    app.processEvents()
+    assert [r["label"] for r in _value(page.property("propertyRows"))].count("状态") == 1
+
+

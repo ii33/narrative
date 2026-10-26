@@ -312,3 +312,26 @@ def _retraction_id(ops) -> str:
     )
 
 
+
+
+def test_a_retraction_can_land_earlier_than_one_that_already_exists(tmp_path: Path) -> None:
+    """审计已经说了「从事件 3 起不算」，站在事件 2 再撤一次，说的是「从这里起也不算」。"""
+    ops = _three_events(tmp_path / "earlier-retract.sqlite3")
+    ops.property_supersede(
+        [{"target_id": "v1", "event_id": "3", "reason": "被后一条披露取代"}]
+    )
+    # 事件 2 上，读者看到的还是这个值。
+    item = ops.property_node_summary("1", cut="2")["properties"][0]
+    assert [row["value"] for row in item["records"]] == ["二十九岁"]
+
+    # 在这个位置撤它：允许，而且从这个位置起就不算了。
+    assert ops.property_retract(["v1"], "从这儿起也不算", event_id="2")["retracted"] == ["v1"]
+    assert ops.property_node_summary("1", cut="2")["properties"] == []
+
+    # 同一个位置再说一遍，没有新信息。
+    assert ops.property_retract(["v1"], "再说一次", event_id="2")["retracted"] == []
+
+    # 更晚的位置也不用再说：前面已经有一条更早的失效了。
+    assert ops.property_retract(["v1"], "更晚再说", event_id="4")["retracted"] == []
+
+
