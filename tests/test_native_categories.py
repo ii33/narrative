@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 import shiboken6
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import QPoint, QPointF, Qt, QUrl
 from PySide6.QtGui import QWindow
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickWindow
@@ -429,6 +429,44 @@ def test_a_node_that_has_not_appeared_yet_loses_the_selection(workspace) -> None
     app.processEvents()
     assert page.property("selectedId") == ""
     assert _value(page.property("propertyRows")) == []
+
+
+def test_the_columns_can_be_resized(workspace) -> None:
+    """导航 / 分类 / 列表 / 详情四栏都能拖：拖左边那条缝，分类变宽、列表让位。"""
+    app, _bridge, page, results, _errors = workspace
+    window = _window(page)
+    app.processEvents()
+
+    cols = window.findChild(object, "browseColumns")
+    assert cols is not None
+    root = cols.property("contentItem")
+    before = [child.property("width") for child in root.childItems()]
+    assert len(before) == 3 and before[0] > 0
+
+    handles = [
+        child for child in cols.childItems()
+        if child.objectName() == "browseColumnHandle"
+    ]
+    assert len(handles) == 2
+    handle = handles[0]
+    point = handle.mapToScene(
+        QPointF(handle.property("width") / 2, handle.property("height") / 2)
+    ).toPoint()
+
+    QTest.mousePress(window, Qt.LeftButton, Qt.NoModifier, point)
+    QTest.mouseMove(window, QPoint(point.x() + 60, point.y()))
+    QTest.qWait(60)
+    QTest.mouseRelease(window, Qt.LeftButton, Qt.NoModifier, QPoint(point.x() + 60, point.y()))
+    QTest.qWait(120)
+
+    after = [child.property("width") for child in root.childItems()]
+    assert after[0] > before[0] + 30
+    assert after[1] < before[1] - 30
+    # 详情栏没被拖，宽度不变。
+    assert after[2] == before[2]
+
+    # 导航栏和页面之间也有缝。
+    assert window.findChild(object, "workspaceColumns") is not None
 
 
 def test_the_granularity_switches_the_step_list(workspace) -> None:

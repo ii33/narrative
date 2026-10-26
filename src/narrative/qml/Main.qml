@@ -124,12 +124,38 @@ ApplicationWindow {
             LauncherPage { app: app }
 
             // -- workspace ----------------------------------------------
-            RowLayout {
-                spacing: 0
+            // 导航栏和页面之间也能拖：宽一点看长节点名，窄一点留给正文。
+            SplitView {
+                id: workspaceColumns
+                objectName: "workspaceColumns"
+                orientation: Qt.Horizontal
+
+                handle: Rectangle {
+                    objectName: "workspaceColumnHandle"
+                    implicitWidth: 6
+                    color: "transparent"
+
+                    // 只负责把光标变成左右箭头；按键留给 SplitView 自己处理。
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.SplitHCursor
+                        acceptedButtons: Qt.NoButton
+                    }
+
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: 2
+                        height: parent.height
+                        color: SplitHandle.pressed || SplitHandle.hovered
+                            ? themeTokens.accent : themeTokens.line
+                    }
+                }
 
                 Rectangle {
-                    Layout.preferredWidth: 196
-                    Layout.fillHeight: true
+                    SplitView.preferredWidth: 196
+                    SplitView.minimumWidth: 150
+                    SplitView.maximumWidth: 320
+                    SplitView.fillHeight: true
                     color: themeTokens.card
                     border.color: themeTokens.line
 
@@ -268,8 +294,9 @@ ApplicationWindow {
                     }
 
                     StackLayout {
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
+                        SplitView.fillWidth: true
+                        SplitView.minimumWidth: 520
+                        SplitView.fillHeight: true
                         currentIndex: {
                             for (var i = 0; i < app.navItems.length; ++i)
                                 if (app.navItems[i].key === app.currentPage) return i

@@ -662,15 +662,40 @@ Item {
             onTriggered: page.load()
         }
 
-        RowLayout {
+        // 三栏都能拖：分类 / 列表 / 详情。宽度是界面自己的事，不落后端。
+        SplitView {
+            id: columns
+            objectName: "browseColumns"
             Layout.fillWidth: true
             Layout.fillHeight: true
-            spacing: 12
+            orientation: Qt.Horizontal
+
+            handle: Rectangle {
+                objectName: "browseColumnHandle"
+                implicitWidth: 12
+                color: "transparent"
+
+                // 只负责把光标变成左右箭头；按键留给 SplitView 自己处理。
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.SplitHCursor
+                    acceptedButtons: Qt.NoButton
+                }
+
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: 2
+                    height: parent.height
+                    radius: 1
+                    color: SplitHandle.pressed || SplitHandle.hovered ? t.accent : t.line
+                }
+            }
 
             // -- categories ---------------------------------------------
             Rectangle {
-                Layout.preferredWidth: 190
-                Layout.fillHeight: true
+                SplitView.preferredWidth: 190
+                SplitView.minimumWidth: 140
+                SplitView.fillHeight: true
                 color: t.card
                 border.color: t.line
                 radius: t.radius
@@ -731,8 +756,9 @@ Item {
 
             // -- node list ----------------------------------------------
             Rectangle {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
+                SplitView.fillWidth: true
+                SplitView.minimumWidth: 240
+                SplitView.fillHeight: true
                 color: t.card
                 border.color: t.line
                 radius: t.radius
@@ -795,8 +821,9 @@ Item {
 
             // -- detail --------------------------------------------------
             Rectangle {
-                Layout.preferredWidth: 440
-                Layout.fillHeight: true
+                SplitView.preferredWidth: 440
+                SplitView.minimumWidth: 320
+                SplitView.fillHeight: true
                 color: t.card
                 border.color: t.line
                 radius: t.radius
