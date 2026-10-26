@@ -307,6 +307,10 @@ Item {
                             objectName: "projectNameField"
                             Layout.preferredWidth: 240
                             placeholderText: "代号，例如 my-novel"
+                            onAccepted: {
+                                if (nameField.text.trim().length > 0 && !app.busy)
+                                    bridge.createProject(nameField.text.trim())
+                            }
                         }
                         Button {
                             objectName: "createProjectButton"

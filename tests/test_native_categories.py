@@ -12,8 +12,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from PySide6.QtCore import QUrl
+import shiboken6
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QWindow
 from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtQuick import QQuickWindow
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from narrative.native_app import QML_PATH
@@ -737,6 +741,100 @@ def test_the_node_editor_corrects_and_invalidates(workspace) -> None:
     labels = {entry["label"] for entry in _value(editor.property("properties"))}
     assert "持有者" not in labels
 
+
+
+def _window(page: Any) -> Any:
+    """这一页所在的窗口。
+
+    同一个 QApplication 里可能还留着上一条用例的窗口，按名字取会拿到已经关掉的那个；
+    顺着父链走一定拿到自己的那扇。
+    """
+    node = page.parent()
+    while node is not None:
+        if isinstance(node, QWindow):
+            return node
+        node = node.parent()
+    return None
+
+
+def _quick_window(page: Any) -> Any:
+    """这一页所在的 QQuickWindow。
+
+    findChild 拿到的是 QObject 包装，弹层（Dialog）挂在窗口的 overlay 下面而不是页面里，
+    所以要从窗口根 item 往下找。
+    """
+    node = page
+    parent = node.parent()
+    while parent is not None and not isinstance(parent, QWindow):
+        node, parent = parent, parent.parent()
+    if parent is None:
+        return None
+    return shiboken6.wrapInstance(shiboken6.getCppPointer(parent)[0], QQuickWindow)
+
+
+def _visual(root: Any, name: str) -> Any:
+    """按可视化树找控件。
+
+    Repeater 的 delegate 不在 QObject 树上，findChild 找不到——但它们在画面上，
+    所以走 childItems。
+    """
+    stack = [root]
+    while stack:
+        item = stack.pop()
+        if item.objectName() == name:
+            return item
+        stack.extend(item.childItems())
+    return None
+
+
+def test_enter_submits_the_rename_form(workspace) -> None:
+    """输入框吃回车：改完名字直接按回车就等于点「确认改名」。"""
+    app, _bridge, page, results, _errors = workspace
+    page.jumpTo("2")
+    _pump(app, results, "detail", "2")
+    _pump(app, results, "node_properties", "2")
+    app.processEvents()
+
+    del results[:]
+    editor = page.findChild(object, "nodeEditor")
+    editor.openFor("2")
+    payload = _pump(app, results, "node_editor")
+    app.processEvents()
+
+    item = next(row for row in payload["properties"] if row["label"] == "修为")
+    editor.startRename(item)
+    app.processEvents()
+    window = _window(page)
+    field = _visual(_quick_window(page).contentItem(), "editorRenameName")
+    assert field is not None
+    field.forceActiveFocus()
+    field.setProperty("text", "修真境界")
+    app.processEvents()
+    assert field.hasActiveFocus()
+
+    del results[:]
+    QTest.keyClick(window, Qt.Key_Return)
+    renamed = _pump(app, results, "property_rename")
+    assert renamed["to_id"] == "修真境界"
+    # 表单收起来了，不是还开着。
+    assert editor.property("renameKey") == ""
+
+
+def test_enter_submits_the_add_property_form(workspace) -> None:
+    app, _bridge, page, results, _errors = workspace
+    del results[:]
+    page.openAddProperty()
+    app.processEvents()
+    page.findChild(object, "addPropertyField").setProperty("text", "state")
+    value = page.findChild(object, "addValueField")
+    value.setProperty("text", "站着没动")
+    value.forceActiveFocus()
+    app.processEvents()
+
+    del results[:]
+    QTest.keyClick(_window(page), Qt.Key_Return)
+    added = _pump(app, results, "property_add")
+    assert added["status"] == "accepted"
 
 
 def test_two_rows_of_one_aspect_do_not_both_open_the_form(workspace) -> None:

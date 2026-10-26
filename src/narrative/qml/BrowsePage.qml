@@ -553,8 +553,9 @@ Item {
                 objectName: "browseSearchField"
                 Layout.preferredWidth: 280
                 placeholderText: "搜索名称或别名"
-                // 输入停下来再查，避免每个字都跑一次后端。
+                // 输入停下来再查，避免每个字都跑一次后端；回车就不等了。
                 onTextChanged: { page.query = text; searchTimer.restart() }
+                onAccepted: { searchTimer.stop(); page.load() }
             }
             Label {
                 text: total + " 个节点 · 修订 " + revision
@@ -1280,6 +1281,7 @@ Item {
                     objectName: "addPropertyField"
                     Layout.fillWidth: true
                     placeholderText: "例如 state"
+                    onAccepted: page.submitAddProperty()
                 }
                 Label { text: "值"; color: t.muted; font.pixelSize: 11 }
                 TextField {
@@ -1287,6 +1289,7 @@ Item {
                     objectName: "addValueField"
                     Layout.fillWidth: true
                     placeholderText: "照原文写"
+                    onAccepted: page.submitAddProperty()
                 }
                 Label { text: "披露事件"; color: t.muted; font.pixelSize: 11 }
                 ColumnLayout {
@@ -1327,6 +1330,7 @@ Item {
                     objectName: "addQuoteField"
                     Layout.fillWidth: true
                     placeholderText: "逐字复制；可留空，但补上才能回查"
+                    onAccepted: page.submitAddProperty()
                 }
             }
             RowLayout {

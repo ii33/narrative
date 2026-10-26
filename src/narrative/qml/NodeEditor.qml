@@ -229,6 +229,7 @@ Dialog {
                 id: nameField
                 objectName: "editorName"
                 Layout.fillWidth: true
+                onAccepted: editor.submitNode()
             }
             Label { text: "类型"; color: t.muted; font.pixelSize: 11 }
             ComboBox {
@@ -244,12 +245,14 @@ Dialog {
                 objectName: "editorAliases"
                 Layout.fillWidth: true
                 placeholderText: "用「、」分隔"
+                onAccepted: editor.submitNode()
             }
             Label { text: "说明"; color: t.muted; font.pixelSize: 11 }
             TextField {
                 id: noteField
                 objectName: "editorNote"
                 Layout.fillWidth: true
+                onAccepted: editor.submitNode()
             }
         }
 
