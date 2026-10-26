@@ -71,6 +71,8 @@ def main() -> int:
     parser.add_argument("--editor", action="store_true", help="打开节点编辑器再截图")
     parser.add_argument("--scope", default="latest", choices=("latest", "all"),
                         help="属性范围：latest 这一刻的状态，all 历次披露的并集")
+    parser.add_argument("--rename", default=None, metavar="NAME",
+                        help="打开「改名」对话框再截图；给个名字就填进输入框（传空串只开框）")
     args = parser.parse_args()
     project = args.project.resolve()
     if not project.is_file():
@@ -158,6 +160,17 @@ def main() -> int:
         if target is not None:
             page.toggleProperty(target["key"])
         QTest.qWait(400)
+        if args.rename is not None:
+            if target is None:
+                raise RuntimeError("没有可改名的属性行")
+            page.askRename(target)
+            QTest.qWait(200)
+            field = window.findChild(object, "renameField")
+            if field is None:
+                raise RuntimeError("改名对话框没有打开")
+            if args.rename:
+                field.setProperty("text", args.rename)
+            QTest.qWait(200)
 
         args.output.parent.mkdir(parents=True, exist_ok=True)
         grab = window.contentItem().grabToImage()

@@ -1222,7 +1222,7 @@ Item {
         title: "改属性名"
         modal: true
         anchors.centerIn: parent
-        width: 380
+        width: 430
 
         contentItem: ColumnLayout {
             spacing: 6
