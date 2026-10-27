@@ -17,6 +17,8 @@ Item {
     readonly property var effortOptions: ["不设置", "low", "medium", "high"]
 
     ListModel { id: projectRows }
+    // 自检用：界面自己以为列表里有几条。
+    readonly property int projectCount: projectRows.count
 
     Component.onCompleted: {
         bridge.refreshProjects()

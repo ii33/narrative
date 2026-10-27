@@ -48,6 +48,12 @@ ApplicationWindow {
     property var project: ({})
     property bool busy: false
     property string errorText: ""
+    // 收到过哪些结果（自检用）：卡在空启动页时，这一行说明界面到底收到了什么。
+    property var resultKinds: []
+    property string diagnosticLine: "就绪 · " + app.mode
+        + " · 工程 " + launcherPage.projectCount
+        + " · 收到 " + resultKinds.length + " 条"
+        + (busy ? " · 处理中 " + bridge.pendingKinds().join(",") : "")
     property string notice: ""
     property string mode: "launcher"
     property string currentPage: "browse"
@@ -91,6 +97,7 @@ ApplicationWindow {
     Connections {
         target: bridge
         function onResultReady(kind, payload) {
+            resultKinds = resultKinds.concat([kind])
             if (kind === "project") {
                 project = payload.project || ({})
                 notice = "已打开 " + (project.title || project.name || "工程")
@@ -112,6 +119,19 @@ ApplicationWindow {
         }
     }
 
+    // 启动 6 秒后自检一次：一次运行只写一行。启动页停在「处理中」时，
+    // 这行直接说明界面自己以为在等什么、收到过什么。
+    Timer {
+        interval: 6000
+        running: true
+        repeat: false
+        onTriggered: console.log("SELFTEST busy=" + app.busy + " mode=" + app.mode
+            + " projects=" + launcherPage.projectCount
+            + " kinds=" + app.resultKinds.join("/")
+            + " pending=" + bridge.pendingKinds().join(",")
+            + " error=" + (app.errorText || "-"))
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -121,7 +141,7 @@ ApplicationWindow {
             Layout.fillHeight: true
             currentIndex: app.mode === "launcher" ? 0 : 1
 
-            LauncherPage { app: app }
+            LauncherPage { id: launcherPage; app: app }
 
             // -- workspace ----------------------------------------------
             // 导航栏和页面之间也能拖：宽一点看长节点名，窄一点留给正文。
@@ -325,11 +345,15 @@ ApplicationWindow {
                 anchors.leftMargin: 20
                 anchors.rightMargin: 20
                 Label {
+                    objectName: "statusLine"
                     Layout.fillWidth: true
                     elide: Text.ElideRight
                     font.pixelSize: 11
+                    // 常驻一行自检：出错/提示优先，否则说明界面自己以为在等什么。
+                    // 卡在「处理中」时，这一行就是现场记录。
                     text: app.errorText.length > 0 ? app.errorText
-                        : app.notice.length > 0 ? app.notice : "就绪"
+                        : app.notice.length > 0 ? app.notice
+                        : app.diagnosticLine
                     color: app.errorText.length > 0 ? themeTokens.bad : themeTokens.muted
                 }
                 Button {
