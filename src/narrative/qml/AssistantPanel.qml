@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Dialogs
 import QtQuick.Layouts
 
 // 常驻协作者：只能读。问它图里的事，它自己调读工具，把用到的工具一行行摆出来。
@@ -16,16 +17,27 @@ Rectangle {
     property var messages: []
     property bool busy: false
     property string draft: ""
+    // 附图：本地路径 + 缩略图地址。发送时一起交给模型。
+    property string attached: ""
+    property string attachedUrl: ""
 
     function send() {
         var text = panel.draft.trim()
         if (text.length === 0 || panel.busy) return
         var next = panel.messages.slice()
-        next.push({role: "user", text: text, steps: []})
+        next.push({role: "user", text: text, steps: [], image: panel.attachedUrl})
         panel.messages = next
+        var image = panel.attached
         panel.draft = ""
+        panel.attached = ""
+        panel.attachedUrl = ""
         panel.busy = true
-        bridge.assistantTurn(text)
+        bridge.assistantTurn(text, image)
+    }
+
+    function attach(path) {
+        panel.attached = path
+        panel.attachedUrl = path ? "file:///" + String(path).replace(/\\/g, "/") : ""
     }
 
     function apply(payload) {
@@ -44,6 +56,14 @@ Rectangle {
         var next = panel.messages.slice()
         next.push({role: "assistant", text: message, steps: []})
         panel.messages = next
+    }
+
+    // 认一下它给的是哪种：成段的 HTML 用 RichText，其余按 Markdown 读。
+    function richFormat(text) {
+        var body = String(text || "")
+        if (/<\s*(p|div|br|ul|ol|li|h[1-6]|table|strong|em|code|pre)\b/i.test(body))
+            return Text.RichText
+        return Text.MarkdownText
     }
 
     function reset() {
@@ -123,6 +143,14 @@ Rectangle {
                     color: modelData.role === "user" ? t.muted : t.accent
                     font.pixelSize: 9
                 }
+                Image {
+                    visible: (modelData.image || "").length > 0
+                    Layout.preferredWidth: 120
+                    Layout.preferredHeight: 90
+                    source: modelData.image || ""
+                    fillMode: Image.PreserveAspectFit
+                    asynchronous: true
+                }
                 // 它查过什么：一行一个工具，折叠成一句话。
                 Repeater {
                     model: modelData.steps
@@ -136,9 +164,12 @@ Rectangle {
                         elide: Text.ElideRight
                     }
                 }
+                // 回答可能是 Markdown 或一小段 HTML：按内容选渲染方式，别把星号原样显示。
                 Label {
+                    objectName: "assistantAnswer"
                     Layout.fillWidth: true
                     text: modelData.text
+                    textFormat: panel.richFormat(modelData.text)
                     color: t.body
                     font.pixelSize: 12
                     wrapMode: Text.Wrap
@@ -157,7 +188,50 @@ Rectangle {
 
         RowLayout {
             Layout.fillWidth: true
+            visible: panel.attached.length > 0
             spacing: 6
+            Image {
+                Layout.preferredWidth: 40
+                Layout.preferredHeight: 40
+                source: panel.attachedUrl
+                fillMode: Image.PreserveAspectFit
+                asynchronous: true
+            }
+            Label {
+                Layout.fillWidth: true
+                text: "已附一张图"
+                color: t.muted
+                font.pixelSize: 10
+            }
+            Label {
+                objectName: "assistantDropImage"
+                text: "移除"
+                color: t.bad
+                font.pixelSize: 10
+                font.underline: true
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: panel.attach("")
+                }
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 6
+            Label {
+                objectName: "assistantAttach"
+                text: "图"
+                color: t.muted
+                font.pixelSize: 11
+                font.underline: true
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: imagePicker.open()
+                }
+            }
             TextField {
                 id: prompt
                 objectName: "assistantPrompt"
@@ -176,6 +250,14 @@ Rectangle {
                 onClicked: panel.send()
             }
         }
+    }
+
+    FileDialog {
+        id: imagePicker
+        objectName: "assistantImagePicker"
+        title: "选一张图给它看"
+        nameFilters: ["图片 (*.png *.jpg *.jpeg *.webp *.gif)"]
+        onAccepted: panel.attach(imagePicker.selectedFile.toString())
     }
 
     Connections {

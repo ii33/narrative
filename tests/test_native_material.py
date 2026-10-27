@@ -277,6 +277,27 @@ def test_images_can_be_added_in_the_editor(workspace, tmp_path: Path) -> None:
     assert payload["cards"][0]["images"] == []
 
 
+def test_clicking_a_picture_opens_a_preview(workspace) -> None:
+    app, _bridge, page, results, _errors = workspace
+    page.openCardDialog(None)
+    page.findChild(object, "materialCardTitle").setProperty("text", "青衫少年")
+    del results[:]
+    page.submitCard()
+    payload = _pump(app, results, "material", "1")
+    card = payload["cards"][0]
+
+    preview = page.findChild(object, "materialImagePreview")
+    assert preview is not None
+    assert preview.property("visible") is False
+
+    page.previewImage({"path": card["images"][0]["path"] if card["images"] else "C:/x.png",
+                       "caption": "正面"})
+    app.processEvents()
+    assert preview.property("visible") is True
+    assert preview.property("caption") == "正面"
+    assert str(preview.property("source")).startswith("file:///")
+
+
 def test_cards_belong_to_the_node_not_the_page(workspace) -> None:
     app, bridge, page, results, _errors = workspace
     del results[:]

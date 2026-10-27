@@ -105,6 +105,46 @@ def test_a_plain_reply_is_taken_as_the_answer(tmp_path: Path) -> None:
     assert result["steps"] == []
 
 
+PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    "0000000d4944415478da63f8cfc0f01f00050001ff9d5f6d0d0000000049454e44ae426082"
+)
+
+
+def test_an_attached_image_goes_in_as_a_content_block(tmp_path: Path) -> None:
+    """有图就发内容块：一段文字 + 一张图，而不是把路径写进正文。"""
+    project = _project(tmp_path / "image.sqlite3")
+    image = tmp_path / "ref.png"
+    image.write_bytes(PNG)
+    seen: dict = {}
+
+    def ask(instruction):
+        seen["instruction"] = instruction
+        return json.dumps({"answer": "看到了"})
+
+    assistant.run_turn(ask, "这张图里是什么", project=project, image=str(image))
+    blocks = seen["instruction"]
+    assert isinstance(blocks, list)
+    assert blocks[0]["type"] == "text"
+    assert "ref.png" in blocks[0]["text"]
+    assert blocks[1]["type"] == "image_url"
+    assert blocks[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_an_unreadable_attachment_falls_back_to_text(tmp_path: Path) -> None:
+    project = _project(tmp_path / "noimage.sqlite3")
+    note = tmp_path / "note.txt"
+    note.write_text("不是图片", encoding="utf-8")
+    seen: dict = {}
+
+    def ask(instruction):
+        seen["instruction"] = instruction
+        return json.dumps({"answer": "没看到图"})
+
+    assistant.run_turn(ask, "看看这个", project=project, image=str(note))
+    assert isinstance(seen["instruction"], str)
+
+
 def test_the_loop_stops_at_the_step_limit(tmp_path: Path) -> None:
     project = _project(tmp_path / "loop.sqlite3")
     result = assistant.run_turn(

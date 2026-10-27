@@ -9,6 +9,7 @@ harness 不开原生工具调用（`graph_agent.capabilities()` 里 `native_tool
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -16,6 +17,10 @@ from pathlib import Path
 from . import tool_api
 
 MAX_STEPS = 8
+# 图片按 data URI 送进去：运行时走的是 chat-completions，认这个形状。
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+IMAGE_SUFFIXES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                  ".webp": "image/webp", ".gif": "image/gif"}
 # 一次工具结果最多喂回这么多字。超了就让模型自己收窄，而不是悄悄截断 JSON 让它解析失败。
 MAX_OBSERVATION = 12000
 
@@ -64,7 +69,24 @@ def _catalog_lines() -> str:
     return "\n".join(lines)
 
 
-def _first_prompt(message: str) -> str:
+def image_block(path: str | Path) -> dict | None:
+    """把一张图变成内容块；格式不收或太大就返回 None（当作没附图）。"""
+    file = Path(path)
+    if not file.is_file():
+        return None
+    mime = IMAGE_SUFFIXES.get(file.suffix.lower())
+    if mime is None or file.stat().st_size > MAX_IMAGE_BYTES:
+        return None
+    data = base64.b64encode(file.read_bytes()).decode("ascii")
+    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}}
+
+
+def _first_prompt(message: str, image: str = "") -> str:
+    image_note = (
+        f"\n\n（用户附了一张图：{Path(image).name}。图就在这条消息里，你已经看到了——"
+        "先看图再回答，不要说自己看不到图，也不要试图用工具去找它。）"
+        if image else ""
+    )
     return f"""你是这个叙事图工程的协作者。你只能读，不能改：没有任何写工具，也不要假装改过。
 
 可用工具（`?` 表示可选参数）：
@@ -82,9 +104,10 @@ def _first_prompt(message: str) -> str:
 5. **筛选类问题先定判据**：「谁出现在哪些场景」「哪些事件涉及某物」这类，要用
    `scene_state`（这一场谁在场）或 `list_nodes` 里事件的 `participants` 去筛，
    不要把全部场景列一遍；回答时说明你用的是什么判据。
-6. 回答用中文，简短；要列条目就列。
+6. 回答用中文，简短。可以用 Markdown（`-` 列表、**粗体**、`代码`、`>` 引用），
+   不要用 HTML 表格或复杂排版——面板按 Markdown 渲染。
 
-用户说：{message}"""
+用户说：{message}{image_note}"""
 
 
 def _parse(raw: str) -> dict:
@@ -170,10 +193,11 @@ def _call(project: str | Path, name: str, args: dict) -> dict:
 
 
 def run_turn(
-    ask: Callable[[str], str],
+    ask: Callable[[str | list[dict]], str],
     message: str,
     *,
     project: str | Path,
+    image: str = "",
     max_steps: int = MAX_STEPS,
 ) -> dict:
     """跑一轮对话：模型可以连着调几次读工具，最后给答案。
@@ -181,7 +205,10 @@ def run_turn(
     `ask(instruction) -> str` 是模型的一次回复。测试里给个脚本化的假实现就能跑，
     不用联网。
     """
-    instruction = _first_prompt(message)
+    prompt = _first_prompt(message, image)
+    block = image_block(image) if image else None
+    # 有图就发内容块（文字 + 图片），没有就发纯文字——运行时两种都收。
+    instruction: str | list[dict] = [{"type": "text", "text": prompt}, block] if block else prompt
     steps: list[dict] = []
     for round_index in range(max_steps):
         raw = ask(instruction)

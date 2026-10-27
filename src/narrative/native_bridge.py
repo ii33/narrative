@@ -1124,8 +1124,8 @@ class NativeBridge(QObject):
             except Exception:
                 pass
 
-    @Slot(str)
-    def assistantTurn(self, text: str) -> None:
+    @Slot(str, str)
+    def assistantTurn(self, text: str, image_path: str = "") -> None:
         """协作者的一轮：模型可以连着调几次读工具，最后给答案。
 
         它只能读——工具白名单在 `assistant.READ_TOOLS`，写操作调不到。改图仍然是
@@ -1155,10 +1155,12 @@ class NativeBridge(QObject):
                     self._assistant_session = f"chat-{uuid4().hex}"
                 runner = self._assistant_runner
                 session = self._assistant_session
-            def ask(instruction: str) -> str:
+            def ask(instruction) -> str:
                 return runner.agent_turn(instruction, session).raw
 
-            result = run_turn(ask, message, project=path)
+            result = run_turn(
+                ask, message, project=path, image=str(image_path or "").strip()
+            )
             return result | {"session": session}
 
         self._project_task("assistant", work)

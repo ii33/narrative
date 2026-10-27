@@ -466,6 +466,12 @@ Item {
         momentPicker.close()
     }
 
+    function previewImage(image) {
+        imagePreview.source = page.imageUrl(image.path)
+        imagePreview.caption = image.caption || ""
+        imagePreview.open()
+    }
+
     function askMaterialImage(cardId) {
         page.pendingCardId = cardId
         materialImagePicker.open()
@@ -1439,6 +1445,7 @@ Item {
                                                         required property var modelData
                                                         spacing: 2
                                                         Image {
+                                                            objectName: "materialThumb"
                                                             width: 120
                                                             height: 120
                                                             source: modelData.path
@@ -1446,6 +1453,12 @@ Item {
                                                                 : ""
                                                             fillMode: Image.PreserveAspectFit
                                                             asynchronous: true
+                                                            // 缩略图只有 120px：点开看大图。
+                                                            MouseArea {
+                                                                anchors.fill: parent
+                                                                cursorShape: Qt.PointingHandCursor
+                                                                onClicked: page.previewImage(modelData)
+                                                            }
                                                         }
                                                         TextField {
                                                             width: 120
@@ -1548,6 +1561,48 @@ Item {
         fileMode: FileDialog.OpenFiles
         nameFilters: ["图片 (*.png *.jpg *.jpeg *.webp *.gif)"]
         onAccepted: page.addDraftImages(draftImagePicker.selectedFiles)
+    }
+
+    // 点缩略图看大图：图原样铺开，说明在下面。
+    Dialog {
+        id: imagePreview
+        objectName: "materialImagePreview"
+        modal: true
+        anchors.centerIn: parent
+        width: Math.min(880, (page.width || 900) - 120)
+        height: Math.min(720, (page.height || 800) - 80)
+        padding: 0
+
+        property string source: ""
+        property string caption: ""
+
+        contentItem: ColumnLayout {
+            spacing: 6
+            Image {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                source: imagePreview.source
+                fillMode: Image.PreserveAspectFit
+                asynchronous: true
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.margins: 10
+                Label {
+                    Layout.fillWidth: true
+                    text: imagePreview.caption
+                    color: t.muted
+                    font.pixelSize: 11
+                    wrapMode: Text.Wrap
+                }
+                Button {
+                    objectName: "materialImagePreviewClose"
+                    text: "关闭"
+                    flat: true
+                    onClicked: imagePreview.close()
+                }
+            }
+        }
     }
 
     // 新增 / 编辑资料卡：标题、详情、生效与失效（分级挑一步）、图片。
