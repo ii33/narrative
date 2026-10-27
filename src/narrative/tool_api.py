@@ -589,16 +589,13 @@ def _extraction_path(ops, source_id: str) -> Path:
 
 
 def _harness(ops) -> tuple[Any, str, Path]:
-    """模型设置、密钥、工作目录。提取的每一步都从这里拿，不各自读环境。"""
-    from .harness import HarnessSettings
+    """模型设置、密钥、工作目录：和界面、协作者用的是同一份。"""
+    from .harness import harness_env
 
-    settings = HarnessSettings.model_validate(
-        ops.harness_settings() | {"timeout_seconds": 600}
-    )
-    api_key = os.environ.get(settings.key_env) or os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise ToolError(f"缺少 {settings.key_env} 或 DEEPSEEK_API_KEY，无法调用模型")
-    return settings, api_key, ops.path.with_name(ops.path.stem + "_extraction")
+    try:
+        return harness_env(ops)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
 
 
 def _read_extraction(ops, source_id: str) -> dict:

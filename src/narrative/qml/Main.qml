@@ -77,6 +77,8 @@ ApplicationWindow {
     property string notice: ""
     property string mode: "launcher"
     property string currentPage: "browse"
+    // 常驻协作者：面板跨页面保留，收起后状态还在（消息不丢）。
+    property bool assistantOpen: false
 
     readonly property var navItems: [
         {key: "browse", label: "数据浏览", hint: "按分类看节点"},
@@ -289,7 +291,9 @@ ApplicationWindow {
                 }
 
                 ColumnLayout {
-                    Layout.fillWidth: true
+                    // 页面这一列吃掉剩下的宽度：协作者展开时只让出它自己的 360。
+                    SplitView.fillWidth: true
+                    SplitView.minimumWidth: 520
                     Layout.fillHeight: true
                     spacing: 0
 
@@ -330,6 +334,13 @@ ApplicationWindow {
                                 color: themeTokens.accent
                                 font.pixelSize: 12
                             }
+                            Button {
+                                objectName: "assistantToggle"
+                                text: app.assistantOpen ? "收起协作者" : "协作者"
+                                flat: true
+                                font.pixelSize: 11
+                                onClicked: app.assistantOpen = !app.assistantOpen
+                            }
                         }
                     }
 
@@ -350,6 +361,16 @@ ApplicationWindow {
                         ReviewPage { app: app }
                         ModelPage { app: app }
                     }
+                }
+
+                // 常驻协作者：挂在页面右边，切页面不消失。
+                AssistantPanel {
+                    app: app
+                    visible: app.assistantOpen
+                    SplitView.preferredWidth: 360
+                    SplitView.minimumWidth: 280
+                    SplitView.fillHeight: true
+                    onCloseRequested: app.assistantOpen = false
                 }
             }
         }

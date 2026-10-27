@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -19,7 +20,7 @@ from . import graph_profile_ops, project_catalog, providers
 from .browse_view import moment_tree
 from .extraction import build_candidate, extract_chapter
 from .graph_operations import GraphOperations
-from .harness import HarnessSettings
+from .harness import HarnessRunner, HarnessSettings, harness_env
 from .native_models import CanvasState, candidate_summary, node_detail, search_result
 from .node_material import MaterialStore, holds_at
 from .order_ids import order_key
@@ -67,11 +68,16 @@ class NativeBridge(QObject):
         self._reading_cut: dict = {}
         self._state_cut: str = ""
         self._closed = False
+        # 常驻协作者：一个工程一条会话，模型看得见自己前面的工具调用。
+        self._assistant_runner = None
+        self._assistant_session = ""
+        self._assistant_lock = threading.Lock()
         self._workerDone.connect(self._on_worker_done)
 
     def close(self) -> None:
         """Stop queued UI reads; an already started graph agent remains independently observable."""
         self._closed = True
+        self._close_assistant()
         self._pool.shutdown(wait=False, cancel_futures=True)
 
     def _submit(
@@ -294,6 +300,7 @@ class NativeBridge(QObject):
         self._project_path = None
         self._canvas.clear()
         self._query_canvas = None
+        self._close_assistant()
         self.resultReady.emit("project_closed", {})
 
     @Slot(str)
@@ -320,6 +327,8 @@ class NativeBridge(QObject):
         def apply(result: dict) -> dict:
             self._project_path = path
             self._canvas.clear()
+            # 换了工程就是换了话题：旧的会话不该把上一个工程的内容带进来。
+            self._close_assistant()
             return result
 
         self._submit("project", work, apply, epoch=epoch)
@@ -346,6 +355,8 @@ class NativeBridge(QObject):
         def apply(result: dict) -> dict:
             self._project_path = path
             self._canvas.clear()
+            # 换了工程就是换了话题：旧的会话不该把上一个工程的内容带进来。
+            self._close_assistant()
             return result
 
         self._submit("project", work, apply, epoch=epoch)
@@ -1098,6 +1109,65 @@ class NativeBridge(QObject):
             }
 
         self._project_task("extraction_commit", work)
+
+    # -- 常驻协作者 ------------------------------------------------------
+
+    def _close_assistant(self) -> None:
+        with self._assistant_lock:
+            runner = self._assistant_runner
+            self._assistant_runner = None
+            self._assistant_session = ""
+        if runner is not None:
+            try:
+                # 关窗口时可能正好有一轮在跑：强制关掉，别让进程挂着。
+                runner.close(force=True)
+            except Exception:
+                pass
+
+    @Slot(str)
+    def assistantTurn(self, text: str) -> None:
+        """协作者的一轮：模型可以连着调几次读工具，最后给答案。
+
+        它只能读——工具白名单在 `assistant.READ_TOOLS`，写操作调不到。改图仍然是
+        人的动作。
+        """
+        from uuid import uuid4
+
+        from .assistant import run_turn
+
+        message = (text or "").strip()
+        if not message:
+            self.errorOccurred.emit("assistant", "先说一句想问什么")
+            return
+        try:
+            path = self._project()
+        except ValueError as exc:
+            self.errorOccurred.emit("assistant", str(exc))
+            return
+
+        def work(ops) -> dict:
+            settings, api_key, workdir = harness_env(ops)
+            with self._assistant_lock:
+                if self._assistant_runner is None:
+                    self._assistant_runner = HarnessRunner(
+                        settings, api_key, workdir / "assistant"
+                    )
+                    self._assistant_session = f"chat-{uuid4().hex}"
+                runner = self._assistant_runner
+                session = self._assistant_session
+            def ask(instruction: str) -> str:
+                return runner.agent_turn(instruction, session).raw
+
+            result = run_turn(ask, message, project=path)
+            return result | {"session": session}
+
+        self._project_task("assistant", work)
+
+    @Slot()
+    def assistantReset(self) -> None:
+        """换个话题：关掉会话，下一轮重新开始。"""
+        self._close_assistant()
+        self.resultReady.emit("assistant_reset", {})
 
     @Slot(str, "QVariantMap")
     def reviseNode(self, node_id: str, changes: dict) -> None:

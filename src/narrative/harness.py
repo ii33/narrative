@@ -247,6 +247,21 @@ def resolve_key(settings: HarnessSettings, supplied: str | None) -> str:
     return key or "local-no-auth"
 
 
+def harness_env(ops) -> tuple[HarnessSettings, str, Path]:
+    """模型设置、密钥、工作目录。
+
+    工具面、界面和常驻协作者都从这里拿，免得三处各自读环境变量、各自判超时。
+    提取比普通调用慢，超时给到 600 秒。
+    """
+    settings = HarnessSettings.model_validate(
+        ops.harness_settings() | {"timeout_seconds": 600}
+    )
+    api_key = os.environ.get(settings.key_env) or os.environ.get("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise ValueError(f"缺少 {settings.key_env} 或 DEEPSEEK_API_KEY，无法调用模型")
+    return settings, api_key, ops.path.with_name(ops.path.stem + "_extraction")
+
+
 class HarnessRunner:
     def __init__(self, settings: HarnessSettings, api_key: str, directory: Path):
         from deepseek_harness import DeepSeekHarness
