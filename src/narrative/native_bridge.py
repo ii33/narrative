@@ -39,6 +39,10 @@ class NativeBridge(QObject):
     slowOperation = Signal(str, int)
     _workerDone = Signal(int, object, object)
 
+    # 一个操作最多等这么久。超过就放弃它并把「处理中」清掉：
+    # 结果要是永远不回来，界面就会一直卡在「处理中」，什么都点不动。
+    STALE_AFTER_SECONDS = 10.0
+
     def __init__(self, project_directory: str | Path, parent: QObject | None = None):
         super().__init__(parent)
         self._directory = Path(project_directory).resolve()
@@ -79,6 +83,7 @@ class NativeBridge(QObject):
     ) -> None:
         if self._closed:
             return
+        self._drop_stale()
         self._next_request += 1
         request_id = self._next_request
         started = time.perf_counter()
@@ -90,21 +95,23 @@ class NativeBridge(QObject):
         future = self._pool.submit(work)
 
         def completed(done) -> None:
-            elapsed_ms = int((time.perf_counter() - started) * 1000)
-            if elapsed_ms >= 150:
-                try:
-                    self.slowOperation.emit(kind, elapsed_ms)
-                except RuntimeError:  # QObject destroyed during teardown
-                    pass
             try:
                 payload, error = done.result(), None
             except Exception as exc:  # surfaced to the UI, never silently swallowed
                 payload, error = None, str(exc)
+            # 先把结果送出去，再报耗时：报告失败绝不能连累结果本身。
+            # 这条路径上没有别的兜底——丢了它，界面就永远停在「处理中」。
             try:
                 if not self._closed:
                     self._workerDone.emit(request_id, payload, error)
-            except RuntimeError:  # QObject was destroyed during window teardown
+            except Exception:  # QObject destroyed during teardown
                 pass
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            if elapsed_ms >= 150:
+                try:
+                    self.slowOperation.emit(kind, elapsed_ms)
+                except Exception:
+                    pass
 
         future.add_done_callback(completed)
 
@@ -140,6 +147,37 @@ class NativeBridge(QObject):
                 self.slowOperation.emit(f"{kind}:合计", total_ms)
         except Exception as exc:
             self.errorOccurred.emit(kind, str(exc))
+
+    def _drop_stale(self) -> None:
+        """放弃迟迟不回来的操作，别让界面永远停在「处理中」。
+
+        没有用定时器：那会在窗口对象销毁之后还触发，直接崩。改成每次提交前
+        顺手清一次——「点了没反应」的那一刻，正是需要它的时候。
+        """
+        now = time.perf_counter()
+        stale = [
+            (request_id, request)
+            for request_id, request in self._requests.items()
+            if now - request[4] > self.STALE_AFTER_SECONDS
+        ]
+        if not stale:
+            return
+        for request_id, _request in stale:
+            self._requests.pop(request_id, None)
+        if not self._requests:
+            self.busyChanged.emit(False)
+        kinds = "、".join(sorted({request[0] for _rid, request in stale}))
+        self.errorOccurred.emit(
+            "timeout", f"{kinds} 超过 {int(self.STALE_AFTER_SECONDS)} 秒没有返回，已放弃这一步"
+        )
+
+    def pendingOperations(self) -> list[str]:
+        """还没回来的操作（QML 与诊断用）：卡住时它说明卡在哪一步。"""
+        return [request[0] for request in self._requests.values()]
+
+    @Slot(result="QVariantList")
+    def pendingKinds(self) -> list[str]:
+        return self.pendingOperations()
 
     def _project(self) -> Path:
         if self._project_path is None:

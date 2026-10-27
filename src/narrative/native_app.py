@@ -95,8 +95,12 @@ def main(argv: list[str] | None = None) -> int:
     log_lock = threading.Lock()
 
     def record(message: str) -> None:
-        with log_lock, render_log.open("a", encoding="utf-8") as handle:
-            handle.write(f"{datetime.now(UTC).isoformat()} {message}\n")
+        # 写日志永远不能连累调用方：一个满盘或权限问题不该让界面停摆。
+        try:
+            with log_lock, render_log.open("a", encoding="utf-8") as handle:
+                handle.write(f"{datetime.now(UTC).isoformat()} {message}\n")
+        except OSError:
+            pass
 
     def qt_message(mode, context, message) -> None:
         category = getattr(context, "category", "qt")
@@ -124,6 +128,23 @@ def main(argv: list[str] | None = None) -> int:
     window.show()
     if args.project:
         bridge.openProject(args.project)
+
+    # 看门狗：有操作超过 2 秒没回来就记一行。界面停在「处理中」时，
+    # 这行直接说明卡在哪个操作上；同一批只记一次，不刷日志。
+    watchdog = QTimer()
+    watchdog.setInterval(2000)
+    reported: set[tuple[str, ...]] = set()
+
+    def watch_pending() -> None:
+        pending = tuple(sorted(bridge.pendingOperations()))
+        if pending and pending not in reported:
+            reported.add(pending)
+            record("stuck " + ",".join(pending))
+        elif not pending:
+            reported.clear()
+
+    watchdog.timeout.connect(watch_pending)
+    watchdog.start()
 
     probe = QTimer()
     probe.setInterval(100)

@@ -325,3 +325,64 @@ def test_bridge_revises_node_type_and_retracts(tmp_path) -> None:
         assert node["disclosure"] == {"source_id": source_id, "start": 0}
     finally:
         bridge.close()
+
+
+def test_a_broken_slow_report_does_not_swallow_the_result(tmp_path) -> None:
+    """耗时上报只是旁路：它坏了，结果也必须送到界面。
+
+    这条路上没有别的兜底——结果丢了，界面就永远停在「处理中」，
+    看起来就是「连工程列表都加载不出来」。
+    """
+    app = QApplication.instance() or QApplication([])
+    bridge = NativeBridge(tmp_path)
+    results: list[str] = []
+    bridge.resultReady.connect(lambda kind, payload: results.append(kind))
+
+    def boom(kind: str, ms: int) -> None:
+        raise RuntimeError("slow report is broken")
+
+    bridge.slowOperation.connect(boom)
+    # 一个必然超过上报阈值的操作。
+    bridge._submit("slow-one", lambda: (time.sleep(0.25), {})[1])
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and "slow-one" not in results:
+        app.processEvents()
+        time.sleep(0.01)
+
+    assert results == ["slow-one"]
+    assert bridge.pendingOperations() == []
+
+
+def test_a_lost_result_does_not_wedge_the_window(tmp_path) -> None:
+    """结果永远不回来时，界面不能一直停在「处理中」：下一次操作前把它放弃掉。"""
+    app = QApplication.instance() or QApplication([])
+    bridge = NativeBridge(tmp_path)
+    bridge.STALE_AFTER_SECONDS = 0.2
+    busy: list[bool] = []
+    errors: list[tuple[str, str]] = []
+    results: list[str] = []
+    bridge.busyChanged.connect(lambda value: busy.append(value))
+    bridge.errorOccurred.connect(lambda kind, message: errors.append((kind, message)))
+    bridge.resultReady.connect(lambda kind, payload: results.append(kind))
+
+    def never() -> dict:
+        time.sleep(3)
+        return {}
+
+    bridge._submit("stuck-one", never)
+    assert busy == [True]
+    time.sleep(0.3)
+
+    # 下一次操作：先把卡住的那条丢掉，再正常提交。
+    bridge._submit("fine", lambda: {})
+    assert [kind for kind, _message in errors] == ["timeout"]
+    assert "stuck-one" in errors[0][1]
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and "fine" not in results:
+        app.processEvents()
+        time.sleep(0.01)
+    assert results == ["fine"]
+    assert bridge.pendingOperations() == []
+    assert busy[-1] is False
