@@ -560,9 +560,10 @@ def test_a_reading_cut_shows_the_state_at_that_event(tmp_path: Path) -> None:
     middle = ops.property_node_summary("1", cut="3")
     assert middle["cut"] == "3"
     item = middle["properties"][0]
-    # 读到「修炼」时只知道灵寂期，元婴初期还没披露。
+    # 读到「修炼」时只知道灵寂期；辟谷期从这次披露起已经被它取代，
+    # 元婴初期还没披露。
     assert item["value"] == "灵寂期"
-    assert [row["value"] for row in item["records"]] == ["辟谷期", "灵寂期"]
+    assert [row["value"] for row in item["records"]] == ["灵寂期"]
     assert item["later_count"] == 1
     assert middle["later_count"] == 1
 

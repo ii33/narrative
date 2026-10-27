@@ -168,6 +168,10 @@ def supersede_plan(
             for older in still_valid:
                 if str(older.get("value")) == str(record.get("value")):
                     continue
+                # 同一个事件里说了两件事（值不同）不互相取代：那是并列或矛盾，
+                # 不是推进。只有更晚的事件才覆盖。
+                if _statement_event(record) <= _statement_event(older):
+                    continue
                 item = {
                     "target_id": older.get("id"),
                     "event_id": record.get("event_id"),
@@ -509,6 +513,10 @@ class PropertyStore:
             if errors:
                 raise ValueError("；".join(errors))
             next_revision = revision + 1
+            # 新披露覆盖旧值：同节点、同方面、同作用域、同持有人的单值属性，
+            # 更早的那条从这次披露起不再算数。它和这次披露同属一个版本，
+            # 不需要人再去审核页点一次「应用建议」。
+            records = list(records) + supersede_records(accepted_records, records)
             for record in records:
                 db.execute(
                     "INSERT INTO property_records(id,kind,data,accepted_revision,candidate_id) "

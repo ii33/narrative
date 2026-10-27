@@ -21,7 +21,6 @@ from .harness import HarnessSettings
 from .native_models import CanvasState, candidate_summary, node_detail, search_result
 from .order_ids import order_key
 from .property_audit import audit_candidate
-from .property_store import supersede_records
 from .provider_store import ProviderStore
 
 _NODE_TYPES = {"person", "group", "item", "location", "event", "scene", "storyline", "other"}
@@ -695,13 +694,7 @@ class NativeBridge(QObject):
                     "persistence": "until_changed",
                 })
             records.append(record)
-            # 补一条更晚的披露，等于说这个方面从此刻起换了值：更早的那条
-            # 从这次披露起失效，和提取、审计用的是同一条规则。
-            records.extend(
-                supersede_records(
-                    ops.property_records(include_retracted=True), [record]
-                )
-            )
+            # 更早的那条由 accept 统一按取代规则标失效，这里不再重复算一遍。
             return records, "人工补录"
 
         self._stage_records("property_add", build)
@@ -774,28 +767,6 @@ class NativeBridge(QObject):
             return event_id
         all_events = steps(ops.graph_snapshot(), "event")
         return all_events[-1]["id"] if all_events else ""
-
-    @Slot(str)
-    def applySuperseded(self, pairs_json: str) -> None:
-        """Mark older values invalid from the disclosure that replaced them.
-
-        The pairs come from the audit's `superseded_values` findings: each one
-        names a record and the event it stopped counting at. Nothing is deleted
-        and no reading position before that event changes.
-        """
-        try:
-            pairs = json.loads(pairs_json)
-        except json.JSONDecodeError as exc:
-            self.errorOccurred.emit("property_supersede", f"失效建议无效：{exc.msg}")
-            return
-        if not isinstance(pairs, list) or not pairs:
-            self.errorOccurred.emit("property_supersede", "没有可应用的失效建议")
-            return
-
-        def work(ops) -> dict:
-            return ops.property_supersede([dict(item) for item in pairs])
-
-        self._project_task("property_supersede", work)
 
     @Slot(str)
     def loadNodeEditor(self, node_id: str) -> None:

@@ -64,21 +64,18 @@ def test_same_value_at_different_places_is_a_restatement_not_an_error() -> None:
     assert report["counts"]["error"] == 0
 
 
-def test_different_values_report_the_current_one() -> None:
+def test_a_changing_value_is_not_an_audit_finding() -> None:
+    """值变了是推进，不是问题：更早的那条在接受时就自动失效了，审计不必再提。"""
     records = [
         _definition("height"),
         _value("v1", "1", "height", "矮小", event="1", start=0),
         _value("v2", "1", "height", "180 公分", event="2", start=0),
     ]
     report = audit_properties(records, [_node("1", "林舟")])
+    codes = _codes(report)
 
-    finding = next(item for item in report["issues"] if item["code"] == "superseded_values")
-    assert "180 公分" in finding["message"]
-    # 值变了是推进，不是错误：审核只给出「哪条该失效」的建议。
-    assert finding["severity"] == "info"
-    # 建议里带够信息，界面才能一键落地：目标记录 + 从哪个事件起失效。
-    pairs = finding["action"]["pairs"]
-    assert [(item["target_id"], item["event_id"]) for item in pairs] == [("v1", "2")]
+    assert "superseded_values" not in codes
+    assert report["counts"]["error"] == 0
 
 
 def test_missing_definition_evidence_and_anchor_are_reported() -> None:
@@ -291,6 +288,6 @@ def test_a_changing_value_is_a_progression_not_a_conflict() -> None:
     codes = _codes(report)
 
     assert "name_variant" not in codes
-    assert "superseded_values" in codes
+    assert "superseded_values" not in codes
     assert report["counts"]["error"] == 0
 

@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from pathlib import Path
@@ -1048,15 +1047,18 @@ def test_a_correction_always_takes_the_old_record_back(workspace) -> None:
 
 
 def test_retracting_at_a_cut_works_when_it_was_superseded_later(workspace) -> None:
-    """审计说过「从事件 5 起不算」，站在事件 4 再撤一次仍然有效——那是新说法。"""
+    """更晚的事件已经把它取代了，站在更早的位置再撤一次仍然有效——那是新说法。"""
     app, bridge, page, results, _errors = workspace
+    # 在事件 5 补一条新状态：事件 4 的那两条从这次披露起自动失效。
     del results[:]
-    bridge.applySuperseded(json.dumps([
-        {"target_id": "v1", "event_id": "5", "reason": "被后一条披露取代"}
-    ]))
-    _pump(app, results, "property_supersede")
+    bridge.addPropertyRecord({
+        "node_id": "1", "property_id": "state", "value": "换了个样子",
+        "event_id": "5", "category": "其他", "source": "narration",
+        "quote": "", "source_id": "",
+    })
+    assert _pump(app, results, "property_add")["status"] == "accepted"
 
-    # 第一个场景锚在事件 4：读者还没读到 5，这条仍然是有效值。
+    # 站在第一个场景（事件 4）：读者还没读到 5，那两条仍然是有效值。
     del results[:]
     page.pickCut(1)
     _pump(app, results, "browse")
@@ -1085,5 +1087,3 @@ def test_retracting_at_a_cut_works_when_it_was_superseded_later(workspace) -> No
     _pump(app, results, "node_properties", "1")
     app.processEvents()
     assert [r["label"] for r in _value(page.property("propertyRows"))].count("状态") == 1
-
-
