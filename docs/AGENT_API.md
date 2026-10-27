@@ -45,6 +45,10 @@
 | `categorize_records` | 把记录移到某个显示大类 | 写 |
 | `accept_candidate` / `reject_candidate` | 处理候选（节点/属性/提取结果） | 写 |
 | `import_source` | 导入一段原文（标题 + 正文），返回原文编号 | 写 |
+| `extract_propose` | 提取第一步：模型读整章，出节点、事件、属性（只读原文） | 写 |
+| `extract_review` | 提取第二步：拿库里已有的值对照提议，只丢确定的重复 | 写 |
+| `extract_build` | 提取第三步：落成对象与记录，**只算不写**；编号、锚点、取代都在这里定 | 读 |
+| `extract_commit` | 提取第四步：把落好的结果变成一个待审候选 | 写 |
 | `extract_source` | 用工程配置的模型提取一篇原文；`commit=true` 同时生成待审候选 | 写 |
 
 写操作遵守界面里那套规则，不是另一套：
@@ -87,7 +91,12 @@ narrative material 7 --project P --cut E5
 narrative delete-material 7 <资料编号> --project P
 narrative import-source 第一章 --file ch1.txt --project P   # 长文本走文件
 narrative categories --project P
-narrative extract <source_id> --commit --project P
+# 提取分四步：每一步都能单独跑，产物落在 <工程>_extraction/<原文编号>.json
+narrative extract-propose <source_id> --project P   # 模型读整章
+narrative extract-review  <source_id> --project P   # 对照库里的值
+narrative extract-build   <source_id> --project P   # 只算不写：看会生成什么
+narrative extract-commit  <source_id> --project P   # 变成待审候选
+narrative extract <source_id> --commit --project P  # 一次跑完四步
 ```
 
 默认输出是给人看的一行行；加 `--json` 得到完整结构。

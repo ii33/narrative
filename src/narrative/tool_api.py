@@ -583,50 +583,162 @@ def _reject(ops, params: dict) -> dict:
     return {"status": "rejected", "candidate_id": params["candidate_id"]}
 
 
-def _extract(ops, params: dict) -> dict:
-    """Run the model over one source; optionally turn it into a pending candidate."""
-    from .extraction import build_candidate, extract_chapter
+def _extraction_path(ops, source_id: str) -> Path:
+    """提取的中间产物：工程旁边，按原文分文件。界面和工具用同一个位置。"""
+    return ops.path.with_name(ops.path.stem + "_extraction") / f"{source_id}.json"
+
+
+def _harness(ops) -> tuple[Any, str, Path]:
+    """模型设置、密钥、工作目录。提取的每一步都从这里拿，不各自读环境。"""
     from .harness import HarnessSettings
 
-    _need(params, "source_id")
-    source = ops.source(str(params["source_id"]))
     settings = HarnessSettings.model_validate(
         ops.harness_settings() | {"timeout_seconds": 600}
     )
     api_key = os.environ.get(settings.key_env) or os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
         raise ToolError(f"缺少 {settings.key_env} 或 DEEPSEEK_API_KEY，无法调用模型")
-    # 提取的中间产物放在工程旁边，和界面用的是同一个位置。
-    workdir = ops.project_info().path.with_name(
-        ops.project_info().path.stem + "_extraction"
-    ) / source["id"] / "sdk"
-    workdir.mkdir(parents=True, exist_ok=True)
-    data = extract_chapter(
-        source["title"], source["text"], settings=settings, api_key=api_key,
-        workdir=workdir, ops=ops,
-    )
-    data.pop("raw", None)
-    data["source_id"] = source["id"]
-    result: dict[str, Any] = {
-        "source_id": source["id"],
-        "nodes": len(data.get("nodes", [])),
-        "events": sum(1 for node in data.get("nodes", []) if node.get("node_type") == "event"),
-        "properties": len(data.get("properties", [])),
-        "rejected": len(data.get("rejected", [])),
+    return settings, api_key, ops.path.with_name(ops.path.stem + "_extraction")
+
+
+def _read_extraction(ops, source_id: str) -> dict:
+    path = _extraction_path(ops, source_id)
+    if not path.is_file():
+        raise ToolError("还没有提取结果：先跑 extract_propose")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _save_extraction(ops, source_id: str, data: dict) -> dict:
+    """落盘一份提议。`raw` 已经在 workdir/raw.txt 里，不重复存。"""
+    saved = dict(data)
+    saved.pop("raw", None)
+    saved["source_id"] = source_id
+    path = _extraction_path(ops, source_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(saved, ensure_ascii=False, indent=2), encoding="utf-8")
+    return saved
+
+
+def _extraction_counts(data: dict) -> dict:
+    nodes = data.get("nodes") or []
+    return {
+        "nodes": len(nodes),
+        "events": sum(1 for node in nodes if node.get("type") == "event"),
+        "properties": len(data.get("properties") or []),
+        "rejected": len(data.get("rejected") or []),
     }
-    if not params.get("commit"):
-        return result
+
+
+def _extract_propose(ops, params: dict) -> dict:
+    """第一步：模型读整章，出节点、事件、属性。只读原文，不带库里的旧值。"""
+    from .extraction import read_chapter
+
+    _need(params, "source_id")
+    source_id = str(params["source_id"])
+    source = ops.source(source_id)
+    settings, api_key, workdir = _harness(ops)
+    data = read_chapter(
+        source["title"], source["text"], settings=settings, api_key=api_key,
+        workdir=workdir / source_id / "sdk", ops=ops,
+    )
+    data["source_hash"] = source["hash"]
+    saved = _save_extraction(ops, source_id, data)
+    return {
+        "status": "accepted",
+        "source_id": source_id,
+        **_extraction_counts(saved),
+        "cache": str(_extraction_path(ops, source_id)),
+    }
+
+
+def _extract_review(ops, params: dict) -> dict:
+    """第二步：拿库里的值对照提议，只丢确定的重复。"""
+    from .extraction import review_chapter
+
+    _need(params, "source_id")
+    source_id = str(params["source_id"])
+    data = _read_extraction(ops, source_id)
+    settings, api_key, workdir = _harness(ops)
+    reviewed = review_chapter(
+        ops, data, settings=settings, api_key=api_key,
+        workdir=workdir / source_id / "sdk",
+    )
+    saved = _save_extraction(ops, source_id, reviewed)
+    review = saved.get("review") or {}
+    return {
+        "status": "accepted",
+        "source_id": source_id,
+        "kept": len(saved.get("properties") or []),
+        "dropped": len(review.get("dropped") or []),
+        "unsure": len(review.get("unresolved") or []),
+        "supersede": len(saved.get("supersede") or []),
+        "rounds": review.get("rounds"),
+    }
+
+
+def _extract_build(ops, params: dict) -> dict:
+    """第三步：把提议落成对象和记录，只算不写。
+
+    编号、锚点、场景归属、取代关系都在这里定，所以 agent 不必（也不该）自己
+    造 id——它只要看结果、判断对不对。
+    """
+    from .extraction import build_candidate
+
+    _need(params, "source_id")
+    source_id = str(params["source_id"])
+    built = build_candidate(ops, _read_extraction(ops, source_id))
+    return {
+        "source_id": source_id,
+        "empty": bool(built.get("empty")),
+        "errors": bool(built.get("errors")),
+        "revision": built.get("revision"),
+        "node_count": built.get("node_count"),
+        "scene_links": built.get("scene_links"),
+        "diagnostics": built.get("diagnostics") or [],
+        "objects": built.get("objects") or [],
+        "property_records": built.get("property_records") or [],
+    }
+
+
+def _extract_commit(ops, params: dict) -> dict:
+    """第四步：把落好的对象和记录变成一个待审候选。图要人接受才变。"""
+    from .extraction import build_candidate
+
+    _need(params, "source_id")
+    source_id = str(params["source_id"])
+    data = _read_extraction(ops, source_id)
     built = build_candidate(ops, data)
     if built.get("empty"):
-        return result | {"candidate_id": None, "note": "提取结果为空"}
+        return {"source_id": source_id, "candidate_id": None, "note": "提取结果为空"}
     if built["errors"]:
-        return result | {"candidate_id": None, "diagnostics": built["diagnostics"]}
+        return {
+            "source_id": source_id,
+            "candidate_id": None,
+            "diagnostics": built["diagnostics"],
+        }
     candidate = ops.change_propose(
         built["objects"], built["property_records"], built["revision"],
         source="correction" if built.get("requires_correction") else "model",
-        note="工具提取",
+        note=f"原文提取：{data.get('chapter', source_id)}",
     )
-    return result | {"candidate_id": candidate}
+    return {
+        "status": "accepted",
+        "source_id": source_id,
+        "candidate_id": candidate,
+        "node_count": built["node_count"],
+        "scene_links": built["scene_links"],
+        "diagnostics": built["diagnostics"],
+    }
+
+
+def _extract(ops, params: dict) -> dict:
+    """一次跑完：读、对照、落候选（`commit=true` 时）。分步工具用的是同一批函数。"""
+    _need(params, "source_id")
+    result = _extract_propose(ops, params)
+    result = result | _extract_review(ops, params)
+    if not params.get("commit"):
+        return result
+    return result | _extract_commit(ops, params)
 
 
 TOOLS: dict[str, Tool] = {}
@@ -939,8 +1051,35 @@ _register(Tool(
     writes=True,
 ))
 _register(Tool(
+    "extract_propose",
+    "提取第一步：模型读整章，出节点、事件、属性（只读原文，不带库里的旧值）",
+    {"source_id": {"type": "string", "required": True}},
+    _extract_propose,
+    writes=True,
+))
+_register(Tool(
+    "extract_review",
+    "提取第二步：拿库里已有的值对照提议，只丢确定的重复",
+    {"source_id": {"type": "string", "required": True}},
+    _extract_review,
+    writes=True,
+))
+_register(Tool(
+    "extract_build",
+    "提取第三步：把提议落成对象和记录，只算不写——编号、锚点、场景、取代都在这里定",
+    {"source_id": {"type": "string", "required": True}},
+    _extract_build,
+))
+_register(Tool(
+    "extract_commit",
+    "提取第四步：把落好的结果变成一个待审候选（图要人接受才变）",
+    {"source_id": {"type": "string", "required": True}},
+    _extract_commit,
+    writes=True,
+))
+_register(Tool(
     "extract_source",
-    "用工程配置的模型提取一篇原文；commit=true 时同时生成待审候选",
+    "一次跑完四步：读、对照、落候选（`commit=true` 时生成待审候选）",
     {
         "source_id": {"type": "string", "required": True},
         "commit": {"type": "boolean", "description": "是否直接生成候选"},

@@ -158,6 +158,18 @@ ALIASES: dict[str, tuple[str, list[tuple[str, str, type | str, str]]]] = {
         ("--file", "text", "file", "从文件读正文；长文本用这个"),
     ]),
     "categories": ("property_categories", []),
+    "extract-propose": ("extract_propose", [
+        ("source_id", "source_id", str, "原文编号"),
+    ]),
+    "extract-review": ("extract_review", [
+        ("source_id", "source_id", str, "原文编号"),
+    ]),
+    "extract-build": ("extract_build", [
+        ("source_id", "source_id", str, "原文编号"),
+    ]),
+    "extract-commit": ("extract_commit", [
+        ("source_id", "source_id", str, "原文编号"),
+    ]),
     "extract": ("extract_source", [
         ("source_id", "source_id", str, "原文编号"),
         ("--commit", "commit", "flag", "同时生成待审候选"),

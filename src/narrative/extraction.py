@@ -404,7 +404,7 @@ def known_properties(ops) -> list[dict]:
     ]
 
 
-def extract_chapter(
+def read_chapter(
     title: str,
     text: str,
     *,
@@ -413,11 +413,10 @@ def extract_chapter(
     workdir: Path,
     ops=None,
 ) -> dict:
-    """Read the chapter, then (when a project is given) compare against stored values.
+    """第一轮：整章读。不带库里的旧值，只认原文。
 
-    Round one extracts without knowing what is already recorded. Round two hands
-    the model the stored values for exactly the properties it proposed and asks
-    which are genuinely new; extra rounds are allowed if it asks for more.
+    返回校验过的提议（节点、属性、被丢弃的引文）。原始响应和元数据落在
+    `workdir` 里，随时可以回看模型到底说了什么。
     """
     runner = HarnessRunner(settings, api_key, workdir)
     known = known_properties(ops) if ops is not None else None
@@ -433,22 +432,6 @@ def extract_chapter(
         json.dumps(reply.metadata, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     result = parse_nodes(reply.raw, text)
-    if ops is not None and result.get("properties"):
-        from .extraction_review import review_properties
-
-        reviewed = review_properties(
-            ops, result, settings=settings, api_key=api_key, workdir=workdir
-        )
-        result["properties"] = reviewed["properties"]
-        # Old values the review round judged to be over. They are proposals until
-        # an event and a record can be resolved for them; `build_candidate` does
-        # that and drops whatever does not resolve.
-        result["supersede"] = reviewed.get("supersede") or []
-        result["review"] = {
-            "dropped": reviewed["dropped"],
-            "unresolved": reviewed.get("unresolved") or [],
-            "rounds": reviewed["rounds"],
-        }
     result.update({
         "chapter": title,
         "characters": len(text),
@@ -458,6 +441,64 @@ def extract_chapter(
         "raw": reply.raw,
     })
     return result
+
+
+def review_chapter(
+    ops,
+    data: dict,
+    *,
+    settings: HarnessSettings,
+    api_key: str,
+    workdir: Path,
+) -> dict:
+    """第二、三轮：拿库里已有的值对照，只丢确定的重复。
+
+    这一步是「对照」，不是「再读一遍」：它看的是第一轮解析出来的提议，加上这些
+    属性在库里已经记录的值。旧值失效（`supersede`）也在这里给，能不能落实由
+    `build_candidate` 判断。
+    """
+    if not data.get("properties"):
+        return data
+    from .extraction_review import review_properties
+
+    reviewed = review_properties(
+        ops, data, settings=settings, api_key=api_key, workdir=workdir
+    )
+    result = dict(data)
+    result["properties"] = reviewed["properties"]
+    # 旧值是不是真的失效，要等 `build_candidate` 把它们解析成记录和事件；
+    # 解析不出来的会被丢掉。
+    result["supersede"] = reviewed.get("supersede") or []
+    result["review"] = {
+        "dropped": reviewed["dropped"],
+        "unresolved": reviewed.get("unresolved") or [],
+        "rounds": reviewed["rounds"],
+    }
+    return result
+
+
+def extract_chapter(
+    title: str,
+    text: str,
+    *,
+    settings: HarnessSettings,
+    api_key: str,
+    workdir: Path,
+    ops=None,
+) -> dict:
+    """一轮读完再加对照：`read_chapter` + `review_chapter` 的组合。
+
+    分步的版本在工具面里（`extract_propose` / `extract_review`），两边调的是
+    同一对函数，不会各说一套。
+    """
+    result = read_chapter(
+        title, text, settings=settings, api_key=api_key, workdir=workdir, ops=ops
+    )
+    if ops is None:
+        return result
+    return review_chapter(
+        ops, result, settings=settings, api_key=api_key, workdir=workdir
+    )
 
 
 def _checkpoint_at(start: int, checkpoints: list[tuple[int, int, str]]) -> str | None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -214,6 +215,94 @@ def test_retracting_without_an_event_means_it_never_counted(project: Path) -> No
         "node_properties", {"node_id": "1", "cut": "2"}, project=project
     )
     assert at_its_own_event["properties"] == []
+
+
+def _fresh_project(path: Path) -> tuple[Path, str]:
+    """一个只有原文、还没有节点的工程：编号从 P1/E1 开始，好断言。"""
+    ops = create_graph_project(path)
+    source = ops.import_source("第一章", "林舟推门进来。老周笑了。")
+    return path, source
+
+
+def _seed_extraction(project: Path, source_id: str, text: str, payload: dict) -> None:
+    """把一次「模型读出来的东西」直接写进缓存，跳过模型调用。"""
+    from narrative.extraction import parse_nodes
+
+    data = parse_nodes(json.dumps(payload, ensure_ascii=False), text)
+    data["source_id"] = source_id
+    data["chapter"] = "第一章"
+    cache = project.with_name(project.stem + "_extraction") / f"{source_id}.json"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+PROPOSAL = {
+    "nodes": [
+        {"name": "林舟", "type": "person", "quotes": ["林舟推门进来"], "aliases": []},
+        {"name": "老周", "type": "person", "quotes": ["老周笑了"], "aliases": []},
+        {"name": "老周笑了", "type": "event", "quotes": ["老周笑了"],
+         "participants": ["老周"], "scene": ""},
+    ],
+    "properties": [
+        {"node": "老周", "property": "state", "value": "心情不错",
+         "quotes": ["老周笑了"], "at_event": "老周笑了", "scope": "world"},
+    ],
+}
+
+
+def test_extract_build_computes_the_candidate_without_writing(tmp_path: Path) -> None:
+    """落库这一步是纯计算：编号、锚点都在这里定，但图一动不动。"""
+    project, source_id = _fresh_project(tmp_path / "build.sqlite3")
+    text = "林舟推门进来。老周笑了。"
+    _seed_extraction(project, source_id, text, PROPOSAL)
+
+    before = tool_api.call("project_info", {}, project=project)["project"]["revision"]
+    built = tool_api.call("extract_build", {"source_id": source_id}, project=project)
+
+    assert built["errors"] is False
+    # 每种类型自己一套编号，由程序发，不由模型猜。
+    nodes = [obj for obj in built["objects"] if obj.get("node_type")]
+    assert sorted(obj["id"] for obj in nodes) == ["E1", "P1", "P2"]
+    # 顺带一条 source_order：这一章在阅读顺序里的位置。
+    assert any(obj.get("kind") == "source_order" for obj in built["objects"])
+    values = [
+        record for record in built["property_records"]
+        if record.get("kind") == "property_value"
+    ]
+    assert [record["node_id"] for record in values] == ["P2"]
+    assert values[0]["event_id"] == "E1"
+
+    # 只算不写：修订号没动，候选也没多出来。
+    after = tool_api.call("project_info", {}, project=project)["project"]["revision"]
+    assert after == before
+    pending = tool_api.call("list_candidates", {}, project=project)
+    assert pending["changes"] == []
+
+
+def test_extract_commit_makes_a_pending_candidate_only(tmp_path: Path) -> None:
+    project, source_id = _fresh_project(tmp_path / "commit.sqlite3")
+    _seed_extraction(project, source_id, "林舟推门进来。老周笑了。", PROPOSAL)
+
+    before = tool_api.call("project_info", {}, project=project)["project"]["revision"]
+    committed = tool_api.call("extract_commit", {"source_id": source_id}, project=project)
+    assert committed["candidate_id"]
+    # 候选不是图：接受之前修订号不动。
+    assert tool_api.call("project_info", {}, project=project)["project"]["revision"] == before
+    pending = tool_api.call("list_candidates", {}, project=project)
+    assert [row["id"] for row in pending["changes"]] == [committed["candidate_id"]]
+
+    accepted = tool_api.call(
+        "accept_candidate", {"candidate_id": committed["candidate_id"]}, project=project
+    )
+    assert accepted["revision"] == before + 1
+    nodes = tool_api.call("list_nodes", {}, project=project)["nodes"]
+    assert sorted(node["id"] for node in nodes) == ["E1", "P1", "P2"]
+
+
+def test_extract_build_needs_a_proposal_first(tmp_path: Path) -> None:
+    project, source_id = _fresh_project(tmp_path / "empty.sqlite3")
+    with pytest.raises(tool_api.ToolError, match="extract_propose"):
+        tool_api.call("extract_build", {"source_id": source_id}, project=project)
 
 
 def test_bad_calls_say_what_is_wrong(project: Path) -> None:
