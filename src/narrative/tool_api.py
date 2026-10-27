@@ -180,7 +180,7 @@ def _scene_events(snapshot: dict, scene: dict, seen: set[str] | None = None) -> 
         if child.get("node_type") == "event":
             out.append(child_id)
         out.extend(_scene_events(snapshot, child, seen))
-    return sorted(dict.fromkeys(out), key=order_key)
+    return sorted(dict.fromkeys(out), key=lambda item: order_key(item) or ())
 
 
 def _state_of(ops, ids: list[str], cut: str, limit: int = 20) -> list[dict]:
