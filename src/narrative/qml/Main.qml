@@ -35,6 +35,8 @@ ApplicationWindow {
         readonly property color line: "#dfe6f0"
         readonly property color paper: "#f4f7fb"
         readonly property color card: "#ffffff"
+        readonly property color panel: "#ffffff"
+        readonly property color panelAlt: "#f7f9fd"
         readonly property color accent: "#2b5cd9"
         readonly property color accentSoft: "#eaf0ff"
         readonly property color ok: "#127a5e"
@@ -81,6 +83,7 @@ ApplicationWindow {
         {key: "source", label: "原文", hint: "导入与回查"},
         {key: "extract", label: "提取", hint: "按章提取"},
         {key: "property", label: "属性", hint: "披露序列"},
+        {key: "wiki", label: "角色 Wiki", hint: "圣经与形象"},
         {key: "review", label: "审核", hint: "候选接受"},
         {key: "model", label: "模型", hint: "服务与运行"}
     ]
@@ -345,6 +348,7 @@ ApplicationWindow {
                         SourcePage { id: sourcePage; app: app }
                         ExtractPage { app: app }
                         PropertyPage { app: app }
+                        WikiPage { app: app }
                         ReviewPage { app: app }
                         ModelPage { app: app }
                     }

@@ -233,8 +233,13 @@ def node_detail(
         0 if item["node_type"] in {"event", "scene", "storyline", "group"} else 1,
         item["name"], item["id"],
     ))
+    from .order_ids import label_id as make_label
+
+    node = _node(by_id[node_id], labels, {})
+    # 编号带类型前缀（P7 / E1.2），和列表里看到的是同一个写法。
+    node["label_id"] = make_label(node.get("id") or "", node.get("node_type"))
     return {
-        "node": _node(by_id[node_id], labels, {}), "revision": view["revision"],
+        "node": node, "revision": view["revision"],
         "assertions": assertions,
         "related_nodes": related,
         "uncertainties": view.get("uncertainties", []),
@@ -257,4 +262,31 @@ def search_result(view: dict, labels: dict[str, dict], types: list[str]) -> dict
         "pending_excluded": view.get("pending_excluded", True),
         "uncertainties": view.get("uncertainties", []),
     }
+
+
+def wiki_state(rows: list[dict]) -> list[dict]:
+    """一个方面一条当前值，给角色 wiki 的那块「读到这里的他」看。
+
+    属性区一行是「一个方面 × 一个分类」，同一方面分在两个大类下会出现两次；
+    wiki 只要状态，所以每个方面取一次（拿持有当前值的那一片），节点值换成名字。
+    """
+    seen: set[str] = set()
+    state: list[dict] = []
+    for row in rows:
+        if not row.get("is_current"):
+            continue
+        aspect = row.get("aspect") or row.get("property_id") or ""
+        if not aspect or aspect in seen:
+            continue
+        seen.add(aspect)
+        value_node = row.get("value_node") or None
+        state.append({
+            "aspect": aspect,
+            "label": row.get("label") or aspect,
+            "value": value_node["name"] if value_node else row.get("value"),
+            "value_node": value_node,
+            "scope": row.get("scope") or "world",
+            "holder": row.get("holder_name") or "",
+        })
+    return state
 

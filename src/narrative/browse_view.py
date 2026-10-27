@@ -19,7 +19,7 @@ from __future__ import annotations
 from collections import Counter
 
 from .graph_query import revealed
-from .order_ids import order_key
+from .order_ids import label_id, order_key
 
 GRANULARITIES = ("scene", "event")
 LABELS = {"scene": "场景", "event": "事件"}
@@ -90,6 +90,7 @@ def steps(snapshot: dict, granularity: str = "scene") -> list[dict]:
     return [
         {
             "id": node["id"],
+            "label_id": label_id(node["id"], kind),
             "name": node.get("name") or node["id"],
             "kind": kind,
             "label": LABELS[kind],
@@ -244,6 +245,11 @@ def browse_view(
         if not node_type or (node.get("node_type") or "other") == node_type
     ]
     shown.sort(key=_key)
+    # 编号带类型前缀（E1.2 / P7），一眼看出同类里的先后；存的主键不变。
+    shown = [
+        dict(node, label_id=label_id(node.get("id") or "", node.get("node_type")))
+        for node in shown
+    ]
     return {
         "granularity": granularity if granularity in GRANULARITIES else "scene",
         "revision": snapshot.get("revision"),

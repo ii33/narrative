@@ -15,8 +15,6 @@ Column {
     // 同一属性可能分在两个大类里，这时说明清楚，避免看起来像少了几条。
     readonly property string splitHint: (row.otherCategories || []).length > 0
         ? "也在「" + (row.otherCategories || []).join("」「") + "」中" : ""
-    // 一行里合了几个属性名时要说出来，否则读者不知道记录来自两个名字。
-    readonly property string nameHint: row.names.length > 0 ? "同一方面 " + row.names : ""
 
     spacing: 0
 
@@ -117,6 +115,19 @@ Column {
                         onClicked: item.host.askCategory(item.row.category, item.row.recordIds)
                     }
                 }
+                // 两个名字合成一个方面：只在真合了的时候给一个入口，不单独占一行。
+                Label {
+                    visible: item.row.nameIds.length > 1
+                    text: "合并…"
+                    color: item.t.accent
+                    font.pixelSize: 10
+                    font.underline: true
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: item.host.askMerge(item.row.nameIds)
+                    }
+                }
             }
 
             Label {
@@ -129,32 +140,6 @@ Column {
                 font.pixelSize: 10
                 elide: Text.ElideRight
                 Layout.minimumWidth: 0
-            }
-            // 一行合了几个属性名时单独说：这是要合并的信号，不该被省略号吞掉。
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 6
-                visible: item.nameHint.length > 0
-
-                Label {
-                    Layout.fillWidth: true
-                    text: item.nameHint
-                    color: item.t.warn
-                    font.pixelSize: 10
-                    elide: Text.ElideRight
-                    Layout.minimumWidth: 0
-                }
-                Label {
-                    text: "合并…"
-                    color: item.t.accent
-                    font.pixelSize: 10
-                    font.underline: true
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: item.host.askMerge(item.row.nameIds)
-                    }
-                }
             }
         }
     }

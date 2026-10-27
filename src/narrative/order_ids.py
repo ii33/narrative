@@ -71,3 +71,28 @@ def _first_free(segments: tuple[int, ...], taken: set[str]) -> str:
     while format_id(candidate) in taken:
         candidate = candidate[:-1] + (candidate[-1] + 1,)
     return format_id(candidate)
+
+
+# 节点编号带类型前缀：一眼看出这是第几个人、第几个事件，同类之间直接比数字。
+# 存的是 `7`，显示成 `P7`——主键不动，属性记录、切点、引用的写法都不变。
+TYPE_PREFIX = {
+    "person": "P",
+    "group": "G",
+    "item": "I",
+    "location": "L",
+    "event": "E",
+    "scene": "S",
+    "storyline": "T",
+}
+UNKNOWN_PREFIX = "N"
+
+
+def prefix_for(node_type: str | None) -> str:
+    return TYPE_PREFIX.get((node_type or "").strip(), UNKNOWN_PREFIX)
+
+
+def label_id(node_id: str, node_type: str | None) -> str:
+    """`7` + person → `P7`；`1.2` + event → `E1.2`。"""
+    if not node_id:
+        return ""
+    return f"{prefix_for(node_type)}{node_id}"

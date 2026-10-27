@@ -127,6 +127,7 @@ Item {
             var node = nodes[j]
             rows.append({
                 id: node.id || "",
+                labelId: node.label_id || node.id || "",
                 name: node.name || "未命名",
                 kindLabel: page.typeLabels[node.node_type] || node.node_type || "节点",
                 note: node.identity_note || ""
@@ -758,6 +759,7 @@ Item {
                     spacing: 2
                     delegate: Rectangle {
                         required property string id
+                        required property string labelId
                         required property string name
                         required property string kindLabel
 
@@ -772,7 +774,7 @@ Item {
                             anchors.rightMargin: 10
                             spacing: 10
                             Label {
-                                text: id
+                                text: labelId
                                 color: t.muted
                                 font.pixelSize: 11
                                 Layout.preferredWidth: 48
@@ -830,7 +832,7 @@ Item {
                     Label {
                         Layout.fillWidth: true
                         text: detail.node
-                            ? "编号 " + detail.node.id + " · "
+                            ? "编号 " + (detail.node.label_id || detail.node.id) + " · "
                               + (page.typeLabels[detail.node.node_type] || detail.node.node_type)
                             : "在中间选择一个节点"
                         color: t.muted
