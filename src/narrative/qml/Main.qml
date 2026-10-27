@@ -50,10 +50,20 @@ ApplicationWindow {
     property string errorText: ""
     // 收到过哪些结果（自检用）：卡在空启动页时，这一行说明界面到底收到了什么。
     property var resultKinds: []
+    // 墙钟也放进去：截图上的时间比实际旧，就说明窗口没在重绘（画面冻住了）。
+    property string clock: Qt.formatTime(new Date(), "hh:mm:ss")
     property string diagnosticLine: "就绪 · " + app.mode
         + " · 工程 " + launcherPage.projectCount
         + " · 收到 " + resultKinds.length + " 条"
         + (busy ? " · 处理中 " + bridge.pendingKinds().join(",") : "")
+        + " · " + clock
+
+    Timer {
+        interval: 1000
+        running: true
+        repeat: true
+        onTriggered: app.clock = Qt.formatTime(new Date(), "hh:mm:ss")
+    }
     property string notice: ""
     property string mode: "launcher"
     property string currentPage: "browse"

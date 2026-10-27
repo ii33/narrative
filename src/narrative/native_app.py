@@ -40,6 +40,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.qa_exit_after_seconds is not None and args.qa_exit_after_seconds <= 0:
         raise ValueError("QA 窗口时长须为正数")
 
+    # 单线程渲染循环：多线程（threaded）在这台机器上出现过「界面冻在启动那一帧、
+    # 主线程和 worker 都空闲、CPU 0%」的情况——事件循环还活着，画面不再更新。
+    # 代价是渲染性能略低，换来的是画面一定会跟着状态走。
+    os.environ.setdefault("QSG_RENDER_LOOP", "basic")
     # Do not force a backend. Qt Quick selects its RHI API for the platform.
     # 逐帧的 scenegraph / RHI 日志只在 --render-log 时打开：它每帧写若干行到磁盘，
     # 正常使用时纯粹是开销。
