@@ -216,6 +216,23 @@ Dialog {
         editKey = ""
     }
 
+    // 删除：这条从来不算。和「失效」不是一句话——失效锚在读者站的位置。
+    function deleteRecords(ids) {
+        if (!ids || ids.length === 0) return
+        bridge.deletePropertyRecords(JSON.stringify(ids))
+    }
+
+    function deleteRow(item) {
+        var ids = []
+        for (var i = 0; i < (item.records || []).length; ++i)
+            if (item.records[i].valid) ids.push(item.records[i].id)
+        if (ids.length === 0) {
+            host.app.toast("这条属性现在没有有效记录", true)
+            return
+        }
+        deleteRecords(ids)
+    }
+
     function submitRetract() {
         if (retractTargets.length === 0) return
         bridge.retractPropertyRecords(JSON.stringify(retractTargets), retractReason)
@@ -260,6 +277,14 @@ Dialog {
                 editPendingId = ""
                 editor.host.notifyEdit(kind === "property_add" ? "补录已生效" : "更正已生效",
                                        payload)
+                editor.reload()
+                editor.host.load()
+                if (editor.nodeId === editor.host.selectedId)
+                    bridge.loadNodeProperties(editor.nodeId)
+            } else if (kind === "property_delete") {
+                var removed = (payload.retracted || []).length
+                editor.host.app.toast("已删除 " + removed + " 条记录（仍留在审计里）",
+                    removed === 0)
                 editor.reload()
                 editor.host.load()
                 if (editor.nodeId === editor.host.selectedId)
@@ -464,6 +489,14 @@ Dialog {
                                 onClicked: editor.startRetract(modelData)
                             }
                             Button {
+                                objectName: "editorDeleteRow_" + editor.rowKey(modelData)
+                                text: "删除"
+                                flat: true
+                                font.pixelSize: 10
+                                enabled: editor.hasValid(modelData)
+                                onClicked: editor.deleteRow(modelData)
+                            }
+                            Button {
                                 objectName: "editorRename_" + editor.rowKey(modelData)
                                 text: "改名"
                                 flat: true
@@ -508,13 +541,25 @@ Dialog {
                                 Label {
                                     objectName: "editorRecordRetract"
                                     text: "失效"
-                                    color: t.bad
+                                    color: t.muted
                                     font.pixelSize: 9
                                     font.underline: true
                                     MouseArea {
                                         anchors.fill: parent
                                         cursorShape: Qt.PointingHandCursor
                                         onClicked: editor.startRetractRecord(row, modelData)
+                                    }
+                                }
+                                Label {
+                                    objectName: "editorRecordDelete"
+                                    text: "删除"
+                                    color: t.bad
+                                    font.pixelSize: 9
+                                    font.underline: true
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: editor.deleteRecords([modelData.id])
                                     }
                                 }
                             }

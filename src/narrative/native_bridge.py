@@ -816,6 +816,29 @@ class NativeBridge(QObject):
 
         self._project_task("property_retract", work)
 
+    @Slot(str)
+    def deletePropertyRecords(self, targets_json: str) -> None:
+        """删除一条记录：它从来不算，不是「从这一步起不算」。
+
+        和「失效」分开：失效锚在读者站的位置，之前读到的仍算；删除说的是这条
+        本来就不该在。记录照样留在库里（append-only），只是不再出现在任何投影里。
+        """
+        try:
+            targets = json.loads(targets_json)
+        except json.JSONDecodeError as exc:
+            self.errorOccurred.emit("property_delete", f"记录 ID 列表无效：{exc.msg}")
+            return
+        if not isinstance(targets, list) or not all(isinstance(item, str) for item in targets):
+            self.errorOccurred.emit("property_delete", "请提供记录 ID 数组")
+            return
+
+        def work(ops) -> dict:
+            return ops.property_retract(
+                [str(item) for item in targets], "手工删除", event_id=None
+            )
+
+        self._project_task("property_delete", work)
+
     def _reading_anchor(self, ops) -> str:
         """读者现在站在哪：停在某个阅读位置就用它，停在「最新」就用最后一个事件。
 
