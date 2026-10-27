@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from narrative import tool_cli
@@ -29,6 +30,38 @@ def test_tool_list_prints_every_tool(capsys) -> None:
     printed = capsys.readouterr().out
     assert "list_nodes" in printed
     assert "add_property" in printed
+
+
+def test_every_alias_points_at_a_real_tool() -> None:
+    """别名写错工具名，只有真去敲的时候才会发现——这里先发现。"""
+    from narrative import tool_api
+
+    unknown = {
+        name: tool_name
+        for name, (tool_name, _spec) in tool_cli.ALIASES.items()
+        if tool_name not in tool_api.TOOLS
+    }
+    assert unknown == {}
+
+
+def test_the_material_aliases_reach_the_same_answers(capsys, tmp_path: Path) -> None:
+    project = _project(tmp_path / "cli-material.sqlite3")
+    assert tool_cli.main([
+        "add-material", "1", "青衫少年", "--detail", "洗得发白的青衫",
+        "--project", str(project), "--json",
+    ]) == 0
+    created = json.loads(capsys.readouterr().out)
+    card_id = created["card"]["id"]
+
+    assert tool_cli.main(["material", "1", "--project", str(project), "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert [card["title"] for card in listed["cards"]] == ["青衫少年"]
+
+    assert tool_cli.main([
+        "delete-material", "1", card_id, "--project", str(project), "--json",
+    ]) == 0
+    removed = json.loads(capsys.readouterr().out)
+    assert removed["removed"] == card_id
 
 
 def test_generic_call_with_json(capsys, tmp_path: Path) -> None:

@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from . import tool_api
 from .errors import OperationError
@@ -87,7 +88,7 @@ ALIASES: dict[str, tuple[str, list[tuple[str, str, type | str, str]]]] = {
     "retract": ("retract_properties", [
         ("--ids", "ids", "list", "记录编号（可重复）"),
         ("reason", "reason", str, "为什么失效"),
-        ("--event", "event_id", str, "从这次披露起失效；省略为「读错了」"),
+        ("--event", "event_id", str, "从这次披露起失效；省略＝删除（从来不算）"),
     ]),
     "revise-node": ("revise_node", [
         ("node_id", "node_id", str, "节点编号"),
@@ -116,6 +117,47 @@ ALIASES: dict[str, tuple[str, list[tuple[str, str, type | str, str]]]] = {
         ("candidate_id", "candidate_id", str, "候选编号"),
         ("--version", "version", int, "默认 1"),
     ]),
+    "moments": ("list_moments", []),
+    "material": ("node_material", [
+        ("node_id", "node_id", str, "节点编号"),
+        ("--cut", "cut", str, "阅读位置（事件编号）"),
+    ]),
+    "add-material": ("add_material_card", [
+        ("node_id", "node_id", str, "节点编号"),
+        ("title", "title", str, "标题"),
+        ("--detail", "detail", str, "详情"),
+        ("--from", "valid_from", str, "生效时间点（场景或事件编号）"),
+        ("--to", "valid_to", str, "失效时间点；空为一直有效"),
+    ]),
+    "update-material": ("update_material_card", [
+        ("node_id", "node_id", str, "节点编号"),
+        ("card_id", "card_id", str, "资料编号"),
+        ("--title", "title", str, "新标题"),
+        ("--detail", "detail", str, "新详情"),
+        ("--from", "valid_from", str, "新生效时间点"),
+        ("--to", "valid_to", str, "新失效时间点"),
+    ]),
+    "delete-material": ("delete_material_card", [
+        ("node_id", "node_id", str, "节点编号"),
+        ("card_id", "card_id", str, "资料编号"),
+    ]),
+    "add-material-image": ("add_material_image", [
+        ("node_id", "node_id", str, "节点编号"),
+        ("card_id", "card_id", str, "资料编号"),
+        ("path", "path", str, "图片文件"),
+        ("--caption", "caption", str, "一句说明"),
+    ]),
+    "delete-material-image": ("delete_material_image", [
+        ("node_id", "node_id", str, "节点编号"),
+        ("card_id", "card_id", str, "资料编号"),
+        ("image_id", "image_id", str, "图片编号"),
+    ]),
+    "import-source": ("import_source", [
+        ("title", "title", str, "原文标题"),
+        ("--text", "text", str, "正文（短文本直接给）"),
+        ("--file", "text", "file", "从文件读正文；长文本用这个"),
+    ]),
+    "categories": ("property_categories", []),
     "extract": ("extract_source", [
         ("source_id", "source_id", str, "原文编号"),
         ("--commit", "commit", "flag", "同时生成待审候选"),
@@ -139,6 +181,8 @@ def add_commands(subparsers) -> None:
                 kwargs["action"] = "store_true"
             elif kind == "list":
                 kwargs["action"] = "append"
+            elif kind == "file":
+                kwargs["type"] = str
             else:
                 assert not isinstance(kind, str), kind
                 kwargs["type"] = kind
@@ -158,6 +202,9 @@ def _bind(args, spec) -> dict:
             continue
         if kind == "list" and not isinstance(value, list):
             value = [value]
+        if kind == "file":
+            # 长文本从文件读：命令行塞不下五千字的一章。
+            value = Path(str(value)).read_text(encoding="utf-8")
         params[param] = value
     return params
 

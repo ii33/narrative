@@ -410,6 +410,15 @@ class GraphOperations:
 
         return browse_view(self.graph_snapshot(), **spec)
 
+    @property
+    def path(self) -> Path:
+        """工程文件路径。
+
+        资料卡这种「放在图旁边」的数据不在库里，按工程文件定位；CLI、MCP 和界面
+        都从这里拿，免得各自去猜目录。
+        """
+        return self._store.path
+
     def property_node_summary(self, node_id: str, cut: object = None) -> dict:
         """Read-only: every property of one node, with its disclosure sequence.
 

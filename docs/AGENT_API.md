@@ -22,6 +22,8 @@
 | `list_projects` | 列出某个目录下的工程（只读，不打开） | 读 |
 | `project_info` | 工程标题、修订号、节点数、原文数、待审候选数 | 读 |
 | `list_nodes` | 按阅读位置列出节点；可按类型、关键字筛选，返回分类计数 | 读 |
+| `list_moments` | 阅读位置的层级：场景 → 事件，一列一层；`cut` 只能用这里的编号 | 读 |
+| `node_material` | 一个节点的资料卡：标题、详情、带说明的图片，各自的有效区间 | 读 |
 | `get_node` | 一个节点的全部字段与它在某阅读位置上的属性 | 读 |
 | `node_properties` | 一个节点在某阅读位置上的属性（失效的不返回） | 读 |
 | `scene_state` | 一个场景：它包含的节点，以及这一场结束时各方是什么状态 | 读 |
@@ -29,22 +31,29 @@
 | `statistics` | 统计：节点分类计数、原文、属性记录种类、撤回数、审核计数 | 读 |
 | `search` | 按关键字检索节点与断言 | 读 |
 | `list_sources` / `read_source` | 原文清单；按字符位置读一段 | 读 |
+| `property_categories` | 每个节点类型的大类表（显示分组，不是事实） | 读 |
 | `audit_properties` | 属性审核：重复值、缺定义、缺证据、锚点缺失等结构问题 | 读 |
 | `list_candidates` | 列出候选（默认待审） | 读 |
 | `add_property` | 补录一条属性披露：立刻生效；更早的值从这次披露起失效 | 写 |
 | `correct_property` | 更正一条取值：追加正确的记录并撤回原来那条 | 写 |
-| `retract_properties` | 把记录设为失效：不删除，但从这个位置起不再显示 | 写 |
+| `retract_properties` | 让记录不再显示：给了 `event_id` 是「从这一步起不算」，省略是「从来不算」（删除） | 写 |
+| `add_material_card` | 给节点加一张资料卡：标题、详情、生效/失效各挑一个场景或事件 | 写 |
+| `update_material_card` / `delete_material_card` | 改一张资料卡（只改给了的字段）；删一张卡，图片一起走 | 写 |
+| `add_material_image` / `delete_material_image` | 给资料卡加图（拷进工程，可带说明）；删掉某张图 | 写 |
 | `revise_node` | 修订节点的名称、类型、别名或说明（立刻生效） | 写 |
 | `merge_properties` / `rename_property` | 两个名字合成一个方面；一个方面改名 | 写 |
 | `categorize_records` | 把记录移到某个显示大类 | 写 |
 | `accept_candidate` / `reject_candidate` | 处理候选（节点/属性/提取结果） | 写 |
+| `import_source` | 导入一段原文（标题 + 正文），返回原文编号 | 写 |
 | `extract_source` | 用工程配置的模型提取一篇原文；`commit=true` 同时生成待审候选 | 写 |
 
 写操作遵守界面里那套规则，不是另一套：
 
 - 记录不原地改。更正 = 追加正确的 + 撤回错的，两半在同一个候选里。
 - 补录会立刻生效，并把同方面更早的值从这次披露起标为失效。
-- 失效不删行：记录还在库里，只是不再显示。
+- 记录不物理删除：库里 append-only，所谓「失效」「删除」都只是不再被投影读到。
+- 两句话分得开：`retract_properties` 带 `event_id` 是「从这一步起不算」，省略是「从来不算」——
+  后者就是界面上的「删除」按钮。
 - 没有引文就没有原文位置：这条记录算「该事件里最后说的」。
 
 ## 命令行
@@ -62,12 +71,22 @@ narrative scene 28 --project P
 narrative event 34 --project P
 narrative stats  --project P
 narrative search 火纹石 --project P
+narrative moments --project P            # 分级阅读位置：场景 → 事件
+narrative material 7 --project P --cut 34
 
 # 编辑
 narrative add-property 7 state 神色平静 164 --project P
 narrative correct-property value_abc123 三十一岁 --project P --reason 抄错了
 narrative retract --ids value_abc123 --reason 这句读错了 --project P
 narrative revise-node 2 --name 沈砚 --project P
+
+# 资料卡（图片拷进工程，不引用原路径）
+narrative add-material 7 青衫少年 --detail 洗得发白的青衫 --from E3 --project P
+narrative add-material-image 7 <资料编号> ./ref.png --caption 正面 --project P
+narrative material 7 --project P --cut E5
+narrative delete-material 7 <资料编号> --project P
+narrative import-source 第一章 --file ch1.txt --project P   # 长文本走文件
+narrative categories --project P
 narrative extract <source_id> --commit --project P
 ```
 

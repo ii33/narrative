@@ -50,6 +50,15 @@ class Tool:
         }
 
 
+def _labelled(node: dict) -> dict:
+    """节点 + 它的显示编号（`P3`/`E1.2`）。界面显示什么，工具就返回什么。"""
+    from .order_ids import label_id
+
+    if not isinstance(node, dict) or not node.get("id"):
+        return node
+    return node | {"label_id": label_id(str(node["id"]), node.get("node_type"))}
+
+
 def _need(params: dict, *keys: str) -> None:
     missing = [key for key in keys if params.get(key) in (None, "")]
     if missing:
@@ -141,7 +150,7 @@ def _get_node(ops, params: dict) -> dict:
     if node is None:
         raise ToolError(f"节点不存在：{node_id}")
     return {
-        "node": node,
+        "node": _labelled(node),
         "cut": cut,
         "properties": _properties(ops, node_id, cut),
     }
@@ -196,6 +205,7 @@ def _state_of(ops, ids: list[str], cut: str, limit: int = 20) -> list[dict]:
             continue
         out.append({
             "id": node_id,
+            "label_id": _labelled(node).get("label_id"),
             "name": node.get("name"),
             "node_type": node.get("node_type"),
             "properties": properties,
@@ -203,6 +213,79 @@ def _state_of(ops, ids: list[str], cut: str, limit: int = 20) -> list[dict]:
         if len(out) >= limit:
             break
     return out
+
+
+def _list_moments(ops, _params: dict) -> dict:
+    """阅读位置的层级：一列一层（场景 → 事件），给 cut 挑合法值。"""
+    from .browse_view import moment_tree
+
+    return moment_tree(ops.graph_snapshot())
+
+
+def _material(ops):
+    from .node_material import MaterialStore
+
+    return MaterialStore(ops.path)
+
+
+def _material_view(ops, params: dict) -> dict:
+    _need(params, "node_id")
+    return _material(ops).view(str(params["node_id"]), cut=_cut(params) or "")
+
+
+def _add_material_card(ops, params: dict) -> dict:
+    _need(params, "node_id", "title")
+    store = _material(ops)
+    card = store.add_card(
+        str(params["node_id"]),
+        str(params["title"]),
+        str(params.get("detail") or ""),
+        str(params.get("valid_from") or ""),
+        str(params.get("valid_to") or ""),
+    )
+    return {"status": "accepted", "card": card} | _material_view(ops, params)
+
+
+def _update_material_card(ops, params: dict) -> dict:
+    _need(params, "node_id", "card_id")
+    store = _material(ops)
+    card = store.update_card(
+        str(params["node_id"]),
+        str(params["card_id"]),
+        title=None if params.get("title") is None else str(params["title"]),
+        detail=None if params.get("detail") is None else str(params["detail"]),
+        valid_from=None if params.get("valid_from") is None else str(params["valid_from"]),
+        valid_to=None if params.get("valid_to") is None else str(params["valid_to"]),
+    )
+    return {"status": "accepted", "card": card} | _material_view(ops, params)
+
+
+def _delete_material_card(ops, params: dict) -> dict:
+    _need(params, "node_id", "card_id")
+    store = _material(ops)
+    result = store.remove_card(str(params["node_id"]), str(params["card_id"]))
+    return {"status": "accepted", **result} | _material_view(ops, params)
+
+
+def _add_material_image(ops, params: dict) -> dict:
+    _need(params, "node_id", "card_id", "path")
+    store = _material(ops)
+    record = store.add_image(
+        str(params["node_id"]),
+        str(params["card_id"]),
+        Path(str(params["path"])),
+        str(params.get("caption") or ""),
+    )
+    return {"status": "accepted", "image": record} | _material_view(ops, params)
+
+
+def _delete_material_image(ops, params: dict) -> dict:
+    _need(params, "node_id", "card_id", "image_id")
+    store = _material(ops)
+    result = store.remove_image(
+        str(params["node_id"]), str(params["card_id"]), str(params["image_id"])
+    )
+    return {"status": "accepted", **result} | _material_view(ops, params)
 
 
 def _scene_state(ops, params: dict) -> dict:
@@ -222,7 +305,7 @@ def _scene_state(ops, params: dict) -> dict:
         cut = members[-1] if members else scene_id
     cut = str(cut)
     return {
-        "scene": scene,
+        "scene": _labelled(scene),
         "cut": cut,
         "step": step,
         "nodes": view.get("nodes", []),
@@ -238,7 +321,7 @@ def _event_state(ops, params: dict) -> dict:
     if event is None:
         raise ToolError(f"事件不存在：{event_id}")
     return {
-        "event": event,
+        "event": _labelled(event),
         "cut": event_id,
         "related": _related_ids(ops, event_id),
         "state": _state_of(ops, _related_ids(ops, event_id), event_id),
@@ -252,8 +335,11 @@ def _statistics(ops, _params: dict) -> dict:
     definitions = {record["id"] for record in records if record.get("kind") == "property_definition"}
     values = [record for record in records if record.get("kind") == "property_value"]
     audit = ops.property_audit()
+    info = ops.graph_project_info()
     return {
-        "revision": ops.graph_project_info()["revision"],
+        "revision": info["revision"],
+        # 编号从 v7 起按类型各一套：读到别的版本就知道编号怎么读。
+        "schema_version": info.get("schema_version"),
         "nodes": dict(_node_types(snapshot)),
         "node_total": len(snapshot.get("nodes", [])),
         "sources": [
@@ -273,7 +359,19 @@ def _statistics(ops, _params: dict) -> dict:
 def _search(ops, params: dict) -> dict:
     _need(params, "query")
     view = ops.graph_query(query=str(params["query"]), limit=int(params.get("limit") or 50))
+    if isinstance(view, dict) and isinstance(view.get("nodes"), list):
+        view = view | {"nodes": [_labelled(node) for node in view["nodes"]]}
     return {"query": params["query"], "result": view}
+
+
+def _import_source(ops, params: dict) -> dict:
+    _need(params, "title", "text")
+    source_id = ops.import_source(str(params["title"]), str(params["text"]))
+    return {"status": "accepted", "source_id": source_id}
+
+
+def _property_categories(ops, _params: dict) -> dict:
+    return {"vocabulary": ops.property_categories()}
 
 
 def _list_sources(ops, _params: dict) -> dict:
@@ -594,6 +692,21 @@ _register(Tool(
     _event_state,
 ))
 _register(Tool(
+    "list_moments",
+    "阅读位置的层级：场景 → 事件，一列一层；cut 只能用这里的编号",
+    {},
+    _list_moments,
+))
+_register(Tool(
+    "node_material",
+    "一个节点的资料卡：标题、详情、带说明的图片，各自的有效区间",
+    {
+        "node_id": {"type": "string", "required": True},
+        "cut": {"type": "string", "description": "阅读位置（事件编号）；省略为最新"},
+    },
+    _material_view,
+))
+_register(Tool(
     "statistics",
     "统计：节点分类计数、原文、属性记录种类、撤回数、审核计数",
     {},
@@ -613,6 +726,12 @@ _register(Tool(
     "列出工程里的原文",
     {},
     _list_sources,
+))
+_register(Tool(
+    "property_categories",
+    "每个节点类型的大类表：显示用的分组，不是事实",
+    {},
+    _property_categories,
 ))
 _register(Tool(
     "read_source",
@@ -682,6 +801,71 @@ _register(Tool(
     writes=True,
 ))
 _register(Tool(
+    "add_material_card",
+    "给节点加一张资料卡：标题、详情、生效/失效各挑一个场景或事件",
+    {
+        "node_id": {"type": "string", "required": True},
+        "title": {"type": "string", "required": True},
+        "detail": {"type": "string"},
+        "valid_from": {"type": "string", "description": "生效时间点（场景或事件编号）"},
+        "valid_to": {"type": "string", "description": "失效时间点；空为一直有效"},
+        "cut": {"type": "string", "description": "回读时用的阅读位置"},
+    },
+    _add_material_card,
+    writes=True,
+))
+_register(Tool(
+    "update_material_card",
+    "改一张资料卡：只改给了的字段",
+    {
+        "node_id": {"type": "string", "required": True},
+        "card_id": {"type": "string", "required": True},
+        "title": {"type": "string"},
+        "detail": {"type": "string"},
+        "valid_from": {"type": "string"},
+        "valid_to": {"type": "string"},
+        "cut": {"type": "string"},
+    },
+    _update_material_card,
+    writes=True,
+))
+_register(Tool(
+    "delete_material_card",
+    "删一张资料卡；它的图片一起走",
+    {
+        "node_id": {"type": "string", "required": True},
+        "card_id": {"type": "string", "required": True},
+        "cut": {"type": "string"},
+    },
+    _delete_material_card,
+    writes=True,
+))
+_register(Tool(
+    "add_material_image",
+    "给一张资料卡加图：拷进工程，可带一句说明",
+    {
+        "node_id": {"type": "string", "required": True},
+        "card_id": {"type": "string", "required": True},
+        "path": {"type": "string", "required": True, "description": "图片文件路径"},
+        "caption": {"type": "string"},
+        "cut": {"type": "string"},
+    },
+    _add_material_image,
+    writes=True,
+))
+_register(Tool(
+    "delete_material_image",
+    "删掉一张资料卡里的某张图",
+    {
+        "node_id": {"type": "string", "required": True},
+        "card_id": {"type": "string", "required": True},
+        "image_id": {"type": "string", "required": True},
+        "cut": {"type": "string"},
+    },
+    _delete_material_image,
+    writes=True,
+))
+_register(Tool(
     "revise_node",
     "修订一个节点的名称、类型、别名或说明（立刻生效）",
     {
@@ -742,6 +926,16 @@ _register(Tool(
         "version": {"type": "integer"},
     },
     _reject,
+    writes=True,
+))
+_register(Tool(
+    "import_source",
+    "导入一段原文：标题 + 正文；返回原文编号，extract_source 要用它",
+    {
+        "title": {"type": "string", "required": True},
+        "text": {"type": "string", "required": True},
+    },
+    _import_source,
     writes=True,
 ))
 _register(Tool(
