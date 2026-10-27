@@ -142,9 +142,6 @@ def main(argv: list[str] | None = None) -> int:
     # 画面自愈：某些启动方式下窗口拿到第一帧之后就不再重绘——程序照常跑、状态栏
     # 时钟却是停的，看起来就是「卡死」。每 2 秒给窗口发一次 WM_PAINT：不改尺寸、
     # 不闪，只是让画面跟上状态。（实测：对冻住的窗口 InvalidateRect 一下立刻恢复。）
-    paint_poke = QTimer()
-    paint_poke.setInterval(2000)
-
     def poke_paint() -> None:
         handle = int(window.winId())
         if not handle:
@@ -153,6 +150,12 @@ def main(argv: list[str] | None = None) -> int:
         user32.InvalidateRect(handle, None, False)
         user32.UpdateWindow(handle)
 
+    # 数据一到就重画：点一下之后立刻看到结果，而不是等下一次定时器。
+    bridge.resultReady.connect(lambda *_args: poke_paint())
+    bridge.busyChanged.connect(lambda *_args: poke_paint())
+    # 兜底：QML 自己的变化（打字、滚动、悬停）也走这里，一秒一次，开销可忽略。
+    paint_poke = QTimer()
+    paint_poke.setInterval(1000)
     paint_poke.timeout.connect(poke_paint)
     paint_poke.start()
 
