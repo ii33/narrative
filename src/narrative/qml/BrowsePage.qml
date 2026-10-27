@@ -64,12 +64,21 @@ Item {
     property var inboundRows: []       // 别的节点指向本节点的记录
     // 节点资料：一张张资料卡，各有生效/失效时间。它和属性是同一类东西——
     // 「从这一步起成立，到那一步起不成立」——只是没有引文，所以不进属性记录。
-    property var material: ({ node_id: "", cut: "", cards: [], hidden_count: 0, timeline: [] })
+    property var material: ({ node_id: "", cut: "", cards: [], hidden_count: 0,
+                              moments: { levels: [], nodes: [] } })
     // 默认折叠成标题；展开状态按资料 id 记，刷新后不跳。
     property var expandedCards: ({})
     property string materialNodeId: ""
     property string cardEditId: ""
     property string pendingCardId: ""
+    // 编辑器里的草稿：两个时间点、图片清单（已有的带 id，新加的带 path）。
+    property string cardFromId: ""
+    property string cardToId: ""
+    property var draftImages: []
+    // 分级选时间点：目标字段、每列选中的 id、当前选中的那个。
+    property string momentTarget: ""
+    property var pickedPath: []
+    property string pickedId: ""
     property var vocabulary: []        // 当前节点类型的分类表
     property bool groupByCategory: true
     // 属性区回答哪个问题：latest = 这一刻的状态；all = 到这里为止说过的全部，
@@ -194,7 +203,8 @@ Item {
         categoryGroups = []
         inboundRows = []
         expandedProps = ({})
-        material = ({ node_id: "", cut: "", cards: [], hidden_count: 0, timeline: [] })
+        material = ({ node_id: "", cut: "", cards: [], hidden_count: 0,
+            moments: { levels: [], nodes: [] } })
         expandedCards = ({})
         materialNodeId = ""
         appliedCut = ""
@@ -263,7 +273,8 @@ Item {
         inboundRows = []
         expandedProps = ({})
         appliedCut = page.cutEventId
-        material = ({ node_id: "", cut: "", cards: [], hidden_count: 0, timeline: [] })
+        material = ({ node_id: "", cut: "", cards: [], hidden_count: 0,
+            moments: { levels: [], nodes: [] } })
         expandedCards = ({})
         materialNodeId = ""
         bridge.nodeDetail(id)
@@ -271,29 +282,46 @@ Item {
         bridge.loadMaterial(id)
     }
 
-    // 生效/失效下拉：空选项 + 所有场景与事件（按阅读顺序）。
-    function momentOptions(emptyLabel) {
-        var rows = [{id: "", label: emptyLabel}]
-        var timeline = page.material.timeline || []
-        for (var i = 0; i < timeline.length; ++i) {
-            var row = timeline[i]
-            rows.push({id: row.id,
-                label: row.label_id + "  " + row.name + "（" + row.kind_label + "）"})
-        }
-        return rows
+    // -- 分级时间点：一列一层，粗的在前 ---------------------------------
+    // 层级表来自后端（`browse_view.MOMENT_LEVELS`），这里不写死「场景→事件」，
+    // 多一层（卷、章，或者事件里的动作）只是多一列。
+
+    function momentLevels() {
+        return (page.material.moments || {}).levels || []
     }
 
-    function momentLabel(id) {
-        var timeline = page.material.timeline || []
-        for (var i = 0; i < timeline.length; ++i)
-            if (timeline[i].id === id) return timeline[i].label_id
-        return id
+    function momentNode(id) {
+        var nodes = (page.material.moments || {}).nodes || []
+        for (var i = 0; i < nodes.length; ++i)
+            if (nodes[i].id === id) return nodes[i]
+        return null
+    }
+
+    // 「E5 接电话」——编号比名字短，先给编号。
+    function momentText(id) {
+        if (!id) return ""
+        var node = page.momentNode(id)
+        return node ? (node.label_id + " " + node.name) : id
+    }
+
+    // 某一列的候选：这一层里挂在 parentId 下面的；没有上级的（例如不属于任何场景的
+    // 事件）也列在这一列，否则它们永远选不到。
+    function momentRows(rank, parentId) {
+        var nodes = (page.material.moments || {}).nodes || []
+        var out = []
+        for (var i = 0; i < nodes.length; ++i) {
+            var node = nodes[i]
+            if (node.rank !== rank) continue
+            var parent = node.parent_id || ""
+            if (parent === (parentId || "") || (rank > 0 && parent === "")) out.push(node)
+        }
+        return out
     }
 
     // 一张卡的有效区间，折叠时就写在标题旁边。
     function cardWindow(card) {
-        var from = card.valid_from ? page.momentLabel(card.valid_from) : "从头"
-        var to = card.valid_to ? page.momentLabel(card.valid_to) : "一直"
+        var from = card.valid_from ? page.momentText(card.valid_from) : "从头"
+        var to = card.valid_to ? page.momentText(card.valid_to) : "一直"
         return from + " → " + to
     }
 
@@ -327,30 +355,115 @@ Item {
             app.toast("这张资料不在当前阅读位置上，换个位置才看得到", true)
     }
 
-    // 新增和编辑共用一张表单：编辑时把现值填进去。
+    // -- 资料卡编辑器 ---------------------------------------------------
+
     function openCardDialog(card) {
         page.cardEditId = card ? (card.id || "") : ""
         cardTitle.text = card ? (card.title || "") : ""
         cardDetail.text = card ? (card.detail || "") : ""
-        var fromIndex = cardFrom.indexOfValue(card ? (card.valid_from || "") : "")
-        var toIndex = cardTo.indexOfValue(card ? (card.valid_to || "") : "")
-        cardFrom.currentIndex = fromIndex >= 0 ? fromIndex : 0
-        cardTo.currentIndex = toIndex >= 0 ? toIndex : 0
+        page.cardFromId = card ? (card.valid_from || "") : ""
+        page.cardToId = card ? (card.valid_to || "") : ""
+        var drafts = []
+        var images = card ? (card.images || []) : []
+        for (var i = 0; i < images.length; ++i) {
+            drafts.push({
+                id: images[i].id,
+                path: "",
+                caption: images[i].caption || "",
+                preview: page.imageUrl(images[i].path)
+            })
+        }
+        page.draftImages = drafts
         cardDialog.open()
+    }
+
+    function imageUrl(path) {
+        return path ? "file:///" + String(path).replace(/\\/g, "/") : ""
+    }
+
+    function draftCaption(index, text) {
+        var list = page.draftImages.slice()
+        if (index < 0 || index >= list.length) return
+        var item = list[index]
+        page.draftImages = list.map(function (entry, at) {
+            return at === index
+                ? {id: entry.id, path: entry.path, caption: text, preview: entry.preview}
+                : entry
+        })
+    }
+
+    function dropDraftImage(index) {
+        var list = page.draftImages.slice()
+        if (index < 0 || index >= list.length) return
+        list.splice(index, 1)
+        page.draftImages = list
+    }
+
+    function addDraftImages(urls) {
+        var list = page.draftImages.slice()
+        for (var i = 0; i < urls.length; ++i)
+            list.push({id: "", path: String(urls[i]), caption: "", preview: String(urls[i])})
+        page.draftImages = list
+    }
+
+    // 已有的带 id（只改说明），新加的带 path（提交时拷进工程）。
+    function draftImagesJson() {
+        var out = []
+        for (var i = 0; i < page.draftImages.length; ++i) {
+            var item = page.draftImages[i]
+            out.push(item.id ? {id: item.id, caption: item.caption}
+                             : {path: item.path, caption: item.caption})
+        }
+        return JSON.stringify(out)
     }
 
     function submitCard() {
         if (page.selectedId.length === 0) return
-        var from = cardFrom.currentValue || ""
-        var to = cardTo.currentValue || ""
         if (page.cardEditId.length > 0)
             bridge.updateMaterialCard(page.selectedId, page.cardEditId,
-                cardTitle.text, cardDetail.text, from, to)
+                cardTitle.text, cardDetail.text, page.cardFromId, page.cardToId,
+                page.draftImagesJson())
         else
             bridge.addMaterialCard(page.selectedId, cardTitle.text,
-                cardDetail.text, from, to)
+                cardDetail.text, page.cardFromId, page.cardToId,
+                page.draftImagesJson())
         page.cardEditId = ""
         cardDialog.close()
+    }
+
+    // -- 分级选择 -------------------------------------------------------
+
+    function openMomentPicker(target, currentId) {
+        page.momentTarget = target
+        // 从当前值往上找祖先，把每一列的选择摆好。
+        var chain = []
+        var id = currentId || ""
+        while (id) {
+            var node = page.momentNode(id)
+            if (node === null) break
+            chain.unshift(node.id)
+            id = node.parent_id || ""
+        }
+        page.pickedPath = chain
+        page.pickedId = currentId || ""
+        momentPicker.open()
+    }
+
+    function pickMoment(rank, id) {
+        var path = page.pickedPath.slice(0, rank)
+        path.push(id)
+        page.pickedPath = path
+        page.pickedId = id
+    }
+
+    function pickedAt(rank) {
+        return rank < page.pickedPath.length ? page.pickedPath[rank] : ""
+    }
+
+    function confirmMoment() {
+        if (page.momentTarget === "from") page.cardFromId = page.pickedId
+        else page.cardToId = page.pickedId
+        momentPicker.close()
     }
 
     function askMaterialImage(cardId) {
@@ -1415,7 +1528,7 @@ Item {
         }
     }
 
-    // 选图：拷进工程旁边，不引用你选的原路径。
+    // 展开的卡上「+ 图片」：选一张，直接加到这张资料上。
     FileDialog {
         id: materialImagePicker
         title: "选择图片"
@@ -1427,14 +1540,24 @@ Item {
         }
     }
 
-    // 新增 / 编辑资料卡：标题、详情、生效与失效各挑一个场景或事件。
+    // 编辑器里「+ 图片」：可以一次选多张，先摆在草稿里，保存时一起拷进来。
+    FileDialog {
+        id: draftImagePicker
+        objectName: "materialDraftPicker"
+        title: "选择图片"
+        fileMode: FileDialog.OpenFiles
+        nameFilters: ["图片 (*.png *.jpg *.jpeg *.webp *.gif)"]
+        onAccepted: page.addDraftImages(draftImagePicker.selectedFiles)
+    }
+
+    // 新增 / 编辑资料卡：标题、详情、生效与失效（分级挑一步）、图片。
     Dialog {
         id: cardDialog
         objectName: "materialCardDialog"
         title: page.cardEditId.length > 0 ? "编辑资料" : "新增资料"
         modal: true
         anchors.centerIn: parent
-        width: 440
+        width: 480
 
         contentItem: ColumnLayout {
             spacing: 6
@@ -1449,10 +1572,11 @@ Item {
                 id: cardDetail
                 objectName: "materialCardDetail"
                 Layout.fillWidth: true
-                Layout.preferredHeight: 96
+                Layout.preferredHeight: 90
                 wrapMode: TextArea.Wrap
                 placeholderText: "详情：来历、特征、要注意的地方……"
             }
+
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 8
@@ -1462,13 +1586,12 @@ Item {
                     font.pixelSize: 11
                     Layout.preferredWidth: 32
                 }
-                ComboBox {
-                    id: cardFrom
+                Button {
                     objectName: "materialCardFrom"
                     Layout.fillWidth: true
-                    textRole: "label"
-                    valueRole: "id"
-                    model: page.momentOptions("（从一开始）")
+                    flat: true
+                    text: page.cardFromId ? page.momentText(page.cardFromId) : "（从一开始）"
+                    onClicked: page.openMomentPicker("from", page.cardFromId)
                 }
             }
             RowLayout {
@@ -1480,22 +1603,97 @@ Item {
                     font.pixelSize: 11
                     Layout.preferredWidth: 32
                 }
-                ComboBox {
-                    id: cardTo
+                Button {
                     objectName: "materialCardTo"
                     Layout.fillWidth: true
-                    textRole: "label"
-                    valueRole: "id"
-                    model: page.momentOptions("（一直有效）")
+                    flat: true
+                    text: page.cardToId ? page.momentText(page.cardToId) : "（一直有效）"
+                    onClicked: page.openMomentPicker("to", page.cardToId)
                 }
             }
             Label {
                 Layout.fillWidth: true
-                text: "时间点是场景或事件：从这一步起成立，到那一步起不再算数。"
+                text: "时间点是读者读到的那一步：从这一步起成立，到那一步起不再算数。"
                 color: t.muted
                 font.pixelSize: 10
                 wrapMode: Text.Wrap
             }
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 1
+                color: t.line
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                Label {
+                    text: "图片"
+                    color: t.ink
+                    font.pixelSize: 12
+                    font.weight: Font.DemiBold
+                }
+                Label {
+                    text: page.draftImages.length
+                    color: t.muted
+                    font.pixelSize: 10
+                }
+                Item { Layout.fillWidth: true }
+                Button {
+                    objectName: "materialCardAddImage"
+                    text: "+ 图片"
+                    flat: true
+                    font.pixelSize: 10
+                    onClicked: draftImagePicker.open()
+                }
+            }
+            Flow {
+                objectName: "materialCardImages"
+                Layout.fillWidth: true
+                spacing: 8
+                Repeater {
+                    model: page.draftImages
+                    delegate: Column {
+                        required property var modelData
+                        required property int index
+                        spacing: 2
+                        Image {
+                            width: 96
+                            height: 96
+                            source: modelData.preview
+                            fillMode: Image.PreserveAspectFit
+                            asynchronous: true
+                        }
+                        TextField {
+                            width: 96
+                            font.pixelSize: 10
+                            placeholderText: "说明"
+                            text: modelData.caption
+                            onTextChanged: page.draftCaption(index, text)
+                        }
+                        Label {
+                            text: "移除"
+                            color: t.bad
+                            font.pixelSize: 9
+                            font.underline: true
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: page.dropDraftImage(index)
+                            }
+                        }
+                    }
+                }
+            }
+            Label {
+                Layout.fillWidth: true
+                visible: page.draftImages.length === 0
+                text: "还没有图片。可以一次选多张，每张下面写一句说明。"
+                color: t.muted
+                font.pixelSize: 10
+                wrapMode: Text.Wrap
+            }
+
             RowLayout {
                 Layout.fillWidth: true
                 Item { Layout.fillWidth: true }
@@ -1505,6 +1703,114 @@ Item {
                     text: page.cardEditId.length > 0 ? "保存" : "新增"
                     highlighted: true
                     onClicked: page.submitCard()
+                }
+            }
+        }
+    }
+
+    // 分级选时间点：一列一层。层级来自后端，多一层就是多一列。
+    Popup {
+        id: momentPicker
+        objectName: "materialMomentPicker"
+        modal: true
+        anchors.centerIn: parent
+        width: 560
+        height: 380
+        padding: 12
+
+        contentItem: ColumnLayout {
+            spacing: 6
+
+            Label {
+                Layout.fillWidth: true
+                text: page.momentTarget === "from" ? "从哪一步起成立" : "到哪一步起不再算数"
+                color: t.ink
+                font.pixelSize: 12
+                font.weight: Font.DemiBold
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Repeater {
+                    model: page.momentLevels()
+                    delegate: Label {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        text: modelData.label
+                        color: t.muted
+                        font.pixelSize: 10
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 8
+                Repeater {
+                    model: page.momentLevels()
+                    delegate: Rectangle {
+                        required property var modelData
+                        required property int index
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        color: t.paper
+                        radius: 4
+                        border.color: t.line
+
+                        ListView {
+                            anchors.fill: parent
+                            anchors.margins: 4
+                            clip: true
+                            spacing: 2
+                            model: page.momentRows(index, index === 0 ? "" : page.pickedAt(index - 1))
+                            delegate: Rectangle {
+                                required property var modelData
+                                width: ListView.view.width
+                                height: 26
+                                radius: 3
+                                color: page.pickedId === modelData.id ? t.accentSoft : "transparent"
+                                Label {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 6
+                                    anchors.rightMargin: 6
+                                    verticalAlignment: Text.AlignVCenter
+                                    text: modelData.label_id + "  " + modelData.name
+                                    color: page.pickedId === modelData.id ? t.accent : t.body
+                                    font.pixelSize: 11
+                                    elide: Text.ElideRight
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: page.pickMoment(index, modelData.id)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Button {
+                    objectName: "materialMomentClear"
+                    text: page.momentTarget === "from" ? "从头开始" : "一直有效"
+                    flat: true
+                    font.pixelSize: 10
+                    onClicked: {
+                        page.pickedId = ""
+                        page.pickedPath = []
+                    }
+                }
+                Item { Layout.fillWidth: true }
+                Button { text: "取消"; flat: true; onClicked: momentPicker.close() }
+                Button {
+                    objectName: "materialMomentConfirm"
+                    text: "确定"
+                    highlighted: true
+                    onClicked: page.confirmMoment()
                 }
             }
         }

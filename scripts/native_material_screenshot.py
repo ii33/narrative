@@ -81,6 +81,7 @@ def main() -> int:
     parser.add_argument("--node", default="", help="节点编号，默认第一个有属性的节点")
     parser.add_argument("--height", type=int, default=0)
     parser.add_argument("--no-scroll", action="store_true", help="不滚到资料块，看详情顶部")
+    parser.add_argument("--dialog", action="store_true", help="打开资料编辑器与分级选择器再截图")
     args = parser.parse_args()
     project = args.project.resolve()
     if not project.is_file():
@@ -171,6 +172,13 @@ def main() -> int:
         # 默认折叠成标题：只把第一张展开，截图里两种状态都看得到。
         if payload["cards"]:
             page.toggleCard(payload["cards"][0]["id"])
+        if args.dialog:
+            page.openCardDialog(payload["cards"][0] if payload["cards"] else None)
+            page.openMomentPicker("from", "")
+            roots = page.momentRows(0, "")
+            roots = roots.toVariant() if hasattr(roots, "toVariant") else roots
+            if roots:
+                page.pickMoment(0, roots[0]["id"])
         time.sleep(0.4)
         app.processEvents()
 

@@ -16,12 +16,13 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal, Slot
 
 from . import graph_profile_ops, project_catalog, providers
+from .browse_view import moment_tree
 from .extraction import build_candidate, extract_chapter
 from .graph_operations import GraphOperations
 from .harness import HarnessSettings
 from .native_models import CanvasState, candidate_summary, node_detail, search_result
 from .node_material import MaterialStore, holds_at
-from .order_ids import label_id, order_key
+from .order_ids import order_key
 from .property_audit import audit_candidate
 from .provider_store import ProviderStore
 
@@ -844,42 +845,32 @@ class NativeBridge(QObject):
     def _material(self) -> MaterialStore:
         return MaterialStore(self._project())
 
-    def _material_timeline(self, ops) -> list[dict]:
-        """生效/失效下拉里能选的东西：场景和事件，按阅读顺序排。
+    def _material_moments(self, ops) -> dict:
+        """生效/失效下拉用的分级阅读位置：一列一层（场景 → 事件）。
 
-        资料的时间点是「哪一步」，所以给的是场景与事件的编号；人、物品没有
-        阅读位置上的「一步」，拿它们当时间点只会让人看不懂。
+        层级表在 `browse_view.MOMENT_LEVELS`，父子关系看谁把谁列在 `events` 里，
+        所以再往上加「卷/章」或往下加「动作」只是往那张表里插一行。
         """
-        snapshot = ops.graph_snapshot()
-        orders = {
-            row["source_id"]: row["ordinal"]
-            for row in snapshot.get("source_orders", []) or []
-            if isinstance(row, dict)
-        }
-        rows: list[tuple[int, int, dict]] = []
-        for node in snapshot["nodes"]:
-            if node.get("node_type") not in {"scene", "event"} or node.get("retracted"):
-                continue
-            disclosure = node.get("disclosure") or {}
-            start = disclosure.get("start")
-            rows.append((
-                int(orders.get(disclosure.get("source_id"), 0) or 0),
-                start if isinstance(start, int) else -1,
-                {
-                    "id": node["id"],
-                    "label_id": label_id(node["id"], node.get("node_type")),
-                    "name": node.get("name") or node["id"],
-                    "kind": node["node_type"],
-                    "kind_label": "场景" if node["node_type"] == "scene" else "事件",
-                },
-            ))
-        rows.sort(key=lambda item: (item[0], item[1]))
-        return [row[2] for row in rows]
+        return moment_tree(ops.graph_snapshot())
 
     def _material_payload(self, ops, node_id: str) -> dict:
         return self._material().view(node_id, cut=self._state_cut) | {
-            "timeline": self._material_timeline(ops)
+            "moments": self._material_moments(ops)
         }
+
+    @staticmethod
+    def _images_from_json(text: str) -> list[dict]:
+        """编辑器传上来的图片清单：已有的带 id，新加的带 path。"""
+        raw = (text or "").strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"图片清单不是合法 JSON：{exc.msg}") from exc
+        if not isinstance(parsed, list):
+            raise ValueError("图片清单应该是一个数组")
+        return [item for item in parsed if isinstance(item, dict)]
 
     def _material_task(self, node_id: str, change) -> None:
         """改一次资料，然后把这一刻的整页发回去：界面只认一种 payload。"""
@@ -905,16 +896,25 @@ class NativeBridge(QObject):
 
         self._project_task("material", work)
 
-    @Slot(str, str, str, str, str)
+    @Slot(str, str, str, str, str, str)
     def addMaterialCard(
-        self, node_id: str, title: str, detail: str, valid_from: str, valid_to: str
+        self,
+        node_id: str,
+        title: str,
+        detail: str,
+        valid_from: str,
+        valid_to: str,
+        images_json: str,
     ) -> None:
+        images = self._images_from_json(images_json)
         self._material_task(
             node_id,
-            lambda store: store.add_card(node_id, title, detail, valid_from, valid_to),
+            lambda store: store.add_card(
+                node_id, title, detail, valid_from, valid_to, images
+            ),
         )
 
-    @Slot(str, str, str, str, str, str)
+    @Slot(str, str, str, str, str, str, str)
     def updateMaterialCard(
         self,
         node_id: str,
@@ -923,7 +923,9 @@ class NativeBridge(QObject):
         detail: str,
         valid_from: str,
         valid_to: str,
+        images_json: str,
     ) -> None:
+        images = self._images_from_json(images_json)
         self._material_task(
             node_id,
             lambda store: store.update_card(
@@ -933,6 +935,7 @@ class NativeBridge(QObject):
                 detail=detail,
                 valid_from=valid_from,
                 valid_to=valid_to,
+                images=images,
             ),
         )
 

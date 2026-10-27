@@ -24,6 +24,14 @@ from .order_ids import label_id, order_key
 GRANULARITIES = ("scene", "event")
 LABELS = {"scene": "场景", "event": "事件"}
 
+# 阅读位置的层级，从粗到细。目前只有场景和事件；再往上（卷、章）或再往下
+# （一个事件里的动作）只是往这张表里插一行——父子关系不是写死的，是看谁把谁
+# 列在 `events` 里，所以插入一层不用改别的地方。
+MOMENT_LEVELS = (
+    {"key": "scene", "label": "场景"},
+    {"key": "event", "label": "事件"},
+)
+
 
 def _key(node: dict) -> tuple:
     """同一类型内的先后：编号就是发号顺序，所以按编号比。
@@ -123,6 +131,67 @@ def steps(snapshot: dict, granularity: str = "scene") -> list[dict]:
         }
         for node in picked
     ]
+
+
+def moment_tree(snapshot: dict) -> dict:
+    """按粒度分级的阅读位置：一列一层，粗的在前。
+
+    返回 `{"levels": [{key, label}], "nodes": [{id, label_id, name, level,
+    parent_id, kind_label}]}`。父子关系取自节点自己的 `events`（场景列事件，
+    将来事件列动作），所以多一层只是 `MOMENT_LEVELS` 里多一行。
+    """
+    nodes = {
+        node["id"]: node
+        for node in snapshot.get("nodes", [])
+        if isinstance(node.get("id"), str) and not node.get("retracted")
+    }
+    present = {
+        str(node.get("node_type"))
+        for node in nodes.values()
+    }
+    levels = [dict(level) for level in MOMENT_LEVELS if level["key"] in present]
+    if not levels:
+        return {"levels": [], "nodes": []}
+    wanted = {level["key"] for level in levels}
+    rank = {level["key"]: index for index, level in enumerate(levels)}
+
+    # 谁把谁列在自己的 `events` 里，谁就是上一层。
+    parent_of: dict[str, str] = {}
+    for node in nodes.values():
+        for child in node.get("events") or []:
+            if child in nodes:
+                parent_of.setdefault(child, node["id"])
+
+    orders = _orders(snapshot)
+    rows: list[tuple[int, int, dict]] = []
+    for node in nodes.values():
+        if node.get("node_type") not in wanted:
+            continue
+        disclosure = node.get("disclosure")
+        disclosure = disclosure if isinstance(disclosure, dict) else {}
+        source = disclosure.get("source_id")
+        start = disclosure.get("start")
+        rows.append((
+            int(orders.get(source, 0) or 0) if isinstance(source, str) else 0,
+            start if isinstance(start, int) else -1,
+            node,
+        ))
+    rows.sort(key=lambda item: (item[0], item[1], _key(item[2])))
+    return {
+        "levels": levels,
+        "nodes": [
+            {
+                "id": node["id"],
+                "label_id": label_id(node["id"], node.get("node_type")),
+                "name": node.get("name") or node["id"],
+                "level": node.get("node_type"),
+                "kind_label": LABELS.get(str(node.get("node_type")), ""),
+                "parent_id": parent_of.get(node["id"], ""),
+                "rank": rank.get(str(node.get("node_type")), 0),
+            }
+            for _ordinal, _start, node in rows
+        ],
+    }
 
 
 def _scene_of(snapshot: dict, event_id: str) -> dict | None:

@@ -76,6 +76,8 @@ def workspace(tmp_path: Path):
              "disclosure": {"source_id": source, "start": 0}},
             {"kind": "node", "id": "4", "node_type": "event", "name": "火纹石认主",
              "disclosure": {"source_id": source, "start": 6}},
+            {"kind": "node", "id": "5", "node_type": "scene", "name": "房间冲突",
+             "events": ["3", "4"], "disclosure": {"source_id": source, "start": 0}},
         ],
         ops.graph_project_info()["revision"],
     )
@@ -128,9 +130,14 @@ def test_a_node_starts_with_no_cards_and_a_timeline_to_pick_from(workspace) -> N
     material = _value(page.property("material"))
     assert material["cards"] == []
     assert material["hidden_count"] == 0
-    # 生效/失效挑的是「哪一步」，所以下拉里是场景和事件。
-    assert [row["label_id"] for row in material["timeline"]] == ["E3", "E4"]
-    assert {row["kind"] for row in material["timeline"]} == {"event"}
+    # 生效/失效挑的是「哪一步」：一列一层，粗的在前。
+    assert [row["label"] for row in material["moments"]["levels"]] == ["场景", "事件"]
+    assert [row["label_id"] for row in material["moments"]["nodes"]] == ["E3", "S5", "E4"]
+    assert _value(page.momentRows(0, "")) == [
+        {"id": "5", "label_id": "S5", "name": "房间冲突", "level": "scene",
+         "kind_label": "场景", "parent_id": "", "rank": 0},
+    ]
+    assert [row["id"] for row in _value(page.momentRows(1, "5"))] == ["3", "4"]
 
     del results[:]
     page.select("2")
@@ -143,9 +150,11 @@ def test_a_card_is_added_from_the_dialog_with_a_window(workspace) -> None:
     page.openCardDialog(None)
     page.findChild(object, "materialCardTitle").setProperty("text", "青衫少年")
     page.findChild(object, "materialCardDetail").setProperty("text", "洗得发白的青衫")
-    # 生效 = 第一个事件，失效 = 不指定。
-    page.findChild(object, "materialCardFrom").setProperty("currentIndex", 1)
-    page.findChild(object, "materialCardTo").setProperty("currentIndex", 0)
+    # 生效：在分级选择器里先点场景、再点它底下的第一个事件；失效不指定。
+    page.openMomentPicker("from", "")
+    page.pickMoment(0, "5")
+    page.pickMoment(1, "3")
+    page.confirmMoment()
 
     del results[:]
     page.submitCard()
@@ -178,7 +187,10 @@ def test_the_reading_position_decides_which_cards_are_shown(workspace) -> None:
 
     page.openCardDialog(None)
     page.findChild(object, "materialCardTitle").setProperty("text", "认主之后")
-    page.findChild(object, "materialCardFrom").setProperty("currentIndex", 2)  # E4
+    page.openMomentPicker("from", "")
+    page.pickMoment(0, "5")
+    page.pickMoment(1, "4")
+    page.confirmMoment()
     del results[:]
     page.submitCard()
     payload = _pump(app, results, "material", "1")
@@ -235,10 +247,40 @@ def test_an_image_carries_its_own_caption(workspace, tmp_path: Path) -> None:
     assert payload["cards"][0]["images"] == []
 
 
+def test_images_can_be_added_in_the_editor(workspace, tmp_path: Path) -> None:
+    app, _bridge, page, results, _errors = workspace
+    source = tmp_path / "ref.png"
+    source.write_bytes(PNG)
+
+    page.openCardDialog(None)
+    page.findChild(object, "materialCardTitle").setProperty("text", "青衫少年")
+    # 编辑器里一次选多张，先摆在草稿里；说明也在这里写。
+    page.addDraftImages([source.as_uri()])
+    page.draftCaption(0, "正面")
+    assert len(_value(page.property("draftImages"))) == 1
+
+    del results[:]
+    page.submitCard()
+    payload = _pump(app, results, "material", "1")
+    card = payload["cards"][0]
+    assert len(card["images"]) == 1
+    assert card["images"][0]["caption"] == "正面"
+    assert Path(card["images"][0]["path"]).is_file()
+
+    # 再打开编辑器：已有的图会回到草稿里；移除它再保存，图和文件一起走。
+    page.openCardDialog(card)
+    assert len(_value(page.property("draftImages"))) == 1
+    page.dropDraftImage(0)
+    del results[:]
+    page.submitCard()
+    payload = _pump(app, results, "material", "1")
+    assert payload["cards"][0]["images"] == []
+
+
 def test_cards_belong_to_the_node_not_the_page(workspace) -> None:
     app, bridge, page, results, _errors = workspace
     del results[:]
-    bridge.addMaterialCard("2", "认主之后", "紫光大盛", "", "")
+    bridge.addMaterialCard("2", "认主之后", "紫光大盛", "", "", "")
     _pump(app, results, "material", "2")
 
     del results[:]

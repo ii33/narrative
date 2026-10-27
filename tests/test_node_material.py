@@ -124,6 +124,46 @@ def test_only_real_images(store: MaterialStore, tmp_path: Path) -> None:
         store.add_image("P7", card_id, text)
 
 
+def test_a_card_can_be_created_with_its_pictures(store: MaterialStore, png: Path) -> None:
+    """编辑器一次提交：卡和图片一起进来。"""
+    store.add_card("P7", "青衫少年", "", "", "", [{"path": str(png), "caption": "正面"}])
+    card = store.view("P7")["cards"][0]
+    assert [image["caption"] for image in card["images"]] == ["正面"]
+    assert Path(card["images"][0]["path"]).is_file()
+
+
+def test_editing_a_card_syncs_its_pictures(store: MaterialStore, png: Path, tmp_path: Path) -> None:
+    """已有的只改说明，新加的拷进来，不在清单里的连文件一起删。"""
+    store.add_card("P7", "青衫少年", "", "", "", [{"path": str(png), "caption": "正面"}])
+    card = store.view("P7")["cards"][0]
+    first = card["images"][0]
+    second_source = tmp_path / "back.png"
+    second_source.write_bytes(png.read_bytes())
+
+    store.update_card(
+        "P7", card["id"], images=[
+            {"id": first["id"], "caption": "正面，束发"},
+            {"path": str(second_source), "caption": "背面"},
+        ],
+    )
+    images = store.view("P7")["cards"][0]["images"]
+    assert [(image["caption"]) for image in images] == ["正面，束发", "背面"]
+    assert Path(images[0]["path"]).is_file()
+
+    # 只留第一张：第二张的文件跟着记录一起走。
+    store.update_card("P7", card["id"], images=[{"id": first["id"], "caption": "正面"}])
+    images = store.view("P7")["cards"][0]["images"]
+    assert [image["id"] for image in images] == [first["id"]]
+    assert len(list(Path(images[0]["path"]).parent.glob("img_*"))) == 1
+
+
+def test_a_file_url_is_accepted(store: MaterialStore, png: Path) -> None:
+    """QML 的 FileDialog 给的是 file:///C:/…，不是裸路径。"""
+    store.add_card("P7", "青衫少年", "", "", "", [{"path": png.as_uri(), "caption": ""}])
+    image = store.view("P7")["cards"][0]["images"][0]
+    assert Path(image["path"]).is_file()
+
+
 def test_removing_an_image_deletes_the_file(store: MaterialStore, png: Path) -> None:
     store.add_card("P7", "青衫少年")
     card_id = store.view("P7")["cards"][0]["id"]

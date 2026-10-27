@@ -141,6 +141,10 @@ P1 < P1.1 < P1.1.1 < P1.2 < P1.10 < P2
 现在图里只有节点、语境、时间轴、来源顺序和属性记录。场景与事件的包含关系用节点字段
 `events`——一条记录说清"这个场景里有哪些事"，不另建边。
 
+阅读位置的层级（谁比谁粗）记在 `browse_view.MOMENT_LEVELS`：目前是「场景 → 事件」。
+再往上加「卷/章」或往下加「事件里的动作」只是往这张表里插一行——父子关系照样由 `events` 说，
+所以投影、资料卡的生效/失效选择器都自动多一层，不用改界面。
+
 属性记录有六种：`property_definition`、`property_value`、`property_categorization`、
 `property_merge`、`property_rename`、`property_retraction`。旧的 `property_initial` / `property_observation` / `event_change`
 已从代码中删除——包括校验、求值和示例。前期开发不保留兼容路径，留着只会让人误以为还能用。

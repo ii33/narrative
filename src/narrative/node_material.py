@@ -18,12 +18,25 @@ import json
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 from .order_ids import order_key
 
 ALLOWED_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+
+def _as_path(value: object) -> Path:
+    """QML 的 FileDialog 给的是 `file:///C:/…`，Python 要的是路径。"""
+    text = str(value or "")
+    if text.startswith("file:"):
+        path = unquote(urlparse(text).path)
+        # Windows 上 URL 是 `/C:/…`，去掉开头那个斜杠才是盘符路径。
+        if len(path) > 2 and path[0] == "/" and path[2] == ":":
+            path = path[1:]
+        return Path(path)
+    return Path(text)
 
 
 def _now() -> str:
@@ -161,6 +174,7 @@ class MaterialStore:
         detail: str = "",
         valid_from: str = "",
         valid_to: str = "",
+        images: list[dict] | None = None,
     ) -> dict:
         title = (title or "").strip()
         if not title:
@@ -178,6 +192,7 @@ class MaterialStore:
             "created_at": _now(),
         }
         data["cards"].append(card)
+        self._sync_images(node_id, card, images)
         self._save(node_id, data)
         return card
 
@@ -198,6 +213,7 @@ class MaterialStore:
         detail: str | None = None,
         valid_from: str | None = None,
         valid_to: str | None = None,
+        images: list[dict] | None = None,
     ) -> dict:
         data = self.load(node_id)
         card = self._card(data, card_id)
@@ -212,6 +228,7 @@ class MaterialStore:
         if valid_to is not None:
             card["valid_to"] = str(valid_to)
         self._check_window(card["valid_from"], card["valid_to"])
+        self._sync_images(node_id, card, images)
         self._save(node_id, data)
         return card
 
@@ -229,34 +246,77 @@ class MaterialStore:
 
     # -- 图片 ----------------------------------------------------------
 
-    def add_image(
-        self, node_id: str, card_id: str, source: Path, caption: str = ""
+    def _copy_image(
+        self, node_id: str, card_id: str, source: Path | str, caption: str = ""
     ) -> dict:
-        source = Path(source)
+        """拷一张图进这张资料的目录，只返回记录——写不写回由调用方决定。"""
+        source = _as_path(source)
         if not source.is_file():
             raise ValueError(f"找不到图片：{source}")
         if source.suffix.lower() not in ALLOWED_SUFFIXES:
             raise ValueError("图片格式只收 " + "、".join(sorted(ALLOWED_SUFFIXES)))
         if source.stat().st_size > MAX_IMAGE_BYTES:
             raise ValueError(f"图片超过 {MAX_IMAGE_BYTES // 1024 // 1024}MB")
-
-        data = self.load(node_id)
-        card = self._card(data, card_id)
         folder = self.root / node_id / card_id
         folder.mkdir(parents=True, exist_ok=True)
         image_id = f"img_{uuid4().hex[:8]}"
         target = folder / f"{image_id}{source.suffix.lower()}"
         shutil.copyfile(source, target)
-
-        record = {
+        return {
             "id": image_id,
             "file": str(target.relative_to(self.root)).replace("\\", "/"),
             "caption": str(caption or ""),
             "added_at": _now(),
         }
+
+    def _drop_image_file(self, record: dict) -> bool:
+        """删掉图片文件。页面上还开着它时 Windows 不放，所以只是尽力而为。"""
+        target = self.root / str(record.get("file") or "")
+        if not target.is_file():
+            return False
+        try:
+            target.unlink()
+            return True
+        except OSError:
+            return False
+
+    def _sync_images(self, node_id: str, card: dict, entries: list[dict] | None) -> None:
+        """把这张资料的图片改成 `entries` 说的样子。
+
+        一条 entry 带 `id` 就是已有的那张（只改说明），带 `path` 是新加的源文件。
+        列表里没有的旧图连文件一起删——编辑器里「移除」就是这个意思。
+        """
+        if entries is None:
+            return
+        existing = {str(image.get("id")): image for image in card.get("images") or []}
+        kept: list[dict] = []
+        for entry in entries:
+            image_id = str(entry.get("id") or "")
+            caption = str(entry.get("caption") or "")
+            if image_id and image_id in existing:
+                image = existing[image_id]
+                image["caption"] = caption
+                kept.append(image)
+                continue
+            source = str(entry.get("path") or "")
+            if not source:
+                continue
+            # 不要先转成 Path：QML 给的是 `file:///C:/…`，Path 会把它拆坏。
+            kept.append(self._copy_image(node_id, str(card["id"]), source, caption))
+        for image_id, image in existing.items():
+            if all(item.get("id") != image_id for item in kept):
+                self._drop_image_file(image)
+        card["images"] = kept
+
+    def add_image(
+        self, node_id: str, card_id: str, source: Path, caption: str = ""
+    ) -> dict:
+        data = self.load(node_id)
+        card = self._card(data, card_id)
+        record = self._copy_image(node_id, card_id, source, caption)
         card.setdefault("images", []).append(record)
         self._save(node_id, data)
-        return record | {"path": str(target)}
+        return record | {"path": str(self.root / str(record["file"]))}
 
     def update_image_caption(
         self, node_id: str, card_id: str, image_id: str, caption: str
@@ -281,17 +341,8 @@ class MaterialStore:
             raise ValueError(f"图片不存在：{image_id}")
         card["images"] = [image for image in images if image.get("id") != image_id]
         self._save(node_id, data)
-        target = self.root / str(record.get("file") or "")
-        deleted = False
-        if target.is_file():
-            try:
-                target.unlink()
-                deleted = True
-            except OSError:
-                # 页面上还显示着这张图，Windows 不放文件。记录已经没了，
-                # 下一次读这一页时 `_sweep` 会把它清掉。
-                pass
-        return {"removed": image_id, "file_deleted": deleted}
+        # 页面上还显示着这张图时删不掉文件，记录已经没了，`_sweep` 下次再清。
+        return {"removed": image_id, "file_deleted": self._drop_image_file(record)}
 
     # -- 给界面用的一份投影 --------------------------------------------
 
