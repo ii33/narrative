@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -34,6 +35,8 @@ class NativeBridge(QObject):
     resultReady = Signal(str, "QVariantMap")  # type: ignore[arg-type]
     errorOccurred = Signal(str, str)
     busyChanged = Signal(bool)
+    # 一次后台操作花了多久（毫秒）。只在明显偏慢时发，用来定位「界面卡」到底卡在哪一步。
+    slowOperation = Signal(str, int)
     _workerDone = Signal(int, object, object)
 
     def __init__(self, project_directory: str | Path, parent: QObject | None = None):
@@ -43,7 +46,9 @@ class NativeBridge(QObject):
         self._project_path: Path | None = None
         self._canvas = CanvasState()
         self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="narrative-native")
-        self._requests: dict[int, tuple[str, int, Callable[[dict], dict] | None, int | None]] = {}
+        self._requests: dict[
+            int, tuple[str, int, Callable[[dict], dict] | None, int | None, float]
+        ] = {}
         self._next_request = 0
         self._epoch = 0
         self._query_epoch = 0
@@ -76,12 +81,21 @@ class NativeBridge(QObject):
             return
         self._next_request += 1
         request_id = self._next_request
-        self._requests[request_id] = (kind, self._epoch if epoch is None else epoch, apply, query_epoch)
+        started = time.perf_counter()
+        self._requests[request_id] = (
+            kind, self._epoch if epoch is None else epoch, apply, query_epoch, started,
+        )
         if len(self._requests) == 1:
             self.busyChanged.emit(True)
         future = self._pool.submit(work)
 
         def completed(done) -> None:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            if elapsed_ms >= 150:
+                try:
+                    self.slowOperation.emit(kind, elapsed_ms)
+                except RuntimeError:  # QObject destroyed during teardown
+                    pass
             try:
                 payload, error = done.result(), None
             except Exception as exc:  # surfaced to the UI, never silently swallowed
@@ -101,7 +115,7 @@ class NativeBridge(QObject):
             self.busyChanged.emit(False)
         if request is None or self._closed:
             return
-        kind, epoch, apply, query_epoch = request
+        kind, epoch, apply, query_epoch, started = request
         if epoch != self._epoch or (query_epoch is not None and query_epoch != self._query_epoch):
             return  # A different project was selected while the read was pending.
         if kind == "graph_view" and not self._unified_active:
@@ -115,7 +129,15 @@ class NativeBridge(QObject):
                 return
             if apply is not None:
                 result = apply(result)
+            # 界面自己处理这条结果花了多久：卡在布局/重建列表时，这个数会很大。
+            handler_started = time.perf_counter()
             self.resultReady.emit(kind, result)
+            handler_ms = int((time.perf_counter() - handler_started) * 1000)
+            if handler_ms >= 100:
+                self.slowOperation.emit(f"{kind}:界面", handler_ms)
+            total_ms = int((time.perf_counter() - started) * 1000)
+            if total_ms >= 300:
+                self.slowOperation.emit(f"{kind}:合计", total_ms)
         except Exception as exc:
             self.errorOccurred.emit(kind, str(exc))
 

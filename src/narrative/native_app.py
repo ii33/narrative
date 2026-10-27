@@ -41,9 +41,11 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("QA 窗口时长须为正数")
 
     # Do not force a backend. Qt Quick selects its RHI API for the platform.
-    # QSG_INFO records the adapter chosen by Qt, which may still be WARP.
-    os.environ.setdefault("QSG_INFO", "1")
-    os.environ.setdefault("QT_LOGGING_RULES", "qt.scenegraph.general=true;qt.rhi.*=true")
+    # 逐帧的 scenegraph / RHI 日志只在 --render-log 时打开：它每帧写若干行到磁盘，
+    # 正常使用时纯粹是开销。
+    if args.render_log is not None:
+        os.environ.setdefault("QSG_INFO", "1")
+        os.environ.setdefault("QT_LOGGING_RULES", "qt.scenegraph.general=true;qt.rhi.*=true")
     try:
         from PySide6.QtCore import QTimer, QUrl, qInstallMessageHandler
         from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette
@@ -104,6 +106,8 @@ def main(argv: list[str] | None = None) -> int:
     record(f"startup pid={os.getpid()} qml={QML_PATH} projects_dir={args.projects_dir.resolve()}")
     record(f"requested_backend={os.environ.get('QSG_RHI_BACKEND', '<Qt platform default>')}")
     bridge = NativeBridge(args.projects_dir.resolve())
+    # 慢操作写进日志：界面卡的时候，能看出是数据慢、界面慢，还是整体都慢。
+    bridge.slowOperation.connect(lambda kind, ms: record(f"slow {kind} {ms}ms"))
     app.aboutToQuit.connect(bridge.close)
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("bridge", bridge)
