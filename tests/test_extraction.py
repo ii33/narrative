@@ -396,9 +396,9 @@ def test_story_axis_refuses_to_borrow_the_disclosure_anchor(tmp_path: Path) -> N
     assert "逻辑事件" in story["reason"]
 
 
-def test_node_ids_follow_disclosure_order(tmp_path: Path) -> None:
-    """The id is where the reader meets the node, so ordering needs no column."""
-    from narrative.order_ids import order_key
+def test_each_node_type_has_its_own_numbering(tmp_path: Path) -> None:
+    """每种节点各自一套编号：人是 P1、P2，物品是 I1，两个 1 互不相关。"""
+    from narrative.order_ids import prefix_for, split_id
 
     ops = create_graph_project(tmp_path / "graph.sqlite3")
     source_id = ops.import_source("第一章", TEXT)
@@ -407,21 +407,36 @@ def test_node_ids_follow_disclosure_order(tmp_path: Path) -> None:
     }
     built = build_candidate(ops, data)
     nodes = [item for item in built["objects"] if item.get("node_type")]
-    keys = [order_key(item["id"]) for item in nodes]
-    assert all(key is not None for key in keys)
-    assert len(set(keys)) == len(keys)
+
+    by_type: dict[str, list[tuple[int, ...]]] = {}
+    for item in nodes:
+        parsed = split_id(item["id"])
+        assert parsed is not None
+        prefix, segments = parsed
+        assert prefix == prefix_for(item["node_type"])
+        by_type.setdefault(item["node_type"], []).append(segments)
+
+    # 每个类型都从 1 开始、连续发号，别人的编号不影响它。
+    for segments in by_type.values():
+        assert sorted(segments) == [(number,) for number in range(1, len(segments) + 1)]
+    assert by_type["person"] == [(1,), (2,)]
+    assert by_type["item"] == [(1,)]
+
+    # 前缀让编号在工程里仍然唯一，但数字本身没有跨类型的意思。
+    ids = [item["id"] for item in nodes]
+    assert len(set(ids)) == len(ids)
+    assert "P1" in ids and "I1" in ids
 
     ops.change_accept(
         ops.change_propose(built["objects"], [], built["revision"], source="model"), 1
     )
-    stored = [item for item in ops.graph_snapshot()["nodes"] if item.get("disclosure")]
-    ordered = sorted(stored, key=lambda item: (item["disclosure"]["start"], order_key(item["id"])))
-    assert [order_key(item["id"]) for item in ordered] == sorted(
-        order_key(item["id"]) for item in ordered
-    )
+    stored = {item["name"]: item for item in ops.graph_snapshot()["nodes"] if item.get("disclosure")}
+    # 同一个数字在两类里各算一次，谁先谁后只能看披露位置。
+    assert split_id(stored["林舟"]["id"])[1] == split_id(stored["水果刀"]["id"])[1] == (1,)
+    assert stored["林舟"]["disclosure"]["start"] < stored["水果刀"]["disclosure"]["start"]
 
     # Renaming keeps the id: it identifies the node, not the label.
-    before = next(item for item in stored if item["name"] == "林舟")
+    before = stored["林舟"]
     revised = dict(before)
     revised["name"] = "林舟（改）"
     ops.change_accept(

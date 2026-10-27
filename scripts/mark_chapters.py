@@ -12,7 +12,6 @@ import sys
 from pathlib import Path
 
 from narrative.graph_operations import GraphOperations
-from narrative.order_ids import order_key
 
 PROJECT = Path(__file__).resolve().parents[1] / "data" / "graph-projects" / "example.sqlite3"
 
@@ -30,7 +29,8 @@ def main() -> int:
 
     objects = []
     for source_id, group in by_source.items():
-        group.sort(key=lambda node: (order_key(node["id"]) or (999,), node["disclosure"]["start"]))
+        # 章节的首尾按原文位置定；编号各类型一套，跨类型比不出先后。
+        group.sort(key=lambda node: node["disclosure"]["start"])
         for node, role in ((group[0], "start"), (group[-1], "end")):
             updated = dict(node)
             marks = [

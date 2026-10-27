@@ -15,7 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .harness import HarnessReply, HarnessRunner, HarnessSettings
-from .order_ids import allocate
+from .order_ids import allocate, prefix_for
 from .property_categories import aspect_of
 from .property_store import record_position
 
@@ -576,15 +576,19 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
     current_ordinal = orders.get(data["source_id"]) or (
         max((int(value) for value in orders.values()), default=0) + 1
     )
-    positions: list[tuple[tuple[int, int], str]] = []
+    # 每种节点各有自己的编号序列：人从 P1 开始，物品从 I1 开始，互不相关。
+    # 所以位置表和占用表都按类型分开——两个类型共用一本流水号就不是两套编号了。
+    positions: dict[str, list[tuple[tuple[int, int], str]]] = {}
+    taken: dict[str, set[str]] = {}
     for node in snapshot["nodes"]:
+        node_type = str(node.get("node_type") or "")
+        taken.setdefault(node_type, set()).add(node["id"])
         disclosure = node.get("disclosure")
         if isinstance(disclosure, dict) and isinstance(disclosure.get("start"), int):
-            positions.append((
+            positions.setdefault(node_type, []).append((
                 (int(orders.get(disclosure.get("source_id"), 99)), disclosure["start"]),
                 node["id"],
             ))
-    taken = {node["id"] for node in snapshot["nodes"]}
 
     existing: dict[tuple[str, str], str] = {}
     name_counts: dict[tuple[str, str], int] = {}
@@ -672,9 +676,15 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
             })
             continue
         position = (current_ordinal, item["start"])
-        node_id = allocate(positions, position, taken)
-        taken.add(node_id)
-        positions.append((position, node_id))
+        node_type = str(item["type"])
+        node_id = allocate(
+            positions.setdefault(node_type, []),
+            position,
+            taken.setdefault(node_type, set()),
+            prefix_for(node_type),
+        )
+        taken[node_type].add(node_id)
+        positions[node_type].append((position, node_id))
         mention_ids[mention] = node_id
         ids.setdefault(key, node_id)
         if item["type"] != "event" and existing.get(key):

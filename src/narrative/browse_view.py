@@ -26,7 +26,32 @@ LABELS = {"scene": "场景", "event": "事件"}
 
 
 def _key(node: dict) -> tuple:
+    """同一类型内的先后：编号就是发号顺序，所以按编号比。
+
+    跨类型不能用它——`P3` 和 `I3` 之间没有先后，两套编号互不相关。
+    """
     return order_key(node["id"]) or (999,)
+
+
+def _reading_key(snapshot: dict):
+    """跨类型的先后只能看披露位置：第几章、这一章第几个字。"""
+    orders = _orders(snapshot)
+
+    def key(node: dict) -> tuple:
+        disclosure = node.get("disclosure")
+        disclosure = disclosure if isinstance(disclosure, dict) else {}
+        source = disclosure.get("source_id")
+        start = disclosure.get("start")
+        # 同一个字读到的几个节点没有先后可言，用编号给个稳定顺序就够——
+        # 这一层不承担「谁先谁后」的意思。
+        return (
+            orders.get(source, 0) if isinstance(source, str) else 0,
+            start if isinstance(start, int) else -1,
+            order_key(node.get("id") or "") or (9999,),
+            node.get("id") or "",
+        )
+
+    return key
 
 
 def _by_id(snapshot: dict) -> dict[str, dict]:
@@ -244,7 +269,8 @@ def browse_view(
         node for node in candidates
         if not node_type or (node.get("node_type") or "other") == node_type
     ]
-    shown.sort(key=_key)
+    # 列表里什么类型都有，所以按披露位置排；编号只在自己那类里有意义。
+    shown.sort(key=_reading_key(snapshot))
     # 编号带类型前缀（E1.2 / P7），一眼看出同类里的先后；存的主键不变。
     shown = [
         dict(node, label_id=label_id(node.get("id") or "", node.get("node_type")))

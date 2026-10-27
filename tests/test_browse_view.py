@@ -90,7 +90,8 @@ def test_the_list_obeys_the_cut_only_when_asked(tmp_path: Path) -> None:
 
     narrowed = browse_view(snapshot, cut_id="4", time_filter=True)
     # 读到事件 6（位置 10）：位置 20 的老周和第二个场景还没出现。
-    assert [node["id"] for node in narrowed["nodes"]] == ["1", "2", "4", "5", "6"]
+    # 列表按披露位置排，不按编号：编号各类型自成一套，跨类型没有先后。
+    assert [node["id"] for node in narrowed["nodes"]] == ["1", "4", "5", "2", "6"]
 
     whole = browse_view(snapshot, cut_id="4", time_filter=False)
     assert len(whole["nodes"]) == 8

@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
-GRAPH_SCHEMA_VERSION = 6
+GRAPH_SCHEMA_VERSION = 7
 
 
 class GraphStore:
@@ -59,7 +59,7 @@ class GraphStore:
                         result_revision INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
                     CREATE INDEX change_candidates_status ON change_candidates(status);
                     CREATE TABLE provider_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                    PRAGMA user_version=6;
+                    PRAGMA user_version=7;
                 """)
                 db.executemany(
                     "INSERT INTO meta(key,value) VALUES (?,?)",

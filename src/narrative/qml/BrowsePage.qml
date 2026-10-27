@@ -3,7 +3,7 @@ import QtQuick.Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
 
-// 数据浏览：左侧分类，中间节点列表（编号即阅读顺序），右侧详情 + 属性。
+// 数据浏览：左侧分类，中间节点列表（按阅读顺序排，编号按类型各成一套），右侧详情 + 属性。
 Item {
     id: page
     objectName: "browsePage"
