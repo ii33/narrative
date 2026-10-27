@@ -8,6 +8,7 @@ of hardware acceleration.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import os
 import sys
 import threading
@@ -137,6 +138,23 @@ def main(argv: list[str] | None = None) -> int:
     record(f"window_shown activated={window.isActive()}")
     if args.project:
         bridge.openProject(args.project)
+
+    # 画面自愈：某些启动方式下窗口拿到第一帧之后就不再重绘——程序照常跑、状态栏
+    # 时钟却是停的，看起来就是「卡死」。每 2 秒给窗口发一次 WM_PAINT：不改尺寸、
+    # 不闪，只是让画面跟上状态。（实测：对冻住的窗口 InvalidateRect 一下立刻恢复。）
+    paint_poke = QTimer()
+    paint_poke.setInterval(2000)
+
+    def poke_paint() -> None:
+        handle = int(window.winId())
+        if not handle:
+            return
+        user32 = ctypes.windll.user32
+        user32.InvalidateRect(handle, None, False)
+        user32.UpdateWindow(handle)
+
+    paint_poke.timeout.connect(poke_paint)
+    paint_poke.start()
 
     # 看门狗：有操作超过 2 秒没回来就记一行。界面停在「处理中」时，
     # 这行直接说明卡在哪个操作上；同一批只记一次，不刷日志。
