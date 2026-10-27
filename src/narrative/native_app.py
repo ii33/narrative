@@ -130,6 +130,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     window = roots[0]
     window.show()
+    # 从脚本（Start-Process / 快捷方式）启动时窗口不一定被激活：那样它只画第一帧，
+    # 之后一直停在那儿——看着像「卡死」，其实程序在跑。主动激活 + 提到前面。
+    window.raise_()
+    window.requestActivate()
+    record(f"window_shown activated={window.isActive()}")
     if args.project:
         bridge.openProject(args.project)
 

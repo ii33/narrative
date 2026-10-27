@@ -58,11 +58,19 @@ ApplicationWindow {
         + (busy ? " · 处理中 " + bridge.pendingKinds().join(",") : "")
         + " · " + clock
 
+    // 每秒一跳。跳晚了就说明界面线程被占住了——那才是「点了很久才响应」的原因。
+    property double lastTick: 0
     Timer {
         interval: 1000
         running: true
         repeat: true
-        onTriggered: app.clock = Qt.formatTime(new Date(), "hh:mm:ss")
+        onTriggered: {
+            var now = Date.now()
+            if (app.lastTick > 0 && now - app.lastTick > 1500)
+                console.log("LAG " + (now - app.lastTick) + "ms")
+            app.lastTick = now
+            app.clock = Qt.formatTime(new Date(), "hh:mm:ss")
+        }
     }
     property string notice: ""
     property string mode: "launcher"
