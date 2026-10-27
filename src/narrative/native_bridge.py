@@ -20,8 +20,8 @@ from .extraction import build_candidate, extract_chapter
 from .graph_operations import GraphOperations
 from .harness import HarnessSettings
 from .native_models import CanvasState, candidate_summary, node_detail, search_result
-from .node_material import MaterialStore
-from .order_ids import order_key
+from .node_material import MaterialStore, holds_at
+from .order_ids import label_id, order_key
 from .property_audit import audit_candidate
 from .provider_store import ProviderStore
 
@@ -839,65 +839,126 @@ class NativeBridge(QObject):
         cut = self._state_cut or None
         self._project_task("node_editor", lambda ops: ops.node_editor(node_id, cut=cut))
 
-    # -- 节点资料（总结 / 描述 / 形态 / 设定图）-------------------------
+    # -- 节点资料（一张张带生效/失效时间的资料卡）-----------------------
 
     def _material(self) -> MaterialStore:
         return MaterialStore(self._project())
 
+    def _material_timeline(self, ops) -> list[dict]:
+        """生效/失效下拉里能选的东西：场景和事件，按阅读顺序排。
+
+        资料的时间点是「哪一步」，所以给的是场景与事件的编号；人、物品没有
+        阅读位置上的「一步」，拿它们当时间点只会让人看不懂。
+        """
+        snapshot = ops.graph_snapshot()
+        orders = {
+            row["source_id"]: row["ordinal"]
+            for row in snapshot.get("source_orders", []) or []
+            if isinstance(row, dict)
+        }
+        rows: list[tuple[int, int, dict]] = []
+        for node in snapshot["nodes"]:
+            if node.get("node_type") not in {"scene", "event"} or node.get("retracted"):
+                continue
+            disclosure = node.get("disclosure") or {}
+            start = disclosure.get("start")
+            rows.append((
+                int(orders.get(disclosure.get("source_id"), 0) or 0),
+                start if isinstance(start, int) else -1,
+                {
+                    "id": node["id"],
+                    "label_id": label_id(node["id"], node.get("node_type")),
+                    "name": node.get("name") or node["id"],
+                    "kind": node["node_type"],
+                    "kind_label": "场景" if node["node_type"] == "scene" else "事件",
+                },
+            ))
+        rows.sort(key=lambda item: (item[0], item[1]))
+        return [row[2] for row in rows]
+
+    def _material_payload(self, ops, node_id: str) -> dict:
+        return self._material().view(node_id, cut=self._state_cut) | {
+            "timeline": self._material_timeline(ops)
+        }
+
     def _material_task(self, node_id: str, change) -> None:
-        """改一次资料，然后把整页发回去：界面只认一种 payload。"""
+        """改一次资料，然后把这一刻的整页发回去：界面只认一种 payload。"""
 
         def work(ops) -> dict:
             store = self._material()
-            change(store)
-            return store.view(node_id)
+            changed = change(store)
+            payload = self._material_payload(ops, node_id)
+            # 刚改的那张如果不在当前阅读位置上，界面要说一声——否则像是没保存。
+            if isinstance(changed, dict) and changed.get("id"):
+                payload["changed_id"] = changed["id"]
+                payload["changed_visible"] = holds_at(changed, self._state_cut)
+            return payload
 
         self._project_task("material", work)
 
     @Slot(str)
     def loadMaterial(self, node_id: str) -> None:
-        self._material_task(node_id, lambda store: None)
+        """这个节点在当前阅读位置上有效的资料卡。"""
 
-    @Slot(str, str, str)
-    def saveMaterialText(self, node_id: str, summary: str, description: str) -> None:
-        self._material_task(
-            node_id, lambda store: store.save_text(node_id, summary, description)
-        )
+        def work(ops) -> dict:
+            return self._material_payload(ops, node_id)
 
-    @Slot(str, str, str, str)
-    def addMaterialForm(self, node_id: str, name: str, note: str, event_id: str) -> None:
-        self._material_task(
-            node_id, lambda store: store.add_form(node_id, name, note, event_id)
-        )
+        self._project_task("material", work)
 
     @Slot(str, str, str, str, str)
-    def updateMaterialForm(
-        self, node_id: str, form_id: str, name: str, note: str, event_id: str
+    def addMaterialCard(
+        self, node_id: str, title: str, detail: str, valid_from: str, valid_to: str
     ) -> None:
         self._material_task(
             node_id,
-            lambda store: store.update_form(
-                node_id, form_id, name=name, note=note, event_id=event_id
+            lambda store: store.add_card(node_id, title, detail, valid_from, valid_to),
+        )
+
+    @Slot(str, str, str, str, str, str)
+    def updateMaterialCard(
+        self,
+        node_id: str,
+        card_id: str,
+        title: str,
+        detail: str,
+        valid_from: str,
+        valid_to: str,
+    ) -> None:
+        self._material_task(
+            node_id,
+            lambda store: store.update_card(
+                node_id,
+                card_id,
+                title=title,
+                detail=detail,
+                valid_from=valid_from,
+                valid_to=valid_to,
             ),
         )
 
     @Slot(str, str)
-    def removeMaterialForm(self, node_id: str, form_id: str) -> None:
-        self._material_task(node_id, lambda store: store.remove_form(node_id, form_id))
+    def removeMaterialCard(self, node_id: str, card_id: str) -> None:
+        self._material_task(node_id, lambda store: store.remove_card(node_id, card_id))
 
-    @Slot(str, str, str, str, str)
-    def addMaterialImage(
-        self, node_id: str, form_id: str, kind: str, path: str, caption: str
+    @Slot(str, str, str, str)
+    def addMaterialImage(self, node_id: str, card_id: str, path: str, caption: str) -> None:
+        self._material_task(
+            node_id, lambda store: store.add_image(node_id, card_id, Path(path), caption)
+        )
+
+    @Slot(str, str, str, str)
+    def updateMaterialImageCaption(
+        self, node_id: str, card_id: str, image_id: str, caption: str
     ) -> None:
         self._material_task(
             node_id,
-            lambda store: store.add_image(node_id, form_id, kind, Path(path), caption),
+            lambda store: store.update_image_caption(node_id, card_id, image_id, caption),
         )
 
     @Slot(str, str, str)
-    def removeMaterialImage(self, node_id: str, form_id: str, image_id: str) -> None:
+    def removeMaterialImage(self, node_id: str, card_id: str, image_id: str) -> None:
         self._material_task(
-            node_id, lambda store: store.remove_image(node_id, form_id, image_id)
+            node_id, lambda store: store.remove_image(node_id, card_id, image_id)
         )
 
     @Slot(str, int)

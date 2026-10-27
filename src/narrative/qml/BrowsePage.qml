@@ -62,20 +62,14 @@ Item {
     property var propertyRows: []      // 扁平列表，「全部」视图用
     property var categoryGroups: []    // 按大类分组
     property var inboundRows: []       // 别的节点指向本节点的记录
-    // 节点资料：总结、描述、形态与设定图。这是**编辑素材，不是原文披露**——
-    // 没有引文、没有阅读位置，所以不进属性记录，也不跟阅读位置走。
-    property var material: ({ summary: "", description: "", forms: [], kinds: [] })
-    property string summaryDraft: ""
-    property string descriptionDraft: ""
-    property string savedSummary: ""
-    property string savedDescription: ""
+    // 节点资料：一张张资料卡，各有生效/失效时间。它和属性是同一类东西——
+    // 「从这一步起成立，到那一步起不成立」——只是没有引文，所以不进属性记录。
+    property var material: ({ node_id: "", cut: "", cards: [], hidden_count: 0, timeline: [] })
+    // 默认折叠成标题；展开状态按资料 id 记，刷新后不跳。
+    property var expandedCards: ({})
     property string materialNodeId: ""
-    property string pendingFormId: ""
-    property string pendingKind: ""
-    property string formEditId: ""
-    property bool materialSaving: false
-    readonly property bool materialDirty: summaryDraft !== savedSummary
-        || descriptionDraft !== savedDescription
+    property string cardEditId: ""
+    property string pendingCardId: ""
     property var vocabulary: []        // 当前节点类型的分类表
     property bool groupByCategory: true
     // 属性区回答哪个问题：latest = 这一刻的状态；all = 到这里为止说过的全部，
@@ -166,10 +160,12 @@ Item {
             }
             page.pendingFocus = ""
         }
-        // 属性区跟同一个锚点事件走；切点没变就不重载。
+        // 属性区和资料都跟同一个锚点事件走；切点没变就不重载。
         if (page.selectedId.length > 0 && page.appliedCut !== page.cutEventId) {
             page.appliedCut = page.cutEventId
             bridge.loadNodeProperties(page.selectedId)
+            // 资料卡有自己的生效/失效时间：换阅读位置就得重新问一次。
+            bridge.loadMaterial(page.selectedId)
         }
     }
 
@@ -198,6 +194,9 @@ Item {
         categoryGroups = []
         inboundRows = []
         expandedProps = ({})
+        material = ({ node_id: "", cut: "", cards: [], hidden_count: 0, timeline: [] })
+        expandedCards = ({})
+        materialNodeId = ""
         appliedCut = ""
     }
 
@@ -264,76 +263,98 @@ Item {
         inboundRows = []
         expandedProps = ({})
         appliedCut = page.cutEventId
-        material = ({ summary: "", description: "", forms: [], kinds: [] })
-        summaryDraft = ""
-        descriptionDraft = ""
-        savedSummary = ""
-        savedDescription = ""
+        material = ({ node_id: "", cut: "", cards: [], hidden_count: 0, timeline: [] })
+        expandedCards = ({})
         materialNodeId = ""
         bridge.nodeDetail(id)
         bridge.loadNodeProperties(id)
         bridge.loadMaterial(id)
     }
 
-    // 事件名：形态写的是编号，页面上要看到那一步叫什么。
-    function eventName(id) {
-        if (!id) return ""
-        for (var i = 0; i < page.events.length; ++i)
-            if (page.events[i].id === id) return page.events[i].name
+    // 生效/失效下拉：空选项 + 所有场景与事件（按阅读顺序）。
+    function momentOptions(emptyLabel) {
+        var rows = [{id: "", label: emptyLabel}]
+        var timeline = page.material.timeline || []
+        for (var i = 0; i < timeline.length; ++i) {
+            var row = timeline[i]
+            rows.push({id: row.id,
+                label: row.label_id + "  " + row.name + "（" + row.kind_label + "）"})
+        }
+        return rows
+    }
+
+    function momentLabel(id) {
+        var timeline = page.material.timeline || []
+        for (var i = 0; i < timeline.length; ++i)
+            if (timeline[i].id === id) return timeline[i].label_id
         return id
+    }
+
+    // 一张卡的有效区间，折叠时就写在标题旁边。
+    function cardWindow(card) {
+        var from = card.valid_from ? page.momentLabel(card.valid_from) : "从头"
+        var to = card.valid_to ? page.momentLabel(card.valid_to) : "一直"
+        return from + " → " + to
+    }
+
+    function toggleCard(id) {
+        var next = ({})
+        for (var key in page.expandedCards) next[key] = page.expandedCards[key]
+        next[id] = next[id] !== true
+        page.expandedCards = next
     }
 
     function applyMaterial(payload) {
         // 慢结果不能覆盖别人：切到另一个节点后，上一个节点的资料会迟到。
         if (!payload || payload.node_id !== page.selectedId) return
-        var dirtySummary = page.summaryDraft !== page.savedSummary
-        var dirtyDescription = page.descriptionDraft !== page.savedDescription
+        var sameNode = page.materialNodeId === payload.node_id
+        var previous = ({})
+        var oldCards = page.material.cards || []
+        for (var i = 0; i < oldCards.length; ++i) previous[oldCards[i].id] = true
+        // 换节点：全部折叠（默认只看标题）。同一节点刷新：新加的那张展开，其余不动。
+        var expanded = ({})
+        if (sameNode) {
+            var cards = payload.cards || []
+            for (var j = 0; j < cards.length; ++j) {
+                var id = cards[j].id
+                if (previous[id] !== true || page.expandedCards[id] === true) expanded[id] = true
+            }
+        }
+        page.expandedCards = expanded
         page.materialNodeId = payload.node_id
         page.material = payload
-        page.savedSummary = payload.summary || ""
-        page.savedDescription = payload.description || ""
-        // 正在打字就不要把输入框冲掉，只跟没动过的那一份走。
-        if (!dirtySummary) page.summaryDraft = page.savedSummary
-        if (!dirtyDescription) page.descriptionDraft = page.savedDescription
-        if (page.materialSaving) {
-            page.materialSaving = false
-            app.toast("资料已保存", false)
-        }
-    }
-
-    function saveMaterialText() {
-        if (page.selectedId.length === 0) return
-        page.materialSaving = true
-        bridge.saveMaterialText(page.selectedId, page.summaryDraft, page.descriptionDraft)
+        if (payload.changed_visible === false)
+            app.toast("这张资料不在当前阅读位置上，换个位置才看得到", true)
     }
 
     // 新增和编辑共用一张表单：编辑时把现值填进去。
-    function openFormDialog(form) {
-        page.formEditId = form ? (form.id || "") : ""
-        formName.text = form ? (form.name || "") : ""
-        formNote.text = form ? (form.note || "") : ""
-        formEvent.text = form ? (form.event_id || "") : ""
-        formDialog.open()
+    function openCardDialog(card) {
+        page.cardEditId = card ? (card.id || "") : ""
+        cardTitle.text = card ? (card.title || "") : ""
+        cardDetail.text = card ? (card.detail || "") : ""
+        var fromIndex = cardFrom.indexOfValue(card ? (card.valid_from || "") : "")
+        var toIndex = cardTo.indexOfValue(card ? (card.valid_to || "") : "")
+        cardFrom.currentIndex = fromIndex >= 0 ? fromIndex : 0
+        cardTo.currentIndex = toIndex >= 0 ? toIndex : 0
+        cardDialog.open()
     }
 
-    function submitForm() {
+    function submitCard() {
         if (page.selectedId.length === 0) return
-        if (page.formEditId.length > 0)
-            bridge.updateMaterialForm(page.selectedId, page.formEditId, formName.text,
-                formNote.text, formEvent.text)
+        var from = cardFrom.currentValue || ""
+        var to = cardTo.currentValue || ""
+        if (page.cardEditId.length > 0)
+            bridge.updateMaterialCard(page.selectedId, page.cardEditId,
+                cardTitle.text, cardDetail.text, from, to)
         else
-            bridge.addMaterialForm(page.selectedId, formName.text, formNote.text,
-                formEvent.text)
-        page.formEditId = ""
-        formName.text = ""
-        formNote.text = ""
-        formEvent.text = ""
-        formDialog.close()
+            bridge.addMaterialCard(page.selectedId, cardTitle.text,
+                cardDetail.text, from, to)
+        page.cardEditId = ""
+        cardDialog.close()
     }
 
-    function askMaterialImage(formId, kind) {
-        page.pendingFormId = formId
-        page.pendingKind = kind
+    function askMaterialImage(cardId) {
+        page.pendingCardId = cardId
         materialImagePicker.open()
     }
 
@@ -1163,14 +1184,14 @@ Item {
                                     }
                                 }
                             }
-                            // 没选中节点时不摆空表单：这一块是给具体节点写的。
+                            // 资料：一张张带生效/失效时间的资料卡。它和属性是同一类东西——
+                            // 「从这一步起成立，到那一步起不成立」——只是没有引文，所以不进
+                            // 属性记录；浏览时同样只显示这一刻有效的，默认折叠成标题。
                             ColumnLayout {
                                 Layout.fillWidth: true
                                 visible: page.selectedId.length > 0
-                                spacing: 8
+                                spacing: 6
 
-                                // 资料：总结、描述、形态与设定图。这是编辑素材，不是原文披露——
-                                // 没有引文，也不跟阅读位置走，所以单独一块，不混进属性。
                                 Rectangle {
                                     Layout.fillWidth: true
                                     Layout.preferredHeight: 1
@@ -1188,111 +1209,72 @@ Item {
                                         font.weight: Font.DemiBold
                                     }
                                     Label {
-                                        text: page.material.forms.length > 0
-                                            ? "形态 " + page.material.forms.length : ""
+                                        text: page.material.cards.length
                                         color: t.muted
                                         font.pixelSize: 11
                                     }
                                     Item { Layout.fillWidth: true }
                                     Button {
-                                        objectName: "materialSave"
-                                        text: "保存"
+                                        objectName: "materialAddCard"
+                                        text: "新增资料"
                                         flat: true
                                         font.pixelSize: 10
-                                        enabled: page.selectedId.length > 0 && page.materialDirty
-                                        onClicked: page.saveMaterialText()
+                                        enabled: page.selectedId.length > 0
+                                        onClicked: page.openCardDialog(null)
                                     }
                                 }
                                 Label {
                                     Layout.fillWidth: true
-                                    text: "只给人和程序看：没有引文，也不跟阅读位置走，不进属性记录。"
+                                    text: "和属性一样跟阅读位置走：只列这一刻有效的。点标题展开。"
                                     color: t.muted
                                     font.pixelSize: 10
                                     wrapMode: Text.Wrap
                                 }
-                                TextField {
-                                    objectName: "materialSummary"
-                                    Layout.fillWidth: true
-                                    placeholderText: "一句话说清这是什么"
-                                    text: page.summaryDraft
-                                    onTextChanged: page.summaryDraft = text
-                                    onAccepted: page.saveMaterialText()
-                                }
-                                TextArea {
-                                    objectName: "materialDescription"
-                                    Layout.fillWidth: true
-                                    Layout.preferredHeight: 96
-                                    placeholderText: "写详细一点：来历、特征、脾气、要注意的地方……"
-                                    wrapMode: TextArea.Wrap
-                                    text: page.descriptionDraft
-                                    onTextChanged: page.descriptionDraft = text
-                                }
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 6
-                                    Label {
-                                        text: "形态"
-                                        color: t.ink
-                                        font.pixelSize: 12
-                                        font.weight: Font.DemiBold
-                                    }
-                                    Label {
-                                        text: "同一个对象在不同时候的样子，可指定从哪个事件起"
-                                        color: t.muted
-                                        font.pixelSize: 10
-                                        elide: Text.ElideRight
-                                        Layout.fillWidth: true
-                                        Layout.minimumWidth: 0
-                                    }
-                                    Button {
-                                        objectName: "materialAddForm"
-                                        text: "新增形态"
-                                        flat: true
-                                        font.pixelSize: 10
-                                        enabled: page.selectedId.length > 0
-                                        onClicked: page.openFormDialog(null)
-                                    }
-                                }
 
                                 Repeater {
-                                    objectName: "materialForms"
-                                    model: page.material.forms
+                                    objectName: "materialCards"
+                                    model: page.material.cards
 
-                                    delegate: Rectangle {
+                                    delegate: ColumnLayout {
                                         required property var modelData
-                                        // 里面几层 Repeater 会覆盖 modelData，先留住这一版形态。
-                                        readonly property var form: modelData
-                                        Layout.fillWidth: true
-                                        implicitHeight: formBlock.implicitHeight + 20
-                                        radius: 6
-                                        color: t.paper
-                                        border.color: t.line
+                                        readonly property var card: modelData
+                                        readonly property bool open:
+                                            page.expandedCards[card.id] === true
 
-                                        ColumnLayout {
-                                            id: formBlock
-                                            anchors.fill: parent
-                                            anchors.margins: 10
-                                            spacing: 6
+                                        Layout.fillWidth: true
+                                        spacing: 0
+
+                                        // 折叠时只剩这一行：标题 + 有效区间 + 两个动作。
+                                        Rectangle {
+                                            Layout.fillWidth: true
+                                            implicitHeight: 28
+                                            radius: 4
+                                            color: open ? t.accentSoft : t.paper
+                                            border.color: t.line
 
                                             RowLayout {
-                                                Layout.fillWidth: true
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 8
+                                                anchors.rightMargin: 8
                                                 spacing: 6
+
                                                 Label {
-                                                    text: form.name
+                                                    text: (open ? "▾ " : "▸ ") + card.title
                                                     color: t.ink
                                                     font.pixelSize: 12
-                                                    font.weight: Font.DemiBold
-                                                }
-                                                Label {
-                                                    text: form.event_id
-                                                        ? "从「" + page.eventName(form.event_id) + "」起"
-                                                        : "未指定时间点"
-                                                    color: t.muted
-                                                    font.pixelSize: 10
                                                     elide: Text.ElideRight
                                                     Layout.fillWidth: true
                                                     Layout.minimumWidth: 0
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        cursorShape: Qt.PointingHandCursor
+                                                        onClicked: page.toggleCard(card.id)
+                                                    }
+                                                }
+                                                Label {
+                                                    text: page.cardWindow(card)
+                                                    color: t.muted
+                                                    font.pixelSize: 10
                                                 }
                                                 Label {
                                                     text: "编辑"
@@ -1302,7 +1284,7 @@ Item {
                                                     MouseArea {
                                                         anchors.fill: parent
                                                         cursorShape: Qt.PointingHandCursor
-                                                        onClicked: page.openFormDialog(form)
+                                                        onClicked: page.openCardDialog(card)
                                                     }
                                                 }
                                                 Label {
@@ -1313,61 +1295,54 @@ Item {
                                                     MouseArea {
                                                         anchors.fill: parent
                                                         cursorShape: Qt.PointingHandCursor
-                                                        onClicked: bridge.removeMaterialForm(
-                                                            page.selectedId, form.id)
+                                                        onClicked: bridge.removeMaterialCard(
+                                                            page.selectedId, card.id)
                                                     }
                                                 }
                                             }
+                                        }
+
+                                        ColumnLayout {
+                                            visible: open
+                                            Layout.fillWidth: true
+                                            Layout.topMargin: 6
+                                            spacing: 6
+
                                             Label {
                                                 Layout.fillWidth: true
-                                                visible: (form.note || "").length > 0
-                                                text: form.note || ""
+                                                visible: (card.detail || "").length > 0
+                                                text: card.detail || ""
                                                 color: t.body
                                                 font.pixelSize: 11
                                                 wrapMode: Text.Wrap
-                                            }
-
-                                            // 六类图：按钮一行，已挂的图在下面。
-                                            Flow {
-                                                Layout.fillWidth: true
-                                                spacing: 6
-                                                Repeater {
-                                                    model: page.material.kinds
-
-                                                    delegate: Button {
-                                                        required property var modelData
-                                                        text: "+ " + modelData.label
-                                                        flat: true
-                                                        font.pixelSize: 10
-                                                        onClicked: page.askMaterialImage(
-                                                            form.id, modelData.key)
-                                                    }
-                                                }
                                             }
                                             Flow {
                                                 Layout.fillWidth: true
                                                 spacing: 8
                                                 Repeater {
-                                                    model: form.images
+                                                    model: card.images
 
                                                     delegate: Column {
                                                         required property var modelData
                                                         spacing: 2
                                                         Image {
-                                                            width: 104
-                                                            height: 104
+                                                            width: 120
+                                                            height: 120
                                                             source: modelData.path
                                                                 ? "file:///" + String(modelData.path).replace(/\\/g, "/")
                                                                 : ""
                                                             fillMode: Image.PreserveAspectFit
                                                             asynchronous: true
                                                         }
-                                                        Label {
-                                                            width: 104
-                                                            text: modelData.kind_label || modelData.kind
-                                                            color: t.muted
-                                                            font.pixelSize: 9
-                                                            elide: Text.ElideRight
+                                                        TextField {
+                                                            width: 120
+                                                            font.pixelSize: 10
+                                                            placeholderText: "写一句说明"
+                                                            text: modelData.caption || ""
+                                                            onEditingFinished: if (text !== (modelData.caption || ""))
+                                                                bridge.updateMaterialImageCaption(
+                                                                    page.selectedId, card.id,
+                                                                    modelData.id, text)
                                                         }
                                                         Label {
                                                             text: "移除"
@@ -1378,20 +1353,41 @@ Item {
                                                                 anchors.fill: parent
                                                                 cursorShape: Qt.PointingHandCursor
                                                                 onClicked: bridge.removeMaterialImage(
-                                                                    page.selectedId, form.id, modelData.id)
+                                                                    page.selectedId, card.id,
+                                                                    modelData.id)
                                                             }
                                                         }
                                                     }
                                                 }
                                             }
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                Button {
+                                                    text: "+ 图片"
+                                                    flat: true
+                                                    font.pixelSize: 10
+                                                    onClicked: page.askMaterialImage(card.id)
+                                                }
+                                                Item { Layout.fillWidth: true }
+                                            }
                                         }
                                     }
                                 }
+
                                 Label {
                                     Layout.fillWidth: true
-                                    visible: page.selectedId.length > 0
-                                        && page.material.forms.length === 0
-                                    text: "还没有形态。可以给同一个对象留几版样子（换装、损毁、修复），各挂自己的图。"
+                                    visible: page.material.cards.length === 0
+                                        && page.material.hidden_count === 0
+                                    text: "还没有资料。可以建几张卡：一段设定、几张设定图，各写清从哪一步起成立。"
+                                    color: t.muted
+                                    font.pixelSize: 10
+                                    wrapMode: Text.Wrap
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    visible: page.material.hidden_count > 0
+                                    text: "另有 " + page.material.hidden_count
+                                        + " 张在别的阅读位置上；换一下阅读位置才看得到。"
                                     color: t.muted
                                     font.pixelSize: 10
                                     wrapMode: Text.Wrap
@@ -1425,60 +1421,90 @@ Item {
         title: "选择图片"
         nameFilters: ["图片 (*.png *.jpg *.jpeg *.webp *.gif)"]
         onAccepted: {
-            if (page.pendingFormId.length > 0 && page.selectedId.length > 0)
-                bridge.addMaterialImage(page.selectedId, page.pendingFormId,
-                    page.pendingKind, materialImagePicker.selectedFile.toString(), "")
+            if (page.pendingCardId.length > 0 && page.selectedId.length > 0)
+                bridge.addMaterialImage(page.selectedId, page.pendingCardId,
+                    materialImagePicker.selectedFile.toString(), "")
         }
     }
 
-    // 新增 / 编辑形态
+    // 新增 / 编辑资料卡：标题、详情、生效与失效各挑一个场景或事件。
     Dialog {
-        id: formDialog
-        objectName: "materialFormDialog"
-        title: page.formEditId.length > 0 ? "编辑形态" : "新增形态"
+        id: cardDialog
+        objectName: "materialCardDialog"
+        title: page.cardEditId.length > 0 ? "编辑资料" : "新增资料"
         modal: true
         anchors.centerIn: parent
-        width: 380
+        width: 440
 
         contentItem: ColumnLayout {
             spacing: 6
+            TextField {
+                id: cardTitle
+                objectName: "materialCardTitle"
+                Layout.fillWidth: true
+                placeholderText: "标题，例如：青衫少年 / 认主之后"
+                onAccepted: page.submitCard()
+            }
+            TextArea {
+                id: cardDetail
+                objectName: "materialCardDetail"
+                Layout.fillWidth: true
+                Layout.preferredHeight: 96
+                wrapMode: TextArea.Wrap
+                placeholderText: "详情：来历、特征、要注意的地方……"
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Label {
+                    text: "生效"
+                    color: t.muted
+                    font.pixelSize: 11
+                    Layout.preferredWidth: 32
+                }
+                ComboBox {
+                    id: cardFrom
+                    objectName: "materialCardFrom"
+                    Layout.fillWidth: true
+                    textRole: "label"
+                    valueRole: "id"
+                    model: page.momentOptions("（从一开始）")
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Label {
+                    text: "失效"
+                    color: t.muted
+                    font.pixelSize: 11
+                    Layout.preferredWidth: 32
+                }
+                ComboBox {
+                    id: cardTo
+                    objectName: "materialCardTo"
+                    Layout.fillWidth: true
+                    textRole: "label"
+                    valueRole: "id"
+                    model: page.momentOptions("（一直有效）")
+                }
+            }
             Label {
                 Layout.fillWidth: true
-                text: "形态是同一个对象在不同时候的样子，可以指定从哪个事件起成立。"
+                text: "时间点是场景或事件：从这一步起成立，到那一步起不再算数。"
                 color: t.muted
-                font.pixelSize: 11
+                font.pixelSize: 10
                 wrapMode: Text.Wrap
-            }
-            TextField {
-                id: formName
-                objectName: "materialFormName"
-                Layout.fillWidth: true
-                placeholderText: "形态名，例如：青衫少年 / 断裂的剑"
-                onAccepted: page.submitForm()
-            }
-            TextField {
-                id: formNote
-                objectName: "materialFormNote"
-                Layout.fillWidth: true
-                placeholderText: "设定：样子、材质、气质……"
-                onAccepted: page.submitForm()
-            }
-            TextField {
-                id: formEvent
-                objectName: "materialFormEvent"
-                Layout.fillWidth: true
-                placeholderText: "从哪个事件起成立（可空，例如 34）"
-                onAccepted: page.submitForm()
             }
             RowLayout {
                 Layout.fillWidth: true
                 Item { Layout.fillWidth: true }
-                Button { text: "取消"; flat: true; onClicked: formDialog.close() }
+                Button { text: "取消"; flat: true; onClicked: cardDialog.close() }
                 Button {
-                    objectName: "materialFormSubmit"
-                    text: page.formEditId.length > 0 ? "保存" : "新增"
+                    objectName: "materialCardSubmit"
+                    text: page.cardEditId.length > 0 ? "保存" : "新增"
                     highlighted: true
-                    onClicked: page.submitForm()
+                    onClicked: page.submitCard()
                 }
             }
         }

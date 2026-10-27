@@ -1,4 +1,4 @@
-"""节点资料：详情区里的总结、描述、形态与设定图，任何节点都有。"""
+"""节点资料：详情栏里的资料卡，按阅读位置过滤，默认折叠成标题。"""
 
 from __future__ import annotations
 
@@ -42,10 +42,7 @@ def _pump(
     kind: str,
     node_id: str = "",
 ) -> dict:
-    """等一条结果；给了 node_id 就只认那个节点的。
-
-    只等 kind 会接受上一个节点迟到的 payload——切节点时的等待会被它骗过去。
-    """
+    """等一条结果；给了 node_id 就只认那个节点的。"""
     def ready() -> list[dict]:
         return [
             payload for name, payload in results
@@ -63,16 +60,22 @@ def _pump(
 
 @pytest.fixture()
 def workspace(tmp_path: Path):
-    """一个人物、一件物品、一个事件；进工程后停在人物上。"""
+    """一个人物、一件物品、两个事件；进工程后停在人物上。"""
     app = QApplication.instance() or QApplication([])
     assert isinstance(app, QApplication)
     project = tmp_path / "material.sqlite3"
     ops = Operations.create_graph_project(project)
+    source = ops.import_source("第一章", "林舟出场了。火纹石认主。")
     candidate = ops.graph_propose(
         [
-            {"kind": "node", "id": "1", "node_type": "person", "name": "林舟"},
-            {"kind": "node", "id": "2", "node_type": "item", "name": "火纹石"},
-            {"kind": "node", "id": "3", "node_type": "event", "name": "林舟出场"},
+            {"kind": "node", "id": "1", "node_type": "person", "name": "林舟",
+             "disclosure": {"source_id": source, "start": 0}},
+            {"kind": "node", "id": "2", "node_type": "item", "name": "火纹石",
+             "disclosure": {"source_id": source, "start": 6}},
+            {"kind": "node", "id": "3", "node_type": "event", "name": "林舟出场",
+             "disclosure": {"source_id": source, "start": 0}},
+            {"kind": "node", "id": "4", "node_type": "event", "name": "火纹石认主",
+             "disclosure": {"source_id": source, "start": 6}},
         ],
         ops.graph_project_info()["revision"],
     )
@@ -119,84 +122,133 @@ def workspace(tmp_path: Path):
         app.processEvents()
 
 
-def test_every_node_has_a_material_section_of_its_own(workspace) -> None:
+def test_a_node_starts_with_no_cards_and_a_timeline_to_pick_from(workspace) -> None:
     app, _bridge, page, results, _errors = workspace
     app.processEvents()
-    assert page.property("materialNodeId") == "1"
-    assert _value(page.property("summaryDraft")) == ""
-    assert _value(page.property("material"))["forms"] == []
+    material = _value(page.property("material"))
+    assert material["cards"] == []
+    assert material["hidden_count"] == 0
+    # 生效/失效挑的是「哪一步」，所以下拉里是场景和事件。
+    assert [row["label_id"] for row in material["timeline"]] == ["E3", "E4"]
+    assert {row["kind"] for row in material["timeline"]} == {"event"}
 
-    # 物品也一样有：这一块不属于人物。
     del results[:]
     page.select("2")
     _pump(app, results, "material", "2")
     assert page.property("materialNodeId") == "2"
 
 
-def test_summary_and_description_are_kept_out_of_the_property_rows(workspace) -> None:
+def test_a_card_is_added_from_the_dialog_with_a_window(workspace) -> None:
     app, _bridge, page, results, _errors = workspace
-    page.setProperty("summaryDraft", "嘴硬心软的总经理")
-    page.setProperty("descriptionDraft", "出身寒微，最恨别人拿出身说事。")
+    page.openCardDialog(None)
+    page.findChild(object, "materialCardTitle").setProperty("text", "青衫少年")
+    page.findChild(object, "materialCardDetail").setProperty("text", "洗得发白的青衫")
+    # 生效 = 第一个事件，失效 = 不指定。
+    page.findChild(object, "materialCardFrom").setProperty("currentIndex", 1)
+    page.findChild(object, "materialCardTo").setProperty("currentIndex", 0)
+
     del results[:]
-    page.saveMaterialText()
+    page.submitCard()
     payload = _pump(app, results, "material", "1")
     app.processEvents()
+    card = payload["cards"][0]
+    assert card["title"] == "青衫少年"
+    assert card["detail"] == "洗得发白的青衫"
+    assert card["valid_from"] == "3"
+    assert card["valid_to"] == ""
 
-    assert payload["summary"] == "嘴硬心软的总经理"
-    assert _value(page.property("summaryDraft")) == "嘴硬心软的总经理"
-    # 素材不是披露：属性行里不会多出一条「总结」，也没有引文可回查。
+    # 刚建的那张直接展开，其余默认折叠。
+    expanded = _value(page.property("expandedCards"))
+    assert expanded.get(card["id"]) is True
+    # 资料不是披露：属性行里不会多出一条「资料」。
     labels = [row["label"] for row in _value(page.property("propertyRows"))]
-    assert "总结" not in labels and "描述" not in labels
     assert labels == ["身份"]
 
 
-def test_forms_carry_a_time_point_and_their_own_pictures(workspace, tmp_path: Path) -> None:
-    app, bridge, page, results, _errors = workspace
-    page.openFormDialog(None)
-    page.findChild(object, "materialFormName").setProperty("text", "青衫少年")
-    page.findChild(object, "materialFormNote").setProperty("text", "洗得发白的青衫")
-    page.findChild(object, "materialFormEvent").setProperty("text", "3")
+def test_the_reading_position_decides_which_cards_are_shown(workspace) -> None:
+    app, _bridge, page, results, _errors = workspace
+    # 事件粒度：这张工程没有场景，阅读位置只能按事件走。
     del results[:]
-    page.submitForm()
+    page.pickGranularity("event")
+    _pump(app, results, "browse")
+    # 相关节点默认开：选了步骤后列表会收窄，被筛掉的节点会失去选中。这里关掉。
+    del results[:]
+    page.toggleRelated()
+    _pump(app, results, "browse")
+
+    page.openCardDialog(None)
+    page.findChild(object, "materialCardTitle").setProperty("text", "认主之后")
+    page.findChild(object, "materialCardFrom").setProperty("currentIndex", 2)  # E4
+    del results[:]
+    page.submitCard()
     payload = _pump(app, results, "material", "1")
-    form = payload["forms"][0]
-    assert form["name"] == "青衫少年"
-    assert form["event_id"] == "3"
-    # 形态写的是编号，页面上要看到那一步的名字。
-    assert page.eventName("3") == "林舟出场"
+    # 停在「最新」＝读完全书：E4 已经读到，所以它算数。
+    assert [card["title"] for card in payload["cards"]] == ["认主之后"]
+
+    # 把阅读位置挪回 E3：这一步它还没开始，只剩个数量提示。
+    del results[:]
+    page.pickCut(1)
+    _pump(app, results, "browse")
+    payload = _pump(app, results, "material", "1")
+    app.processEvents()
+    assert payload["cards"] == []
+    assert payload["hidden_count"] == 1
+
+    # 走到 E4：它出现了。
+    del results[:]
+    page.pickCut(2)
+    _pump(app, results, "browse")
+    payload = _pump(app, results, "material", "1")
+    app.processEvents()
+    assert [card["title"] for card in payload["cards"]] == ["认主之后"]
+    assert payload["hidden_count"] == 0
+
+
+def test_an_image_carries_its_own_caption(workspace, tmp_path: Path) -> None:
+    app, bridge, page, results, _errors = workspace
+    page.openCardDialog(None)
+    page.findChild(object, "materialCardTitle").setProperty("text", "青衫少年")
+    del results[:]
+    page.submitCard()
+    payload = _pump(app, results, "material", "1")
+    card_id = payload["cards"][0]["id"]
 
     source = tmp_path / "ref.png"
     source.write_bytes(PNG)
     del results[:]
-    bridge.addMaterialImage("1", form["id"], "setting", str(source), "设定图")
+    bridge.addMaterialImage("1", card_id, str(source), "正面")
     payload = _pump(app, results, "material", "1")
-    image = payload["forms"][0]["images"][0]
-    assert image["kind_label"] == "设定图"
+    image = payload["cards"][0]["images"][0]
+    assert image["caption"] == "正面"
     copied = Path(image["path"])
     assert copied.is_file()
     assert copied.parent.parent.parent == tmp_path / "material_material"
 
     del results[:]
-    bridge.removeMaterialImage("1", form["id"], image["id"])
+    bridge.updateMaterialImageCaption("1", card_id, image["id"], "正面，束发")
     payload = _pump(app, results, "material", "1")
-    assert payload["forms"][0]["images"] == []
+    assert payload["cards"][0]["images"][0]["caption"] == "正面，束发"
+
+    del results[:]
+    bridge.removeMaterialImage("1", card_id, image["id"])
+    payload = _pump(app, results, "material", "1")
+    assert payload["cards"][0]["images"] == []
 
 
-def test_material_follows_the_node_not_the_page(workspace) -> None:
+def test_cards_belong_to_the_node_not_the_page(workspace) -> None:
     app, bridge, page, results, _errors = workspace
     del results[:]
-    bridge.saveMaterialText("2", "一枚发着紫光的珠子", "")
+    bridge.addMaterialCard("2", "认主之后", "紫光大盛", "", "")
     _pump(app, results, "material", "2")
 
-    # 切到人物：看到的是人物自己的那一份，不是刚写的那份。
     del results[:]
     page.select("1")
     _pump(app, results, "material", "1")
     app.processEvents()
-    assert _value(page.property("summaryDraft")) == ""
+    assert _value(page.property("material"))["cards"] == []
 
     del results[:]
     page.select("2")
     _pump(app, results, "material", "2")
     app.processEvents()
-    assert _value(page.property("summaryDraft")) == "一枚发着紫光的珠子"
+    assert [card["title"] for card in _value(page.property("material"))["cards"]] == ["认主之后"]

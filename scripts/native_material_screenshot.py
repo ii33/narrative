@@ -144,31 +144,22 @@ def main() -> int:
         )
         person = node_type == "person"
         store = MaterialStore(copy)
-        store.save_text(
+        # 两张卡：一张从头到尾有效，一张有失效时间（所以在「最新」看不到）。
+        first = store.add_card(
             node_id,
+            "青衫少年" if person else "未认主",
             "洗得发白的青衫，袖口磨破，背着旧布包。" if person
-            else "一枚拇指大的紫色珠子，入手温热。",
-            "嘴硬心软，遇事先笑再算账。出身寒微，最恨别人拿出身说事；"
-            "对朋友肯把命交出去，对敌人一分情面都不留。" if person
-            else "来历不明，认主之后只在危急时发烫；越用力催动，紫光越盛，"
-                 "反噬也越重。谁拿着它，谁就得替它担着。",
+            else "紫光内敛，纹路暗沉，像块普通的珠子。",
         )
-        if person:
-            store.add_form(node_id, "青衫少年", "洗得发白的青衫，束发，赤脚。", "")
-            store.add_form(node_id, "白衣客", "换了一身白衣，腰上挂着短剑。", "")
-        else:
-            store.add_form(node_id, "未认主", "紫光内敛，纹路暗沉，像块普通的珠子。", "")
-            store.add_form(node_id, "认主之后", "紫光大盛，纹路亮起，摸上去烫手。", "")
-        forms = store.view(node_id)["forms"]
-        store.add_image(
-            node_id, forms[0]["id"], "concept", _placeholder(workdir / "a.png", "#3c6fb0", "概念图")
+        store.add_card(
+            node_id,
+            "白衣客" if person else "认主之后",
+            "换了一身白衣，腰上挂着短剑。" if person
+            else "紫光大盛，纹路亮起，摸上去烫手。",
         )
-        store.add_image(
-            node_id, forms[0]["id"], "setting", _placeholder(workdir / "b.png", "#4a8f7b", "设定图")
-        )
-        store.add_image(
-            node_id, forms[1]["id"], "action", _placeholder(workdir / "c.png", "#8a5fa8", "动作图")
-        )
+        store.add_image(node_id, first["id"], _placeholder(workdir / "a.png", "#3c6fb0", "正面"), "正面")
+        store.add_image(node_id, first["id"], _placeholder(workdir / "b.png", "#4a8f7b", "背面"), "背面")
+        store.add_image(node_id, first["id"], _placeholder(workdir / "c.png", "#8a5fa8", "细节"), "袖口的补丁")
 
         page: Any = window.findChild(QObject, "browsePage")
         if page is None:
@@ -176,7 +167,10 @@ def main() -> int:
         results.clear()
         page.select(node_id)
         wait_for("node_properties")
-        wait_for("material")
+        payload = wait_for("material")
+        # 默认折叠成标题：只把第一张展开，截图里两种状态都看得到。
+        if payload["cards"]:
+            page.toggleCard(payload["cards"][0]["id"])
         time.sleep(0.4)
         app.processEvents()
 
@@ -213,8 +207,8 @@ def main() -> int:
         material = material.toVariant() if hasattr(material, "toVariant") else material
         print(
             f"saved {args.output} | node={node_id} | "
-            f"forms={len(material.get('forms', []))} | "
-            f"summary={material.get('summary', '')!r}"
+            f"cards={[card['title'] for card in material.get('cards', [])]} | "
+            f"hidden={material.get('hidden_count', 0)}"
         )
         return 0
     finally:

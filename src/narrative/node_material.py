@@ -1,14 +1,15 @@
-"""节点资料：每个节点一页素材，放在图的旁边，不在图里。
+"""节点资料：一张张资料卡，跟着阅读位置出现和消失。
 
-总结、描述、形态设定、设定图都是**编辑素材**，不是原文披露：它们没有引文、没有阅读位置，
-也不该混进只认证据的属性记录里——否则证据表就开始替作者编话了。所以它们存在工程旁边，
-按节点分开，一个节点一个 JSON，图片原样拷进来，工程删了素材也跟着走：
+一份资料 = 一张卡：标题、详情、若干张带说明的图片，加上**生效时间**和**失效时间**
+（各是一个场景或事件的编号，空表示不限制）。它和属性是同一类东西——
+「从这个事件起成立，到那个事件起不成立」——只是没有原文引文，所以不进属性记录，
+存在工程旁边：
 
     <工程>_material/<节点编号>.json
-    <工程>_material/<节点编号>/<形态编号>/<图片文件>
+    <工程>_material/<节点编号>/<资料编号>/<图片文件>
 
-节点在图上那部分（某个阅读位置的状态）仍然从属性记录读；这里只给它配一层
-「这是什么、长什么样」。人物、物品、地点、群体、事件、场景用的是同一套。
+因此浏览时和属性一样只显示**当前阅读位置上有效的**那几张；别的时间点上的只报个数，
+免得让人以为资料丢了。生效/失效是编者明确指定的两个时刻，不是从内容里猜出来的。
 """
 
 from __future__ import annotations
@@ -19,16 +20,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-# 图片的用途。名字是给人看的，键是存下来的；不按节点类型区分——
-# 一把剑要「设定图」，一个人要「三视图」，各挑各的。
-KINDS = {
-    "concept": "概念图",
-    "setting": "设定图",
-    "turnaround": "三视图",
-    "detail": "细节图",
-    "expression": "表情图",
-    "action": "动作图",
-}
+from .order_ids import order_key
+
 ALLOWED_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
@@ -38,13 +31,40 @@ def _now() -> str:
 
 
 def _empty(node_id: str) -> dict:
-    return {
-        "node_id": node_id,
-        "summary": "",
-        "description": "",
-        "forms": [],
-        "updated_at": "",
-    }
+    return {"node_id": node_id, "cards": [], "updated_at": ""}
+
+
+def _moment(value: object) -> tuple[int, ...] | None:
+    """生效/失效时刻：空串是「不限制」，否则必须是个场景或事件的编号。"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return order_key(text)
+
+
+def _key(card: dict) -> tuple:
+    """先按生效时刻排（从头开始的最前），同一时刻按创建顺序。"""
+    start = _moment(card.get("valid_from"))
+    return (start if start is not None else (0,), str(card.get("created_at") or ""))
+
+
+def holds_at(card: dict, cut: str = "") -> bool:
+    """这张卡在阅读位置 `cut` 上算不算数。
+
+    空 cut 表示「最新」：那是全书读完的位置，所以只在没有失效时刻的卡还算数。
+    """
+    start = _moment(card.get("valid_from"))
+    end = _moment(card.get("valid_to"))
+    if not cut:
+        return end is None
+    position = order_key(cut)
+    if position is None:
+        return end is None
+    if start is not None and start > position:
+        return False
+    if end is not None and end <= position:
+        return False
+    return True
 
 
 class MaterialStore:
@@ -70,10 +90,8 @@ class MaterialStore:
         if not isinstance(data, dict):
             return _empty(node_id)
         data.setdefault("node_id", node_id)
-        data.setdefault("summary", "")
-        data.setdefault("description", "")
-        forms = data.get("forms")
-        data["forms"] = forms if isinstance(forms, list) else []
+        cards = data.get("cards")
+        data["cards"] = cards if isinstance(cards, list) else []
         return data
 
     def _save(self, node_id: str, data: dict) -> dict:
@@ -94,13 +112,13 @@ class MaterialStore:
         folder = self.root / node_id
         if not folder.is_dir():
             return
-        alive = {str(item.get("id") or "") for item in data.get("forms") or []}
+        alive = {str(card.get("id") or "") for card in data.get("cards") or []}
         keep = {
             str(image.get("file") or "").replace("\\", "/")
-            for item in data.get("forms") or []
-            for image in item.get("images") or []
+            for card in data.get("cards") or []
+            for image in card.get("images") or []
         }
-        # 文件在形态的目录里，所以要看整棵树，不能只看第一层。
+        # 文件在资料的目录里，所以要看整棵树，不能只看第一层。
         for path in folder.rglob("*"):
             if not path.is_file():
                 continue
@@ -110,7 +128,7 @@ class MaterialStore:
                 path.unlink()
             except OSError:
                 pass
-        # 形态已经删掉的空壳目录也不留；非空说明还有删不掉的文件，留着下次再说。
+        # 资料已经删掉的空壳目录也不留；非空说明还有删不掉的文件，留着下次再说。
         for path in sorted(
             (item for item in folder.rglob("*") if item.is_dir()),
             key=lambda item: len(item.parts),
@@ -128,84 +146,92 @@ class MaterialStore:
             return []
         return sorted(path.stem for path in self.root.glob("*.json"))
 
-    # -- 总结与描述 ----------------------------------------------------
+    # -- 资料卡 --------------------------------------------------------
 
-    def save_text(self, node_id: str, summary: str, description: str) -> dict:
+    def _card(self, data: dict, card_id: str) -> dict:
+        for card in data["cards"]:
+            if card.get("id") == card_id:
+                return card
+        raise ValueError(f"资料不存在：{card_id}")
+
+    def add_card(
+        self,
+        node_id: str,
+        title: str,
+        detail: str = "",
+        valid_from: str = "",
+        valid_to: str = "",
+    ) -> dict:
+        title = (title or "").strip()
+        if not title:
+            raise ValueError("资料需要一个标题")
+        self._check_window(valid_from, valid_to)
         data = self.load(node_id)
-        data["summary"] = str(summary or "").strip()
-        data["description"] = str(description or "").strip()
-        return self._save(node_id, data)
-
-    # -- 形态 ----------------------------------------------------------
-
-    def _form(self, data: dict, form_id: str) -> dict:
-        for item in data["forms"]:
-            if item.get("id") == form_id:
-                return item
-        raise ValueError(f"形态不存在：{form_id}")
-
-    def add_form(self, node_id: str, name: str, note: str = "", event_id: str = "") -> dict:
-        name = (name or "").strip()
-        if not name:
-            raise ValueError("形态需要一个名字")
-        data = self.load(node_id)
-        item = {
-            "id": f"fm_{uuid4().hex[:8]}",
-            "name": name,
-            "note": str(note or ""),
-            # 这个形态从哪个时间点起成立；空 = 不指定。
-            "event_id": str(event_id or ""),
+        card = {
+            "id": f"card_{uuid4().hex[:8]}",
+            "title": title,
+            "detail": str(detail or ""),
+            # 生效/失效各是一个场景或事件的编号；空 = 不限制。
+            "valid_from": str(valid_from or ""),
+            "valid_to": str(valid_to or ""),
             "images": [],
             "created_at": _now(),
         }
-        data["forms"].append(item)
-        return self._save(node_id, data)
+        data["cards"].append(card)
+        self._save(node_id, data)
+        return card
 
-    def update_form(
+    @staticmethod
+    def _check_window(valid_from: object, valid_to: object) -> None:
+        start, end = _moment(valid_from), _moment(valid_to)
+        if start is None or end is None:
+            return
+        if start >= end:
+            raise ValueError("失效时间要在生效时间之后")
+
+    def update_card(
         self,
         node_id: str,
-        form_id: str,
+        card_id: str,
         *,
-        name: str | None = None,
-        note: str | None = None,
-        event_id: str | None = None,
+        title: str | None = None,
+        detail: str | None = None,
+        valid_from: str | None = None,
+        valid_to: str | None = None,
     ) -> dict:
         data = self.load(node_id)
-        item = self._form(data, form_id)
-        if name is not None:
-            if not name.strip():
-                raise ValueError("形态名不能为空")
-            item["name"] = name.strip()
-        if note is not None:
-            item["note"] = str(note)
-        if event_id is not None:
-            item["event_id"] = str(event_id)
-        return self._save(node_id, data)
-
-    def remove_form(self, node_id: str, form_id: str) -> dict:
-        data = self.load(node_id)
-        item = self._form(data, form_id)
-        data["forms"] = [other for other in data["forms"] if other.get("id") != form_id]
+        card = self._card(data, card_id)
+        if title is not None:
+            if not title.strip():
+                raise ValueError("资料标题不能为空")
+            card["title"] = title.strip()
+        if detail is not None:
+            card["detail"] = str(detail)
+        if valid_from is not None:
+            card["valid_from"] = str(valid_from)
+        if valid_to is not None:
+            card["valid_to"] = str(valid_to)
+        self._check_window(card["valid_from"], card["valid_to"])
         self._save(node_id, data)
-        # 素材跟着形态一起删：留在磁盘上的孤儿图片没人认领。
-        folder = self.root / node_id / form_id
+        return card
+
+    def remove_card(self, node_id: str, card_id: str) -> dict:
+        data = self.load(node_id)
+        card = self._card(data, card_id)
+        data["cards"] = [other for other in data["cards"] if other.get("id") != card_id]
+        self._save(node_id, data)
+        # 图片跟着资料一起删：留在磁盘上的孤儿文件没人认领。
+        folder = self.root / node_id / card_id
         if folder.is_dir():
             shutil.rmtree(folder, ignore_errors=True)
         self._sweep(node_id, data)
-        return {"removed": form_id, "name": item.get("name")}
+        return {"removed": card_id, "title": card.get("title")}
 
     # -- 图片 ----------------------------------------------------------
 
     def add_image(
-        self,
-        node_id: str,
-        form_id: str,
-        kind: str,
-        source: Path,
-        caption: str = "",
+        self, node_id: str, card_id: str, source: Path, caption: str = ""
     ) -> dict:
-        if kind not in KINDS:
-            raise ValueError("图片用途只能是：" + "、".join(KINDS))
         source = Path(source)
         if not source.is_file():
             raise ValueError(f"找不到图片：{source}")
@@ -215,32 +241,45 @@ class MaterialStore:
             raise ValueError(f"图片超过 {MAX_IMAGE_BYTES // 1024 // 1024}MB")
 
         data = self.load(node_id)
-        item = self._form(data, form_id)
-        folder = self.root / node_id / form_id
+        card = self._card(data, card_id)
+        folder = self.root / node_id / card_id
         folder.mkdir(parents=True, exist_ok=True)
         image_id = f"img_{uuid4().hex[:8]}"
-        target = folder / f"{kind}-{image_id}{source.suffix.lower()}"
+        target = folder / f"{image_id}{source.suffix.lower()}"
         shutil.copyfile(source, target)
 
         record = {
             "id": image_id,
-            "kind": kind,
             "file": str(target.relative_to(self.root)).replace("\\", "/"),
             "caption": str(caption or ""),
             "added_at": _now(),
         }
-        item.setdefault("images", []).append(record)
+        card.setdefault("images", []).append(record)
         self._save(node_id, data)
         return record | {"path": str(target)}
 
-    def remove_image(self, node_id: str, form_id: str, image_id: str) -> dict:
+    def update_image_caption(
+        self, node_id: str, card_id: str, image_id: str, caption: str
+    ) -> dict:
         data = self.load(node_id)
-        item = self._form(data, form_id)
-        images = item.get("images") or []
+        card = self._card(data, card_id)
+        image = next(
+            (item for item in card.get("images") or [] if item.get("id") == image_id), None
+        )
+        if image is None:
+            raise ValueError(f"图片不存在：{image_id}")
+        image["caption"] = str(caption or "")
+        self._save(node_id, data)
+        return {"id": image_id, "caption": image["caption"]}
+
+    def remove_image(self, node_id: str, card_id: str, image_id: str) -> dict:
+        data = self.load(node_id)
+        card = self._card(data, card_id)
+        images = card.get("images") or []
         record = next((image for image in images if image.get("id") == image_id), None)
         if record is None:
             raise ValueError(f"图片不存在：{image_id}")
-        item["images"] = [image for image in images if image.get("id") != image_id]
+        card["images"] = [image for image in images if image.get("id") != image_id]
         self._save(node_id, data)
         target = self.root / str(record.get("file") or "")
         deleted = False
@@ -256,29 +295,26 @@ class MaterialStore:
 
     # -- 给界面用的一份投影 --------------------------------------------
 
-    def view(self, node_id: str) -> dict:
-        """资料内容 + 每种用途的中文名 + 图片的绝对路径。"""
+    def view(self, node_id: str, cut: str = "") -> dict:
+        """这个阅读位置上有效的资料卡；别的时间点的只报个数。"""
         data = self.load(node_id)
         self._sweep(node_id, data)
-        forms = []
-        for item in data["forms"]:
+        shown: list[dict] = []
+        hidden = 0
+        for card in sorted(data["cards"], key=_key):
+            if not holds_at(card, cut):
+                hidden += 1
+                continue
             images = []
-            for image in item.get("images") or []:
+            for image in card.get("images") or []:
                 relative = str(image.get("file") or "")
-                images.append(
-                    image
-                    | {
-                        "path": str(self.root / relative) if relative else "",
-                        "kind_label": KINDS.get(image.get("kind"), image.get("kind")),
-                    }
-                )
-            forms.append(item | {"images": images})
+                images.append(image | {"path": str(self.root / relative) if relative else ""})
+            shown.append(card | {"images": images})
         return {
             "node_id": node_id,
-            "summary": data["summary"],
-            "description": data["description"],
-            "forms": forms,
-            "kinds": [{"key": key, "label": label} for key, label in KINDS.items()],
+            "cut": cut,
+            "cards": shown,
+            "hidden_count": hidden,
             "root": str(self.root),
             "updated_at": data.get("updated_at", ""),
         }
