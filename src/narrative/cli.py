@@ -3,6 +3,7 @@ import json
 import time
 from pathlib import Path
 
+from . import tool_cli
 from .errors import OperationError
 from .project_catalog import create_graph_project, open_graph_project
 
@@ -210,9 +211,15 @@ def main():
     property_world.add_argument("at_positional", nargs="?", help="可选故事 TimeRef 值")
     property_world.add_argument("--at", help="故事 TimeRef：JSON 或 number/datetime 值；省略为当前视图")
     property_world.add_argument("--as-of-revision", type=int)
+    tool_cli.add_commands(commands)
     args = parser.parse_args()
     if args.command.startswith("graph-property-"):
         args.command = "property-" + args.command[len("graph-property-"):]
+    if args.command == "tool" or args.command in tool_cli.ALIASES:
+        try:
+            return tool_cli.run(args)
+        except (OperationError, tool_cli.tool_api.ToolError) as exc:
+            parser.exit(1, f"错误：{exc}\n")
     try:
         if args.command.startswith(("graph-", "property-", "change-")):
             graph = create_graph_project(args.db) if args.command == "graph-create" else open_graph_project(args.db)

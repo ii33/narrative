@@ -35,6 +35,25 @@ uv sync --extra desktop
 
 开发时修改业务模块后，等待活动提取结束，再重启桌面窗口；只刷新界面不能保证已导入的 Python 模块更新。
 
+### 给程序和模型：MCP / CLI
+
+同一套能力有两个门：命令行给人，MCP 服务给模型。两者都落在 `narrative.tool_api` 的同一张
+工具表上——读节点、场景、事件在某个阅读位置的状态与统计，也能补录、更正、失效、修订节点、
+审核候选、跑提取。没有窗口状态参与，只有工程文件。
+
+```bash
+narrative nodes --project P --type person      # 节点列表（带分类计数）
+narrative scene 28 --project P                 # 这一场结束时各方是什么状态
+narrative event 34 --project P --json          # 读到这一步时的状态
+narrative stats --project P                    # 统计
+narrative tool list                            # 全部工具（与 MCP 同一张表）
+narrative add-property 7 state 神色平静 164 --project P
+narrative-mcp --project P                      # MCP over stdio
+```
+
+完整工具表、`cut`（阅读位置）的含义和 MCP 客户端配置见
+[给程序和模型的接口](docs/AGENT_API.md)。
+
 ### 原生桌面界面（Qt Quick）
 
 准备桌面依赖并启动原生窗口：

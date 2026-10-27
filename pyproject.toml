@@ -21,6 +21,7 @@ packages = ["src/narrative"]
 [project.scripts]
 narrative = "narrative.cli:main"
 narrative-desktop = "narrative.native_app:main"
+narrative-mcp = "narrative.mcp_server:main"
 
 [dependency-groups]
 dev = ["ruff>=0.11", "pyright>=1.1", "pytest>=8"]
