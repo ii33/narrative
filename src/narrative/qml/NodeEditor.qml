@@ -79,6 +79,19 @@ Dialog {
         return (item.property_id || "") + "|" + (item.category || "")
     }
 
+    // 取消就是「什么都没发生」：表单的显示条件是 editKey / retractKey，
+    // 只清记录 id 的话表单还在，看着像按钮没反应。
+    function cancelForms() {
+        editRecordId = ""
+        editKey = ""
+        editPendingId = ""
+        editPendingKey = ""
+        retractTargets = []
+        retractKey = ""
+        retractLabel = ""
+        retractReason = ""
+    }
+
     function startRename(item) {
         renameKey = rowKey(item)
         renameNames = (item.property_ids || []).slice()
@@ -187,6 +200,17 @@ Dialog {
         retractTargets = ids
         retractKey = rowKey(item)
         retractLabel = item.label || item.property_id
+        retractReason = ""
+        editRecordId = ""
+        editKey = ""
+    }
+
+    // 只撤这一条。一行里有两条一样的说法时，整行撤回会把两条一起带走。
+    function startRetractRecord(item, record) {
+        retractTargets = [record.id]
+        retractKey = rowKey(item)
+        retractLabel = (item.label || item.property_id)
+            + (record.event_name ? " · " + record.event_name : "")
         retractReason = ""
         editRecordId = ""
         editKey = ""
@@ -389,6 +413,8 @@ Dialog {
 
                     delegate: ColumnLayout {
                         required property var modelData
+                        // 里面记录那一层会覆盖 modelData，先把整行留住。
+                        readonly property var row: modelData
 
                         Layout.fillWidth: true
                         spacing: 2
@@ -459,12 +485,37 @@ Dialog {
                                 spacing: 6
                                 Label {
                                     Layout.fillWidth: true
-                                    text: String(modelData.value === null || modelData.value === undefined
-                                        ? "（空）" : modelData.value)
+                                    // 节点值型属性存的是编号，行上要看到名字。
+                                    text: editor.host.valueText(modelData)
                                         + (modelData.event_name ? " · " + modelData.event_name : "")
                                     color: t.body
                                     font.pixelSize: 10
                                     elide: Text.ElideRight
+                                }
+                                // 一行两条一样的说法时，动作要落在具体这一条上。
+                                Label {
+                                    objectName: "editorRecordEdit"
+                                    text: "更正"
+                                    color: t.accent
+                                    font.pixelSize: 9
+                                    font.underline: true
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: editor.startEdit(row, modelData)
+                                    }
+                                }
+                                Label {
+                                    objectName: "editorRecordRetract"
+                                    text: "失效"
+                                    color: t.bad
+                                    font.pixelSize: 9
+                                    font.underline: true
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: editor.startRetractRecord(row, modelData)
+                                    }
                                 }
                             }
                         }
@@ -537,10 +588,11 @@ Dialog {
                                     Layout.minimumWidth: 0
                                 }
                                 Button {
+                                    objectName: "editorCancelEdit"
                                     text: "取消"
                                     flat: true
                                     font.pixelSize: 10
-                                    onClicked: editor.editRecordId = ""
+                                    onClicked: editor.cancelForms()
                                 }
                                 Button {
                                     objectName: "editorSubmitEdit"
@@ -637,10 +689,11 @@ Dialog {
                                     }
                                 }
                                 Button {
+                                    objectName: "editorCancelRetract"
                                     text: "取消"
                                     flat: true
                                     font.pixelSize: 10
-                                    onClicked: editor.retractTargets = []
+                                    onClicked: editor.cancelForms()
                                 }
                                 Button {
                                     objectName: "editorSubmitRetract"
