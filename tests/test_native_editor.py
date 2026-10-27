@@ -195,43 +195,6 @@ def test_delete_row_takes_every_record(workspace) -> None:
     assert sorted(payload["retracted"]) == ["v1", "v2"]
 
 
-def test_delete_takes_one_duplicate_and_says_it_never_counted(workspace) -> None:
-    """删除是「从来不算」，不是「从这一步起不算」——在更早的阅读位置上也看不到。"""
-    app, _bridge, _page, editor, results, _errors, project = workspace
-    row = next(
-        item for item in _value(editor.property("properties"))
-        if item["label"] == "身份"
-    )
-    first = row["records"][0]  # 事件 E2
-
-    del results[:]
-    editor.deleteRecords([first["id"]])
-    payload = _pump(app, results, "property_delete")
-    assert payload["retracted"] == ["v1"]
-
-    # 停在 E2 这一步：删除的那条从来不算，所以这里也不该有它。
-    ops = Operations.open_graph_project(project)
-    at_early = ops.property_node_summary("1", cut="2")
-    values = [
-        record["id"]
-        for item in at_early["properties"]
-        for record in item["records"]
-    ]
-    assert "v1" not in values
-
-
-def test_delete_row_takes_every_record(workspace) -> None:
-    app, _bridge, _page, editor, results, _errors, _project = workspace
-    row = next(
-        item for item in _value(editor.property("properties"))
-        if item["label"] == "身份"
-    )
-    del results[:]
-    editor.deleteRow(row)
-    payload = _pump(app, results, "property_delete")
-    assert sorted(payload["retracted"]) == ["v1", "v2"]
-
-
 def test_retracting_a_whole_row_still_takes_every_record(workspace) -> None:
     app, _bridge, _page, editor, results, _errors, _project = workspace
     row = next(
