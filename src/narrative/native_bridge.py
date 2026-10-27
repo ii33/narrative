@@ -19,14 +19,9 @@ from . import graph_profile_ops, project_catalog, providers
 from .extraction import build_candidate, extract_chapter
 from .graph_operations import GraphOperations
 from .harness import HarnessSettings
-from .native_models import (
-    CanvasState,
-    candidate_summary,
-    node_detail,
-    search_result,
-    wiki_state,
-)
-from .order_ids import label_id, order_key
+from .native_models import CanvasState, candidate_summary, node_detail, search_result
+from .node_material import MaterialStore
+from .order_ids import order_key
 from .property_audit import audit_candidate
 from .provider_store import ProviderStore
 
@@ -844,123 +839,66 @@ class NativeBridge(QObject):
         cut = self._state_cut or None
         self._project_task("node_editor", lambda ops: ops.node_editor(node_id, cut=cut))
 
-    # -- 角色 wiki -----------------------------------------------------
+    # -- 节点资料（总结 / 描述 / 形态 / 设定图）-------------------------
 
-    def _wiki(self, ops):
-        from .wiki_store import WikiStore
+    def _material(self) -> MaterialStore:
+        return MaterialStore(self._project())
 
-        return WikiStore(self._project())
-
-    def _wiki_payload(self, ops, node_id: str, wiki: dict) -> dict:
-        cut = self._state_cut or None
-        snapshot = ops.graph_snapshot()
-        nodes = {item["id"]: item for item in snapshot["nodes"]}
-        node = nodes.get(node_id, {})
-        summary = ops.property_node_summary(node_id, cut=cut)
-        # 形象上写的是事件编号，页面上要看到那一步的名字。
-        for item in wiki.get("appearances") or []:
-            event_id = item.get("event_id") or ""
-            item["event_name"] = (nodes.get(event_id) or {}).get("name") or ""
-        return {
-            "node": {
-                "id": node_id,
-                "label_id": label_id(node_id, node.get("node_type")),
-                "name": node.get("name") or node_id,
-                "node_type": node.get("node_type") or "",
-            },
-            "cut": cut,
-            # 停在哪一步，就说那一步的名字，而不是让人去看编号；停在最新就没有这一步。
-            "cut_name": ((nodes.get(cut) or {}).get("name") or "") if cut else "",
-            "state": wiki_state(summary["properties"]),
-            "wiki": wiki,
-        }
-
-    @Slot()
-    def loadWikiIndex(self) -> None:
-        """角色清单：这个工程里的人物，以及谁已经有 wiki。"""
+    def _material_task(self, node_id: str, change) -> None:
+        """改一次资料，然后把整页发回去：界面只认一种 payload。"""
 
         def work(ops) -> dict:
-            view = ops.browse_view(
-                granularity="scene", cut_id=self._state_cut or "", node_type="person"
-            )
-            known = set(self._wiki(ops).nodes_with_wiki())
-            return {
-                "characters": [
-                    node | {"has_wiki": node["id"] in known} for node in view["nodes"]
-                ]
-            }
+            store = self._material()
+            change(store)
+            return store.view(node_id)
 
-        self._project_task("wiki_index", work)
+        self._project_task("material", work)
 
     @Slot(str)
-    def loadWiki(self, node_id: str) -> None:
-        """一个角色的 wiki：圣经、形象，加上他在当前阅读位置上的状态。"""
-
-        def work(ops) -> dict:
-            store = self._wiki(ops)
-            return self._wiki_payload(ops, node_id, store.view(node_id))
-
-        self._project_task("wiki", work)
-
-    @Slot(str, str)
-    def saveWikiBible(self, node_id: str, text: str) -> None:
-        def work(ops) -> dict:
-            store = self._wiki(ops)
-            store.set_bible(node_id, text)
-            return self._wiki_payload(ops, node_id, store.view(node_id))
-
-        self._project_task("wiki", work)
-
-    @Slot(str, str, str, str)
-    def addWikiAppearance(self, node_id: str, name: str, note: str, event_id: str) -> None:
-        def work(ops) -> dict:
-            store = self._wiki(ops)
-            store.add_appearance(node_id, name, note, event_id)
-            return self._wiki_payload(ops, node_id, store.view(node_id))
-
-        self._project_task("wiki", work)
-
-    @Slot(str, str, str, str, str)
-    def updateWikiAppearance(
-        self, node_id: str, appearance_id: str, name: str, note: str, event_id: str
-    ) -> None:
-        def work(ops) -> dict:
-            store = self._wiki(ops)
-            store.update_appearance(
-                node_id, appearance_id, name=name, note=note, event_id=event_id
-            )
-            return self._wiki_payload(ops, node_id, store.view(node_id))
-
-        self._project_task("wiki", work)
-
-    @Slot(str, str)
-    def removeWikiAppearance(self, node_id: str, appearance_id: str) -> None:
-        def work(ops) -> dict:
-            store = self._wiki(ops)
-            store.remove_appearance(node_id, appearance_id)
-            return self._wiki_payload(ops, node_id, store.view(node_id))
-
-        self._project_task("wiki", work)
-
-    @Slot(str, str, str, str, str)
-    def addWikiImage(
-        self, node_id: str, appearance_id: str, kind: str, path: str, caption: str
-    ) -> None:
-        def work(ops) -> dict:
-            store = self._wiki(ops)
-            store.add_image(node_id, appearance_id, kind, Path(path), caption)
-            return self._wiki_payload(ops, node_id, store.view(node_id))
-
-        self._project_task("wiki", work)
+    def loadMaterial(self, node_id: str) -> None:
+        self._material_task(node_id, lambda store: None)
 
     @Slot(str, str, str)
-    def removeWikiImage(self, node_id: str, appearance_id: str, image_id: str) -> None:
-        def work(ops) -> dict:
-            store = self._wiki(ops)
-            store.remove_image(node_id, appearance_id, image_id)
-            return self._wiki_payload(ops, node_id, store.view(node_id))
+    def saveMaterialText(self, node_id: str, summary: str, description: str) -> None:
+        self._material_task(
+            node_id, lambda store: store.save_text(node_id, summary, description)
+        )
 
-        self._project_task("wiki", work)
+    @Slot(str, str, str, str)
+    def addMaterialForm(self, node_id: str, name: str, note: str, event_id: str) -> None:
+        self._material_task(
+            node_id, lambda store: store.add_form(node_id, name, note, event_id)
+        )
+
+    @Slot(str, str, str, str, str)
+    def updateMaterialForm(
+        self, node_id: str, form_id: str, name: str, note: str, event_id: str
+    ) -> None:
+        self._material_task(
+            node_id,
+            lambda store: store.update_form(
+                node_id, form_id, name=name, note=note, event_id=event_id
+            ),
+        )
+
+    @Slot(str, str)
+    def removeMaterialForm(self, node_id: str, form_id: str) -> None:
+        self._material_task(node_id, lambda store: store.remove_form(node_id, form_id))
+
+    @Slot(str, str, str, str, str)
+    def addMaterialImage(
+        self, node_id: str, form_id: str, kind: str, path: str, caption: str
+    ) -> None:
+        self._material_task(
+            node_id,
+            lambda store: store.add_image(node_id, form_id, kind, Path(path), caption),
+        )
+
+    @Slot(str, str, str)
+    def removeMaterialImage(self, node_id: str, form_id: str, image_id: str) -> None:
+        self._material_task(
+            node_id, lambda store: store.remove_image(node_id, form_id, image_id)
+        )
 
     @Slot(str, int)
     def acceptPropertyCandidate(self, candidate_id: str, version: int) -> None:

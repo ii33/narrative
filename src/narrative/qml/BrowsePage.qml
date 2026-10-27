@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Dialogs
 import QtQuick.Layouts
 
 // 数据浏览：左侧分类，中间节点列表（编号即阅读顺序），右侧详情 + 属性。
@@ -61,6 +62,20 @@ Item {
     property var propertyRows: []      // 扁平列表，「全部」视图用
     property var categoryGroups: []    // 按大类分组
     property var inboundRows: []       // 别的节点指向本节点的记录
+    // 节点资料：总结、描述、形态与设定图。这是**编辑素材，不是原文披露**——
+    // 没有引文、没有阅读位置，所以不进属性记录，也不跟阅读位置走。
+    property var material: ({ summary: "", description: "", forms: [], kinds: [] })
+    property string summaryDraft: ""
+    property string descriptionDraft: ""
+    property string savedSummary: ""
+    property string savedDescription: ""
+    property string materialNodeId: ""
+    property string pendingFormId: ""
+    property string pendingKind: ""
+    property string formEditId: ""
+    property bool materialSaving: false
+    readonly property bool materialDirty: summaryDraft !== savedSummary
+        || descriptionDraft !== savedDescription
     property var vocabulary: []        // 当前节点类型的分类表
     property bool groupByCategory: true
     // 属性区回答哪个问题：latest = 这一刻的状态；all = 到这里为止说过的全部，
@@ -249,8 +264,77 @@ Item {
         inboundRows = []
         expandedProps = ({})
         appliedCut = page.cutEventId
+        material = ({ summary: "", description: "", forms: [], kinds: [] })
+        summaryDraft = ""
+        descriptionDraft = ""
+        savedSummary = ""
+        savedDescription = ""
+        materialNodeId = ""
         bridge.nodeDetail(id)
         bridge.loadNodeProperties(id)
+        bridge.loadMaterial(id)
+    }
+
+    // 事件名：形态写的是编号，页面上要看到那一步叫什么。
+    function eventName(id) {
+        if (!id) return ""
+        for (var i = 0; i < page.events.length; ++i)
+            if (page.events[i].id === id) return page.events[i].name
+        return id
+    }
+
+    function applyMaterial(payload) {
+        // 慢结果不能覆盖别人：切到另一个节点后，上一个节点的资料会迟到。
+        if (!payload || payload.node_id !== page.selectedId) return
+        var dirtySummary = page.summaryDraft !== page.savedSummary
+        var dirtyDescription = page.descriptionDraft !== page.savedDescription
+        page.materialNodeId = payload.node_id
+        page.material = payload
+        page.savedSummary = payload.summary || ""
+        page.savedDescription = payload.description || ""
+        // 正在打字就不要把输入框冲掉，只跟没动过的那一份走。
+        if (!dirtySummary) page.summaryDraft = page.savedSummary
+        if (!dirtyDescription) page.descriptionDraft = page.savedDescription
+        if (page.materialSaving) {
+            page.materialSaving = false
+            app.toast("资料已保存", false)
+        }
+    }
+
+    function saveMaterialText() {
+        if (page.selectedId.length === 0) return
+        page.materialSaving = true
+        bridge.saveMaterialText(page.selectedId, page.summaryDraft, page.descriptionDraft)
+    }
+
+    // 新增和编辑共用一张表单：编辑时把现值填进去。
+    function openFormDialog(form) {
+        page.formEditId = form ? (form.id || "") : ""
+        formName.text = form ? (form.name || "") : ""
+        formNote.text = form ? (form.note || "") : ""
+        formEvent.text = form ? (form.event_id || "") : ""
+        formDialog.open()
+    }
+
+    function submitForm() {
+        if (page.selectedId.length === 0) return
+        if (page.formEditId.length > 0)
+            bridge.updateMaterialForm(page.selectedId, page.formEditId, formName.text,
+                formNote.text, formEvent.text)
+        else
+            bridge.addMaterialForm(page.selectedId, formName.text, formNote.text,
+                formEvent.text)
+        page.formEditId = ""
+        formName.text = ""
+        formNote.text = ""
+        formEvent.text = ""
+        formDialog.close()
+    }
+
+    function askMaterialImage(formId, kind) {
+        page.pendingFormId = formId
+        page.pendingKind = kind
+        materialImagePicker.open()
     }
 
     function valueText(item) {
@@ -497,6 +581,8 @@ Item {
                     ? "已撤回 " + removed + " 条记录"
                     : "这些记录已经失效过，不用再撤", removed === 0)
                 if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
+            } else if (kind === "material") {
+                page.applyMaterial(payload)
             } else if (kind === "node_properties") {
                 page.applyProperties(payload)
             } else if (kind === "property_categorize") {
@@ -809,8 +895,8 @@ Item {
 
             // -- detail --------------------------------------------------
             Rectangle {
-                SplitView.preferredWidth: 440
-                SplitView.minimumWidth: 320
+                SplitView.preferredWidth: 500
+                SplitView.minimumWidth: 360
                 SplitView.fillHeight: true
                 color: t.card
                 border.color: t.line
@@ -1077,6 +1163,240 @@ Item {
                                     }
                                 }
                             }
+                            // 没选中节点时不摆空表单：这一块是给具体节点写的。
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                visible: page.selectedId.length > 0
+                                spacing: 8
+
+                                // 资料：总结、描述、形态与设定图。这是编辑素材，不是原文披露——
+                                // 没有引文，也不跟阅读位置走，所以单独一块，不混进属性。
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 1
+                                    Layout.topMargin: 8
+                                    color: t.line
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    Label {
+                                        text: "资料"
+                                        color: t.ink
+                                        font.pixelSize: 13
+                                        font.weight: Font.DemiBold
+                                    }
+                                    Label {
+                                        text: page.material.forms.length > 0
+                                            ? "形态 " + page.material.forms.length : ""
+                                        color: t.muted
+                                        font.pixelSize: 11
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    Button {
+                                        objectName: "materialSave"
+                                        text: "保存"
+                                        flat: true
+                                        font.pixelSize: 10
+                                        enabled: page.selectedId.length > 0 && page.materialDirty
+                                        onClicked: page.saveMaterialText()
+                                    }
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: "只给人和程序看：没有引文，也不跟阅读位置走，不进属性记录。"
+                                    color: t.muted
+                                    font.pixelSize: 10
+                                    wrapMode: Text.Wrap
+                                }
+                                TextField {
+                                    objectName: "materialSummary"
+                                    Layout.fillWidth: true
+                                    placeholderText: "一句话说清这是什么"
+                                    text: page.summaryDraft
+                                    onTextChanged: page.summaryDraft = text
+                                    onAccepted: page.saveMaterialText()
+                                }
+                                TextArea {
+                                    objectName: "materialDescription"
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 96
+                                    placeholderText: "写详细一点：来历、特征、脾气、要注意的地方……"
+                                    wrapMode: TextArea.Wrap
+                                    text: page.descriptionDraft
+                                    onTextChanged: page.descriptionDraft = text
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    Label {
+                                        text: "形态"
+                                        color: t.ink
+                                        font.pixelSize: 12
+                                        font.weight: Font.DemiBold
+                                    }
+                                    Label {
+                                        text: "同一个对象在不同时候的样子，可指定从哪个事件起"
+                                        color: t.muted
+                                        font.pixelSize: 10
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
+                                    }
+                                    Button {
+                                        objectName: "materialAddForm"
+                                        text: "新增形态"
+                                        flat: true
+                                        font.pixelSize: 10
+                                        enabled: page.selectedId.length > 0
+                                        onClicked: page.openFormDialog(null)
+                                    }
+                                }
+
+                                Repeater {
+                                    objectName: "materialForms"
+                                    model: page.material.forms
+
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        // 里面几层 Repeater 会覆盖 modelData，先留住这一版形态。
+                                        readonly property var form: modelData
+                                        Layout.fillWidth: true
+                                        implicitHeight: formBlock.implicitHeight + 20
+                                        radius: 6
+                                        color: t.paper
+                                        border.color: t.line
+
+                                        ColumnLayout {
+                                            id: formBlock
+                                            anchors.fill: parent
+                                            anchors.margins: 10
+                                            spacing: 6
+
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 6
+                                                Label {
+                                                    text: form.name
+                                                    color: t.ink
+                                                    font.pixelSize: 12
+                                                    font.weight: Font.DemiBold
+                                                }
+                                                Label {
+                                                    text: form.event_id
+                                                        ? "从「" + page.eventName(form.event_id) + "」起"
+                                                        : "未指定时间点"
+                                                    color: t.muted
+                                                    font.pixelSize: 10
+                                                    elide: Text.ElideRight
+                                                    Layout.fillWidth: true
+                                                    Layout.minimumWidth: 0
+                                                }
+                                                Label {
+                                                    text: "编辑"
+                                                    color: t.accent
+                                                    font.pixelSize: 10
+                                                    font.underline: true
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        cursorShape: Qt.PointingHandCursor
+                                                        onClicked: page.openFormDialog(form)
+                                                    }
+                                                }
+                                                Label {
+                                                    text: "删除"
+                                                    color: t.bad
+                                                    font.pixelSize: 10
+                                                    font.underline: true
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        cursorShape: Qt.PointingHandCursor
+                                                        onClicked: bridge.removeMaterialForm(
+                                                            page.selectedId, form.id)
+                                                    }
+                                                }
+                                            }
+                                            Label {
+                                                Layout.fillWidth: true
+                                                visible: (form.note || "").length > 0
+                                                text: form.note || ""
+                                                color: t.body
+                                                font.pixelSize: 11
+                                                wrapMode: Text.Wrap
+                                            }
+
+                                            // 六类图：按钮一行，已挂的图在下面。
+                                            Flow {
+                                                Layout.fillWidth: true
+                                                spacing: 6
+                                                Repeater {
+                                                    model: page.material.kinds
+
+                                                    delegate: Button {
+                                                        required property var modelData
+                                                        text: "+ " + modelData.label
+                                                        flat: true
+                                                        font.pixelSize: 10
+                                                        onClicked: page.askMaterialImage(
+                                                            form.id, modelData.key)
+                                                    }
+                                                }
+                                            }
+                                            Flow {
+                                                Layout.fillWidth: true
+                                                spacing: 8
+                                                Repeater {
+                                                    model: form.images
+
+                                                    delegate: Column {
+                                                        required property var modelData
+                                                        spacing: 2
+                                                        Image {
+                                                            width: 104
+                                                            height: 104
+                                                            source: modelData.path
+                                                                ? "file:///" + String(modelData.path).replace(/\\/g, "/")
+                                                                : ""
+                                                            fillMode: Image.PreserveAspectFit
+                                                            asynchronous: true
+                                                        }
+                                                        Label {
+                                                            width: 104
+                                                            text: modelData.kind_label || modelData.kind
+                                                            color: t.muted
+                                                            font.pixelSize: 9
+                                                            elide: Text.ElideRight
+                                                        }
+                                                        Label {
+                                                            text: "移除"
+                                                            color: t.bad
+                                                            font.pixelSize: 9
+                                                            font.underline: true
+                                                            MouseArea {
+                                                                anchors.fill: parent
+                                                                cursorShape: Qt.PointingHandCursor
+                                                                onClicked: bridge.removeMaterialImage(
+                                                                    page.selectedId, form.id, modelData.id)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    visible: page.selectedId.length > 0
+                                        && page.material.forms.length === 0
+                                    text: "还没有形态。可以给同一个对象留几版样子（换装、损毁、修复），各挂自己的图。"
+                                    color: t.muted
+                                    font.pixelSize: 10
+                                    wrapMode: Text.Wrap
+                                }
+                            }
                         }
                     }
 
@@ -1094,6 +1414,71 @@ Item {
                         enabled: page.selectedId.length > 0
                         onClicked: nodeEditor.openFor(page.selectedId)
                     }
+                }
+            }
+        }
+    }
+
+    // 选图：拷进工程旁边，不引用你选的原路径。
+    FileDialog {
+        id: materialImagePicker
+        title: "选择图片"
+        nameFilters: ["图片 (*.png *.jpg *.jpeg *.webp *.gif)"]
+        onAccepted: {
+            if (page.pendingFormId.length > 0 && page.selectedId.length > 0)
+                bridge.addMaterialImage(page.selectedId, page.pendingFormId,
+                    page.pendingKind, materialImagePicker.selectedFile.toString(), "")
+        }
+    }
+
+    // 新增 / 编辑形态
+    Dialog {
+        id: formDialog
+        objectName: "materialFormDialog"
+        title: page.formEditId.length > 0 ? "编辑形态" : "新增形态"
+        modal: true
+        anchors.centerIn: parent
+        width: 380
+
+        contentItem: ColumnLayout {
+            spacing: 6
+            Label {
+                Layout.fillWidth: true
+                text: "形态是同一个对象在不同时候的样子，可以指定从哪个事件起成立。"
+                color: t.muted
+                font.pixelSize: 11
+                wrapMode: Text.Wrap
+            }
+            TextField {
+                id: formName
+                objectName: "materialFormName"
+                Layout.fillWidth: true
+                placeholderText: "形态名，例如：青衫少年 / 断裂的剑"
+                onAccepted: page.submitForm()
+            }
+            TextField {
+                id: formNote
+                objectName: "materialFormNote"
+                Layout.fillWidth: true
+                placeholderText: "设定：样子、材质、气质……"
+                onAccepted: page.submitForm()
+            }
+            TextField {
+                id: formEvent
+                objectName: "materialFormEvent"
+                Layout.fillWidth: true
+                placeholderText: "从哪个事件起成立（可空，例如 34）"
+                onAccepted: page.submitForm()
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                Button { text: "取消"; flat: true; onClicked: formDialog.close() }
+                Button {
+                    objectName: "materialFormSubmit"
+                    text: page.formEditId.length > 0 ? "保存" : "新增"
+                    highlighted: true
+                    onClicked: page.submitForm()
                 }
             }
         }

@@ -1,13 +1,14 @@
-"""角色 wiki：一个角色一页，页面在图的旁边，不在图里。
+"""节点资料：每个节点一页素材，放在图的旁边，不在图里。
 
-圣经、形象设定、概念图/三视图/细节图/表情图/动作图都是**编辑素材**，不是原文披露：
-它们没有引文、没有阅读位置，也不该混进只认证据的属性记录里。所以它们存在工程旁边的
-一个目录里，按节点分开，一个角色一个 JSON，图片原样拷进来，工程删了素材也跟着走。
+总结、描述、形态设定、设定图都是**编辑素材**，不是原文披露：它们没有引文、没有阅读位置，
+也不该混进只认证据的属性记录里——否则证据表就开始替作者编话了。所以它们存在工程旁边，
+按节点分开，一个节点一个 JSON，图片原样拷进来，工程删了素材也跟着走：
 
-    <工程>_wiki/<节点编号>.json
-    <工程>_wiki/<节点编号>/<形象编号>/<图片文件>
+    <工程>_material/<节点编号>.json
+    <工程>_material/<节点编号>/<形态编号>/<图片文件>
 
-图里那部分（按时间点的状态）仍然从属性记录读——wiki 只是给它配一层「这个角色长什么样」。
+节点在图上那部分（某个阅读位置的状态）仍然从属性记录读；这里只给它配一层
+「这是什么、长什么样」。人物、物品、地点、群体、事件、场景用的是同一套。
 """
 
 from __future__ import annotations
@@ -18,9 +19,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-# 图片的五种用途。名字是给人看的，键是存下来的。
+# 图片的用途。名字是给人看的，键是存下来的；不按节点类型区分——
+# 一把剑要「设定图」，一个人要「三视图」，各挑各的。
 KINDS = {
     "concept": "概念图",
+    "setting": "设定图",
     "turnaround": "三视图",
     "detail": "细节图",
     "expression": "表情图",
@@ -35,15 +38,21 @@ def _now() -> str:
 
 
 def _empty(node_id: str) -> dict:
-    return {"node_id": node_id, "bible": "", "appearances": [], "updated_at": ""}
+    return {
+        "node_id": node_id,
+        "summary": "",
+        "description": "",
+        "forms": [],
+        "updated_at": "",
+    }
 
 
-class WikiStore:
-    """一个工程的 wiki 目录。没有缓存：读一次是一次的真实内容。"""
+class MaterialStore:
+    """一个工程的节点资料目录。没有缓存：读一次是一次的真实内容。"""
 
     def __init__(self, project: Path):
         self.project = Path(project)
-        self.root = self.project.with_name(self.project.stem + "_wiki")
+        self.root = self.project.with_name(self.project.stem + "_material")
 
     # -- 读写 ----------------------------------------------------------
 
@@ -61,9 +70,10 @@ class WikiStore:
         if not isinstance(data, dict):
             return _empty(node_id)
         data.setdefault("node_id", node_id)
-        data.setdefault("bible", "")
-        appearances = data.get("appearances")
-        data["appearances"] = appearances if isinstance(appearances, list) else []
+        data.setdefault("summary", "")
+        data.setdefault("description", "")
+        forms = data.get("forms")
+        data["forms"] = forms if isinstance(forms, list) else []
         return data
 
     def _save(self, node_id: str, data: dict) -> dict:
@@ -84,13 +94,13 @@ class WikiStore:
         folder = self.root / node_id
         if not folder.is_dir():
             return
-        alive = {str(item.get("id") or "") for item in data.get("appearances") or []}
+        alive = {str(item.get("id") or "") for item in data.get("forms") or []}
         keep = {
             str(image.get("file") or "").replace("\\", "/")
-            for item in data.get("appearances") or []
+            for item in data.get("forms") or []
             for image in item.get("images") or []
         }
-        # 文件在形象的目录里，所以要看整棵树，不能只看第一层。
+        # 文件在形态的目录里，所以要看整棵树，不能只看第一层。
         for path in folder.rglob("*"):
             if not path.is_file():
                 continue
@@ -100,7 +110,7 @@ class WikiStore:
                 path.unlink()
             except OSError:
                 pass
-        # 形象已经删掉的空壳目录也不留；非空说明还有删不掉的文件，留着下次再说。
+        # 形态已经删掉的空壳目录也不留；非空说明还有删不掉的文件，留着下次再说。
         for path in sorted(
             (item for item in folder.rglob("*") if item.is_dir()),
             key=lambda item: len(item.parts),
@@ -113,59 +123,58 @@ class WikiStore:
             except OSError:
                 pass
 
-    def nodes_with_wiki(self) -> list[str]:
+    def nodes_with_material(self) -> list[str]:
         if not self.root.is_dir():
             return []
         return sorted(path.stem for path in self.root.glob("*.json"))
 
-    # -- 角色圣经 ------------------------------------------------------
+    # -- 总结与描述 ----------------------------------------------------
 
-    def set_bible(self, node_id: str, text: str) -> dict:
+    def save_text(self, node_id: str, summary: str, description: str) -> dict:
         data = self.load(node_id)
-        data["bible"] = str(text or "")
+        data["summary"] = str(summary or "").strip()
+        data["description"] = str(description or "").strip()
         return self._save(node_id, data)
 
-    # -- 形象 ----------------------------------------------------------
+    # -- 形态 ----------------------------------------------------------
 
-    def _appearance(self, data: dict, appearance_id: str) -> dict:
-        for item in data["appearances"]:
-            if item.get("id") == appearance_id:
+    def _form(self, data: dict, form_id: str) -> dict:
+        for item in data["forms"]:
+            if item.get("id") == form_id:
                 return item
-        raise ValueError(f"形象不存在：{appearance_id}")
+        raise ValueError(f"形态不存在：{form_id}")
 
-    def add_appearance(
-        self, node_id: str, name: str, note: str = "", event_id: str = ""
-    ) -> dict:
+    def add_form(self, node_id: str, name: str, note: str = "", event_id: str = "") -> dict:
         name = (name or "").strip()
         if not name:
-            raise ValueError("形象需要一个名字")
+            raise ValueError("形态需要一个名字")
         data = self.load(node_id)
         item = {
-            "id": f"ap_{uuid4().hex[:8]}",
+            "id": f"fm_{uuid4().hex[:8]}",
             "name": name,
             "note": str(note or ""),
-            # 这个形象从哪个时间点起成立；空 = 不指定。
+            # 这个形态从哪个时间点起成立；空 = 不指定。
             "event_id": str(event_id or ""),
             "images": [],
             "created_at": _now(),
         }
-        data["appearances"].append(item)
+        data["forms"].append(item)
         return self._save(node_id, data)
 
-    def update_appearance(
+    def update_form(
         self,
         node_id: str,
-        appearance_id: str,
+        form_id: str,
         *,
         name: str | None = None,
         note: str | None = None,
         event_id: str | None = None,
     ) -> dict:
         data = self.load(node_id)
-        item = self._appearance(data, appearance_id)
+        item = self._form(data, form_id)
         if name is not None:
             if not name.strip():
-                raise ValueError("形象名不能为空")
+                raise ValueError("形态名不能为空")
             item["name"] = name.strip()
         if note is not None:
             item["note"] = str(note)
@@ -173,26 +182,24 @@ class WikiStore:
             item["event_id"] = str(event_id)
         return self._save(node_id, data)
 
-    def remove_appearance(self, node_id: str, appearance_id: str) -> dict:
+    def remove_form(self, node_id: str, form_id: str) -> dict:
         data = self.load(node_id)
-        item = self._appearance(data, appearance_id)
-        data["appearances"] = [
-            other for other in data["appearances"] if other.get("id") != appearance_id
-        ]
+        item = self._form(data, form_id)
+        data["forms"] = [other for other in data["forms"] if other.get("id") != form_id]
         self._save(node_id, data)
-        # 素材跟着形象一起删：留在磁盘上的孤儿图片没人认领。
-        folder = self.root / node_id / appearance_id
+        # 素材跟着形态一起删：留在磁盘上的孤儿图片没人认领。
+        folder = self.root / node_id / form_id
         if folder.is_dir():
             shutil.rmtree(folder, ignore_errors=True)
         self._sweep(node_id, data)
-        return {"removed": appearance_id, "name": item.get("name")}
+        return {"removed": form_id, "name": item.get("name")}
 
     # -- 图片 ----------------------------------------------------------
 
     def add_image(
         self,
         node_id: str,
-        appearance_id: str,
+        form_id: str,
         kind: str,
         source: Path,
         caption: str = "",
@@ -208,8 +215,8 @@ class WikiStore:
             raise ValueError(f"图片超过 {MAX_IMAGE_BYTES // 1024 // 1024}MB")
 
         data = self.load(node_id)
-        item = self._appearance(data, appearance_id)
-        folder = self.root / node_id / appearance_id
+        item = self._form(data, form_id)
+        folder = self.root / node_id / form_id
         folder.mkdir(parents=True, exist_ok=True)
         image_id = f"img_{uuid4().hex[:8]}"
         target = folder / f"{kind}-{image_id}{source.suffix.lower()}"
@@ -226,9 +233,9 @@ class WikiStore:
         self._save(node_id, data)
         return record | {"path": str(target)}
 
-    def remove_image(self, node_id: str, appearance_id: str, image_id: str) -> dict:
+    def remove_image(self, node_id: str, form_id: str, image_id: str) -> dict:
         data = self.load(node_id)
-        item = self._appearance(data, appearance_id)
+        item = self._form(data, form_id)
         images = item.get("images") or []
         record = next((image for image in images if image.get("id") == image_id), None)
         if record is None:
@@ -250,11 +257,11 @@ class WikiStore:
     # -- 给界面用的一份投影 --------------------------------------------
 
     def view(self, node_id: str) -> dict:
-        """Wiki 内容 + 每种用途的中文名 + 图片的绝对路径。"""
+        """资料内容 + 每种用途的中文名 + 图片的绝对路径。"""
         data = self.load(node_id)
         self._sweep(node_id, data)
-        appearances = []
-        for item in data["appearances"]:
+        forms = []
+        for item in data["forms"]:
             images = []
             for image in item.get("images") or []:
                 relative = str(image.get("file") or "")
@@ -265,11 +272,12 @@ class WikiStore:
                         "kind_label": KINDS.get(image.get("kind"), image.get("kind")),
                     }
                 )
-            appearances.append(item | {"images": images})
+            forms.append(item | {"images": images})
         return {
             "node_id": node_id,
-            "bible": data["bible"],
-            "appearances": appearances,
+            "summary": data["summary"],
+            "description": data["description"],
+            "forms": forms,
             "kinds": [{"key": key, "label": label} for key, label in KINDS.items()],
             "root": str(self.root),
             "updated_at": data.get("updated_at", ""),

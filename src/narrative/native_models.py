@@ -262,31 +262,3 @@ def search_result(view: dict, labels: dict[str, dict], types: list[str]) -> dict
         "pending_excluded": view.get("pending_excluded", True),
         "uncertainties": view.get("uncertainties", []),
     }
-
-
-def wiki_state(rows: list[dict]) -> list[dict]:
-    """一个方面一条当前值，给角色 wiki 的那块「读到这里的他」看。
-
-    属性区一行是「一个方面 × 一个分类」，同一方面分在两个大类下会出现两次；
-    wiki 只要状态，所以每个方面取一次（拿持有当前值的那一片），节点值换成名字。
-    """
-    seen: set[str] = set()
-    state: list[dict] = []
-    for row in rows:
-        if not row.get("is_current"):
-            continue
-        aspect = row.get("aspect") or row.get("property_id") or ""
-        if not aspect or aspect in seen:
-            continue
-        seen.add(aspect)
-        value_node = row.get("value_node") or None
-        state.append({
-            "aspect": aspect,
-            "label": row.get("label") or aspect,
-            "value": value_node["name"] if value_node else row.get("value"),
-            "value_node": value_node,
-            "scope": row.get("scope") or "world",
-            "holder": row.get("holder_name") or "",
-        })
-    return state
-
