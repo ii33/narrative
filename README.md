@@ -131,6 +131,10 @@ Windows 上删不掉页面正开着的图片，所以删除是尽力而为：记
 接受候选、删除记录、改资料卡仍然由人来做。会话按工程保存，切页面不丢；「清空」换一个话题。
 同一套循环也可以从命令行跑（`narrative tool call` 是它的手），区别只在有没有人看着。
 
+模型这一层：dsh 内核钉在 `deepseek-harness-sdk==0.2.1rc2`（`harness.SDK_VERSION` 同时校验 sdk 与
+runtime-bin 两个包）。0.2 起运行时改说 Anthropic Messages（`POST /v1/messages`、`x-api-key`），
+而供应商只认 chat/completions——本地网关两种都收，翻译在 `messages_bridge.py`，请求和流式事件一一对应。
+
 属性分类的完整约定见 [`docs/PROPERTY_CATEGORIES.md`](docs/PROPERTY_CATEGORIES.md)：
 大类只管显示位置，与 `scope`（世界／认知／声称）各管一件事；移动分类不改变取值、
 披露顺序和原文引文。属性名可以改（节点编辑器里每条属性右边有「改名」），改名是读时别名——

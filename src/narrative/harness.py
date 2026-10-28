@@ -17,7 +17,7 @@ from .base_model import Model
 from .model_gateway import COMPACTION_MODEL, ModelGateway
 from .providers import preset
 
-SDK_VERSION = "0.1.5rc1"
+SDK_VERSION = "0.2.1rc2"
 
 
 class HarnessSettings(Model):

@@ -6,6 +6,7 @@ prompts or credentials, or changes the model response. The SDK still owns turns.
 
 import http.client
 import json
+import os
 import re
 import secrets
 import socket
@@ -130,12 +131,19 @@ class ModelGateway:
                     self.connection.settimeout(previous_timeout)
 
             def do_POST(self):
-                if self.path != "/v1/chat/completions":
+                # 0.2.x 的运行时说 Messages；两种都收，翻译在 messages_bridge 里。
+                if self.path not in {"/v1/chat/completions", "/v1/messages"}:
                     self.send_error(404)
                     return
-                if not secrets.compare_digest(
+                messages_mode = self.path == "/v1/messages"
+                debug = os.environ.get("NARRATIVE_GATEWAY_DEBUG")
+                # Messages 用 x-api-key，chat/completions 用 Bearer：两种都认。
+                authorized = secrets.compare_digest(
                     self.headers.get("Authorization", ""), f"Bearer {gateway.token}"
-                ):
+                ) or secrets.compare_digest(
+                    self.headers.get("x-api-key", ""), gateway.token
+                )
+                if not authorized:
                     self._drain_short_unauthorized_body()
                     self.send_error(401)
                     return
@@ -149,6 +157,17 @@ class ModelGateway:
                     payload = json.loads(self.rfile.read(size))
                     if not isinstance(payload, dict):
                         raise ValueError("模型请求须为对象")
+                    if messages_mode:
+                        from .messages_bridge import to_chat_request
+
+                        if debug:
+                            with open(debug, "a", encoding="utf-8") as dump:
+                                dump.write(
+                                    "\n=== messages request ===\n"
+                                    + json.dumps(payload, ensure_ascii=False)[:4000]
+                                    + "\n"
+                                )
+                        payload = to_chat_request(payload)
                     purpose = (
                         "compaction" if payload.get("model") == COMPACTION_MODEL else "generation"
                     )
@@ -230,6 +249,11 @@ class ModelGateway:
                         self.wfile.write(error)
                     else:
                         observer = UsageObserver()
+                        converter = None
+                        if messages_mode:
+                            from .messages_bridge import MessagesStream
+
+                            converter = MessagesStream(model=settings.model)
                         while not gateway._closed.is_set():
                             chunk = response.read1(65536)
                             if not chunk:
@@ -248,7 +272,17 @@ class ModelGateway:
                                 usage_record["complete"] = observer.complete
                                 usage_record["raw"] = "".join(observer.content)
                                 usage_record["finish_reason"] = observer.finish_reason
-                            self.wfile.write(chunk)
+                            if converter is not None:
+                                out = converter.feed(chunk)
+                                if debug:
+                                    with open(debug, "a", encoding="utf-8") as dump:
+                                        dump.write(out.decode("utf-8", "replace"))
+                                self.wfile.write(out)
+                            else:
+                                self.wfile.write(chunk)
+                            self.wfile.flush()
+                        if converter is not None:
+                            self.wfile.write(converter.finish())
                             self.wfile.flush()
                         observer.feed(b"\n\n")
                         with gateway._lock:
