@@ -314,6 +314,19 @@ class HarnessRunner:
             },
         )
 
+    def resume(self, session_id: str) -> bool:
+        """让运行时把这会话的上下文从盘上捡回来。
+
+        不认这个号（比如换了机器、运行时清过）就返回 False，让调用方从空会话开始——
+        我们自己的对话记录还在，人看到的东西不会丢。
+        """
+        try:
+            self._harness.start()
+            self._harness.client.resume_session(session_id)
+            return True
+        except Exception:
+            return False
+
     def close(self, *, force: bool = False):
         with self._close_lock:
             if force or not self._closed:

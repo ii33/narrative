@@ -15,6 +15,10 @@ Rectangle {
 
     // 一条消息：{role: "user"|"assistant", text, steps: [{tool, summary, ok}]}
     property var messages: []
+    // 会话：盘上留着，重开窗口还在；列表按最近说过排序。
+    property var sessions: []
+    property string chatId: ""
+    property string chatTitle: "新会话"
     property bool busy: false
     property string draft: ""
     // 附图：本地路径 + 缩略图地址。发送时一起交给模型。
@@ -35,6 +39,45 @@ Rectangle {
         bridge.assistantTurn(text, image)
     }
 
+    function urlOf(path) {
+        return path ? "file:///" + String(path).replace(/\\/g, "/") : ""
+    }
+
+    function load() {
+        if (app.mode === "workspace") bridge.loadChats()
+    }
+
+    function applyIndex(items, current) {
+        panel.sessions = items || []
+        sessionBox.currentIndex = -1
+        for (var i = 0; i < panel.sessions.length; ++i) {
+            if (panel.sessions[i].id === current) { sessionBox.currentIndex = i; break }
+        }
+    }
+
+    function applyChat(chat) {
+        panel.chatId = chat.id || ""
+        panel.chatTitle = chat.title || "新会话"
+        var rows = []
+        var messages = chat.messages || []
+        for (var i = 0; i < messages.length; ++i) {
+            var row = messages[i]
+            rows.push({
+                role: row.role,
+                text: row.text || "",
+                steps: row.steps || [],
+                image: panel.urlOf(row.image || "")
+            })
+        }
+        panel.messages = rows
+        panel.busy = false
+    }
+
+    function open(id) {
+        if (id.length === 0 || id === panel.chatId) return
+        bridge.openChat(id)
+    }
+
     function attach(path) {
         panel.attached = path
         panel.attachedUrl = path ? "file:///" + String(path).replace(/\\/g, "/") : ""
@@ -49,6 +92,9 @@ Rectangle {
             steps: payload.steps || []
         })
         panel.messages = next
+        if (payload.chat_id) panel.chatId = payload.chat_id
+        if (payload.title) panel.chatTitle = payload.title
+        if (payload.items) panel.applyIndex(payload.items, panel.chatId)
     }
 
     function fail(message) {
@@ -67,8 +113,8 @@ Rectangle {
     }
 
     function reset() {
+        if (panel.busy) return
         panel.messages = []
-        panel.busy = false
         bridge.assistantReset()
     }
 
@@ -97,18 +143,6 @@ Rectangle {
             }
             Item { Layout.fillWidth: true }
             Label {
-                objectName: "assistantReset"
-                text: "清空"
-                color: t.muted
-                font.pixelSize: 10
-                font.underline: true
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: panel.reset()
-                }
-            }
-            Label {
                 objectName: "assistantClose"
                 text: "收起"
                 color: t.muted
@@ -118,6 +152,66 @@ Rectangle {
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
                     onClicked: panel.closeRequested()
+                }
+            }
+        }
+
+        // 会话：下拉选旧的，右边新开 / 改名 / 删除。记录在盘上，重开窗口还在。
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 6
+
+            ComboBox {
+                id: sessionBox
+                objectName: "assistantSessions"
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                font.pixelSize: 11
+                model: panel.sessions.map(function (row) { return row.title })
+                displayText: panel.sessions.length === 0 ? "还没有会话"
+                    : (currentIndex >= 0 && currentIndex < panel.sessions.length
+                        ? panel.sessions[currentIndex].title : panel.chatTitle)
+                onActivated: function (index) {
+                    if (index >= 0 && index < panel.sessions.length)
+                        panel.open(panel.sessions[index].id)
+                }
+            }
+            Label {
+                objectName: "assistantNew"
+                text: "新会话"
+                color: t.accent
+                font.pixelSize: 10
+                font.underline: true
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: panel.reset()
+                }
+            }
+            Label {
+                objectName: "assistantRename"
+                text: "改名"
+                color: t.muted
+                font.pixelSize: 10
+                font.underline: true
+                visible: panel.chatId.length > 0
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: { renameField.text = panel.chatTitle; renameDialog.open() }
+                }
+            }
+            Label {
+                objectName: "assistantDelete"
+                text: "删除"
+                color: t.bad
+                font.pixelSize: 10
+                font.underline: true
+                visible: panel.chatId.length > 0
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: if (panel.chatId.length > 0) bridge.deleteChat(panel.chatId)
                 }
             }
         }
@@ -252,6 +346,38 @@ Rectangle {
         }
     }
 
+    Dialog {
+        id: renameDialog
+        objectName: "assistantRenameDialog"
+        title: "会话改名"
+        modal: true
+        anchors.centerIn: parent
+        width: 320
+
+        contentItem: ColumnLayout {
+            spacing: 6
+            TextField {
+                id: renameField
+                objectName: "assistantRenameField"
+                Layout.fillWidth: true
+                placeholderText: "会话名"
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                Button { text: "取消"; flat: true; onClicked: renameDialog.close() }
+                Button {
+                    text: "保存"
+                    highlighted: true
+                    onClicked: {
+                        if (panel.chatId.length > 0) bridge.renameChat(panel.chatId, renameField.text)
+                        renameDialog.close()
+                    }
+                }
+            }
+        }
+    }
+
     FileDialog {
         id: imagePicker
         objectName: "assistantImagePicker"
@@ -260,10 +386,22 @@ Rectangle {
         onAccepted: panel.attach(imagePicker.selectedFile.toString())
     }
 
+    Component.onCompleted: panel.load()
+
+    Connections {
+        target: app
+        function onModeChanged() { panel.load() }
+    }
+
     Connections {
         target: bridge
         function onResultReady(kind, payload) {
             if (kind === "assistant") panel.apply(payload)
+            else if (kind === "chats") panel.applyIndex(payload.items, payload.current)
+            else if (kind === "chat") {
+                panel.applyChat(payload.chat)
+                panel.applyIndex(payload.items, payload.chat ? payload.chat.id : "")
+            }
         }
         function onErrorOccurred(kind, message) {
             if (kind === "assistant") panel.fail(message)

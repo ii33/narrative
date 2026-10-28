@@ -41,6 +41,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.qa_exit_after_seconds is not None and args.qa_exit_after_seconds <= 0:
         raise ValueError("QA 窗口时长须为正数")
 
+    # 聊天要拉起 dsh 运行时（控制台程序）：不关掉控制台，每问一句就闪一个终端。
+    from .quiet_children import hide_consoles
+
+    hide_consoles()
+
+    # 聊天要拉起 dsh 运行时（控制台程序）：不关掉控制台，每问一句就闪一个终端。
+    from .quiet_children import hide_consoles
+
+    hide_consoles()
+
     # 单线程渲染循环：多线程（threaded）在这台机器上出现过「界面冻在启动那一帧、
     # 主线程和 worker 都空闲、CPU 0%」的情况——事件循环还活着，画面不再更新。
     # 代价是渲染性能略低，换来的是画面一定会跟着状态走。

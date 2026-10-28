@@ -142,5 +142,7 @@ def test_clearing_starts_a_new_conversation(workspace) -> None:
     panel.reset()
     app.processEvents()
     assert _value(panel.property("messages")) == []
-    # 清空会顺手把会话关掉：下一轮不带着旧话题。
-    assert any(kind == "assistant_reset" for kind, _payload in results)
+    # 清空 = 开一个新会话（写盘是异步的）：旧的那个还留在清单里，不是删掉。
+    created = _pump(app, results, "chat")
+    assert created["chat"]["title"] == "新会话"
+    assert [row["id"] for row in created["items"]] == [created["chat"]["id"]]

@@ -70,7 +70,8 @@ class NativeBridge(QObject):
         self._closed = False
         # 常驻协作者：一个工程一条会话，模型看得见自己前面的工具调用。
         self._assistant_runner = None
-        self._assistant_session = ""
+        self._assistant_chat = ""
+        self._assistant_resumed: set[str] = set()
         self._assistant_lock = threading.Lock()
         self._workerDone.connect(self._on_worker_done)
 
@@ -1116,7 +1117,7 @@ class NativeBridge(QObject):
         with self._assistant_lock:
             runner = self._assistant_runner
             self._assistant_runner = None
-            self._assistant_session = ""
+            self._assistant_resumed = set()
         if runner is not None:
             try:
                 # 关窗口时可能正好有一轮在跑：强制关掉，别让进程挂着。
@@ -1124,15 +1125,76 @@ class NativeBridge(QObject):
             except Exception:
                 pass
 
+    def _chats(self, ops):
+        from .chat_store import ChatStore
+
+        return ChatStore(Path(ops.project_info().path))
+
+    @Slot()
+    def loadChats(self) -> None:
+        """会话清单：最近说过的排在前面，外加「现在是哪一个」。"""
+
+        def work(ops) -> dict:
+            store = self._chats(ops)
+            items = store.list()
+            if not self._assistant_chat and items:
+                self._assistant_chat = items[0]["id"]
+            return {"items": items, "current": self._assistant_chat}
+
+        self._project_task("chats", work)
+
+    @Slot(str)
+    def openChat(self, chat_id: str) -> None:
+        def work(ops) -> dict:
+            chat = self._chats(ops).load(chat_id)
+            self._assistant_chat = chat["id"]
+            return {"chat": chat, "items": self._chats(ops).list()}
+
+        self._project_task("chat", work)
+
+    @Slot()
+    def newChat(self) -> None:
+        def work(ops) -> dict:
+            store = self._chats(ops)
+            chat = store.create()
+            self._assistant_chat = chat["id"]
+            return {"chat": chat, "items": store.list()}
+
+        self._project_task("chat", work)
+
+    @Slot(str, str)
+    def renameChat(self, chat_id: str, title: str) -> None:
+        def work(ops) -> dict:
+            store = self._chats(ops)
+            chat = store.rename(chat_id, title)
+            return {"chat": chat, "items": store.list()}
+
+        self._project_task("chat", work)
+
+    @Slot(str)
+    def deleteChat(self, chat_id: str) -> None:
+        def work(ops) -> dict:
+            store = self._chats(ops)
+            store.delete(chat_id)
+            if self._assistant_chat == chat_id:
+                self._assistant_chat = ""
+            items = store.list()
+            if not self._assistant_chat and items:
+                self._assistant_chat = items[0]["id"]
+            chat = store.load(self._assistant_chat) if self._assistant_chat else {
+                "id": "", "session": "", "title": "新会话", "messages": []
+            }
+            return {"chat": chat, "items": items, "removed": chat_id}
+
+        self._project_task("chat", work)
+
     @Slot(str, str)
     def assistantTurn(self, text: str, image_path: str = "") -> None:
         """协作者的一轮：模型可以连着调几次读工具，最后给答案。
 
         它只能读——工具白名单在 `assistant.READ_TOOLS`，写操作调不到。改图仍然是
-        人的动作。
+        人的动作。对话记在当前会话里：重开窗口还在。
         """
-        from uuid import uuid4
-
         from .assistant import run_turn
 
         message = (text or "").strip()
@@ -1144,32 +1206,50 @@ class NativeBridge(QObject):
         except ValueError as exc:
             self.errorOccurred.emit("assistant", str(exc))
             return
+        image = str(image_path or "").strip()
 
         def work(ops) -> dict:
+            store = self._chats(ops)
+            chat_id = self._assistant_chat
+            if not chat_id or not store.path_for(chat_id).is_file():
+                chat_id = store.create()["id"]
+                self._assistant_chat = chat_id
+            chat = store.append(chat_id, "user", message, image=image)
+
             settings, api_key, workdir = harness_env(ops)
             with self._assistant_lock:
                 if self._assistant_runner is None:
                     self._assistant_runner = HarnessRunner(
                         settings, api_key, workdir / "assistant"
                     )
-                    self._assistant_session = f"chat-{uuid4().hex}"
+                    self._assistant_resumed = set()
                 runner = self._assistant_runner
-                session = self._assistant_session
+                session = chat["session"]
+                if session not in self._assistant_resumed:
+                    # 老会话：让运行时把上下文捡回来；不认就从空的开始，记录还在。
+                    runner.resume(session)
+                    self._assistant_resumed.add(session)
+
             def ask(instruction) -> str:
                 return runner.agent_turn(instruction, session).raw
 
-            result = run_turn(
-                ask, message, project=path, image=str(image_path or "").strip()
+            result = run_turn(ask, message, project=path, image=image)
+            saved = store.append(
+                chat_id, "assistant", result.get("answer") or "",
+                steps=result.get("steps") or [],
             )
-            return result | {"session": session}
+            return result | {
+                "chat_id": chat_id,
+                "title": saved["title"],
+                "items": store.list(),
+            }
 
         self._project_task("assistant", work)
 
     @Slot()
     def assistantReset(self) -> None:
-        """换个话题：关掉会话，下一轮重新开始。"""
-        self._close_assistant()
-        self.resultReady.emit("assistant_reset", {})
+        """换个话题：开一个新会话，旧的那个还在清单里。"""
+        self.newChat()
 
     @Slot(str, "QVariantMap")
     def reviseNode(self, node_id: str, changes: dict) -> None:
