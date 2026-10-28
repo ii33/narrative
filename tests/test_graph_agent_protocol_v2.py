@@ -307,11 +307,13 @@ def test_incremental_prompt_contract_keeps_identity_and_review_gate():
     from narrative.agent_runtime import Budget
 
     prompt = graph_agent._prompt([], 0, Budget())
-    assert graph_agent.PROMPT_VERSION == "graph-agent/11"
-    for required in ("graph_event_index", "parent_edge_id", "supersedes_id", "source_order", "disclosure_cut", "既有事件保持原ID", "canon语境与story时间线由系统预建", "graph_precheck", "graph_propose", "property_precheck", "property_propose", "不能自行接受", "PENDING_GRAPH_REVIEW", "两阶段"):
+    assert graph_agent.PROMPT_VERSION == "graph-agent/12"
+    for required in ("graph_event_index", "parent_edge_id", "supersedes_id", "source_order", "disclosure_cut", "既有事件保持原ID", "canon语境与story时间线由系统预建", "graph_precheck", "graph_propose", "property_precheck", "property_propose", "不能自行接受", "PENDING_GRAPH_REVIEW", "两阶段", "extract_propose", "extract_commit"):
         assert required in prompt
     assert "graph_event_index" in graph_agent.TOOL_CATALOG
     assert "property_propose" in graph_agent.TOOL_CATALOG
+    assert {"extract_propose", "extract_review", "extract_build", "extract_commit"} <= set(graph_agent.TOOL_CATALOG)
+    assert {"extract_propose", "extract_review", "extract_build", "extract_commit"} <= set(graph_agent.TOOL_CATALOG)
 
 
 def test_actual_budget_is_visible_on_every_request_without_bypassing_review(tmp_path, monkeypatch):

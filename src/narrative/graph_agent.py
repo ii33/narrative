@@ -30,7 +30,7 @@ from .graph_models import parse_objects
 from .harness import HarnessRunner, HarnessSettings, effective_runtime_config, resolve_key
 from .leases import ProjectLease, is_capacity_finish
 
-PROMPT_VERSION = "graph-agent/11"
+PROMPT_VERSION = "graph-agent/12"
 MAX_SOURCE_EXCERPT = 8000
 TOOL_CATALOG = {
     "graph_schema": ("图对象字段", "读取 Node、Assertion、Evidence 和时间字段合同"),
@@ -48,6 +48,10 @@ TOOL_CATALOG = {
     "graph_propose": ("提出待审候选", "仅在最新整批预检无错误时一次提交为待人工审核候选"),
     "property_precheck": ("属性预检", "只读预检 property_* 追加记录并返回诊断"),
     "property_propose": ("提出属性待审候选", "提交 property_* 记录为待人工审核候选；模型不得接受"),
+    "extract_propose": ("提取第一轮", "整章读一遍，只认原文；结果落在盘上，后面几步读它"),
+    "extract_review": ("提取对照", "拿库里已有的值对照，只丢确定的重复"),
+    "extract_build": ("提取预演", "把提取结果算成图对象与属性记录，只算不写，返回诊断"),
+    "extract_commit": ("提取出候选", "把提取结果提成待人工审核候选；模型不得接受"),
 }
 
 
@@ -56,7 +60,7 @@ def capabilities() -> dict:
         "mode": "SDK Session + GraphOperations JSON工具桥接",
         "native_tools": False,
         "tools": [
-            {"name": name, "label": label, "purpose": purpose, "access": "write_pending" if name in {"graph_propose", "property_propose"} else "read_only"}
+            {"name": name, "label": label, "purpose": purpose, "access": "write_pending" if name in {"graph_propose", "property_propose", "extract_commit"} else "read_only"}
             for name, (label, purpose) in TOOL_CATALOG.items()
         ],
         "private_actions": ["stage（私有草稿）", "remove_stage_ids（撤回私有草稿）"],
@@ -147,6 +151,9 @@ def _prompt(sources: list[dict], revision: int, budget: Budget, context_policy: 
         "属性记录须两阶段：先对图工作集 graph_precheck/graph_propose，并由人工接受图候选，之后属性分析才能对已接受图 precheck/propose；"
         "属性记录不得引用本轮私有图草稿ID（node_id、event_id、事件边界时间引用或节点值状态/效果）；"
         "若引用这些草稿ID，property_precheck/property_propose 返回 PENDING_GRAPH_REVIEW 且不创建属性候选，不要把它当普通引用错误或重复尝试。"
+        "要「提取某一章」时用提取链：extract_propose 让提取链整章读一遍（引文逐字校验），"
+        "extract_review 对照库里旧值、extract_build 只算不写地看诊断；只有诊断无错误且结构成立时才 extract_commit 出候选，"
+        "接受仍由人做。四步只接受 source_id，且只能用于本轮任务内的来源；不要用 stage 手工复刻提取链已经做好的编号、锚点和取代。"
         "属性 evidence 恰为 {\"source_id\":\"已接受来源ID\",\"quote\":\"在来源原文中恰好出现一次的精确子串\"}；不得引用图证据对象ID或私有证据句柄。"
         "时序仍用 temporal 断言，阅读组织仍用 containment 断言；二者继续支持。"
         "参与者、先后和父子组织按 v5 合同表达，不输出独立 participation 或 temporal_constraint。"
@@ -432,9 +439,26 @@ def _pending_graph_review(name: str, staged: dict[str, list[str]], revision: int
     }
 
 
+# 提取四步：实现就在工具表里，agent 只是多开一扇门，不另写一套。
+EXTRACT_STEPS = ("extract_propose", "extract_review", "extract_build", "extract_commit")
+
+
 def _tool(operations, source_ids: list[str], name: str, args: dict, state: dict):
     if name not in TOOL_CATALOG or not isinstance(args, dict):
         raise ValueError("未知工具或参数格式无效")
+    if name in EXTRACT_STEPS:
+        # 提取链只作用在本轮任务给的来源上，不让人从会话里凭空点到别的章节。
+        if set(args) - {"source_id"}:
+            raise ValueError(f"{name} 只接受 source_id")
+        source_id = args.get("source_id")
+        if not isinstance(source_id, str) or not source_id:
+            raise ValueError(f"{name} 须提供 source_id")
+        if source_id not in source_ids:
+            raise ValueError("这个来源不在本轮任务里")
+        from . import tool_api
+
+        # 工具表里那一个：界面、CLI、MCP 调的也是它。
+        return _compact(tool_api.TOOLS[name].handler(operations, {"source_id": source_id}))
     if name == "graph_schema":
         if args:
             raise ValueError("graph_schema 不接受参数")
