@@ -21,6 +21,8 @@
 |---|---|---|
 | `list_projects` | 列出某个目录下的工程（只读，不打开） | 读 |
 | `project_info` | 工程标题、修订号、节点数、原文数、待审候选数 | 读 |
+| `pack_project` | 把工程收成一个包（`<名字>.nproj/`：库 + 资料 + 提取缓存 + 会话） | 写 |
+| `pack_project` | 把工程收成一个包（`<名字>.nproj/`：库 + 资料 + 提取缓存 + 会话） | 写 |
 | `list_nodes` | 按阅读位置列出节点；可按类型、关键字筛选，返回分类计数 | 读 |
 | `list_moments` | 阅读位置的层级：场景 → 事件，一列一层；`cut` 只能用这里的编号 | 读 |
 | `node_material` | 一个节点的资料卡：标题、详情、带说明的图片，各自的有效区间 | 读 |
@@ -108,6 +110,8 @@ narrative material 7 --project P --cut E5
 narrative delete-material 7 <资料编号> --project P
 narrative import-source 第一章 --file ch1.txt --project P   # 长文本走文件
 narrative categories --project P
+narrative pack --project P                    # 收成一个 .nproj 包（默认搬家）
+narrative pack --project P                    # 收成一个 .nproj 包（默认搬家）
 # 提取分四步：每一步都能单独跑，产物落在 <工程>_extraction/<原文编号>.json
 narrative extract-propose <source_id> --project P   # 模型读整章
 narrative extract-review  <source_id> --project P   # 对照库里的值

@@ -158,6 +158,9 @@ ALIASES: dict[str, tuple[str, list[tuple[str, str, type | str, str]]]] = {
         ("--file", "text", "file", "从文件读正文；长文本用这个"),
     ]),
     "categories": ("property_categories", []),
+    "pack": ("pack_project", [
+        ("--dest", "dest", str, "包放在哪；默认与工程同级"),
+    ]),
     "extract-propose": ("extract_propose", [
         ("source_id", "source_id", str, "原文编号"),
     ]),

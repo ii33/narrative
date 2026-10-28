@@ -231,6 +231,12 @@ class NativeBridge(QObject):
         if not name_or_path.strip():
             raise ValueError("请选择项目")
         path = supplied if supplied.is_absolute() else self._directory / supplied
+        # 工程包是一个目录：直接用它，不再补 .sqlite3。
+        if path.suffix.lower() == ".nproj":
+            resolved = path.resolve()
+            if resolved.parent != self._directory or not resolved.is_dir():
+                raise ValueError("工程包须位于所选图项目目录")
+            return resolved
         if path.suffix == "":
             path = path.with_suffix(".sqlite3")
         path = path.resolve()
@@ -1032,8 +1038,9 @@ class NativeBridge(QObject):
         self._project_task("detail", work)
 
     def _extraction_dir(self) -> Path:
-        project = self._project()
-        return project.with_name(project.stem + "_extraction")
+        from .project_package import layout
+
+        return layout(self._project()).extraction
 
     @Slot(str)
     def loadExtraction(self, source_id: str) -> None:

@@ -215,6 +215,14 @@ def _state_of(ops, ids: list[str], cut: str, limit: int = 20) -> list[dict]:
     return out
 
 
+def _pack_project(ops, params: dict) -> dict:
+    """把裸工程收成一个包：库、资料、提取缓存、会话进同一个目录。"""
+    from .project_package import pack
+
+    dest = params.get("dest") or None
+    return pack(ops.path, dest=dest, move=bool(params.get("move", True)))
+
+
 def _list_moments(ops, _params: dict) -> dict:
     """阅读位置的层级：一列一层（场景 → 事件），给 cut 挑合法值。"""
     from .browse_view import moment_tree
@@ -584,8 +592,10 @@ def _reject(ops, params: dict) -> dict:
 
 
 def _extraction_path(ops, source_id: str) -> Path:
-    """提取的中间产物：工程旁边，按原文分文件。界面和工具用同一个位置。"""
-    return ops.path.with_name(ops.path.stem + "_extraction") / f"{source_id}.json"
+    """提取的中间产物：工程旁边（或包里），按原文分文件。界面和工具用同一个位置。"""
+    from .project_package import layout
+
+    return layout(ops.path).extraction / f"{source_id}.json"
 
 
 def _harness(ops) -> tuple[Any, str, Path]:
@@ -814,6 +824,16 @@ _register(Tool(
         "cut": {"type": "string", "description": "阅读位置（事件编号）；省略为最新"},
     },
     _material_view,
+))
+_register(Tool(
+    "pack_project",
+    "把工程收成一个包（<名字>.nproj/：库 + 资料 + 提取缓存 + 会话），默认搬家",
+    {
+        "dest": {"type": "string", "description": "包放在哪；默认与工程同级"},
+        "move": {"type": "boolean", "description": "默认 true；false 表示复制一份"},
+    },
+    _pack_project,
+    writes=True,
 ))
 _register(Tool(
     "statistics",
@@ -1111,8 +1131,9 @@ def call(name: str, params: dict | None = None, *, project: str | Path | None = 
     if project in (None, ""):
         raise ToolError("请提供 --project（工程 .sqlite3 文件）")
     path = Path(project)
-    if not path.is_file():
-        raise ToolError(f"工程文件不存在：{path}")
+    if not path.exists():
+        raise ToolError(f"工程不存在：{path}")
+    # 裸库和工程包目录都收；`open_graph_project` 会把包目录归到包里的库。
     ops = open_graph_project(path)
     try:
         return tool.handler(ops, args)

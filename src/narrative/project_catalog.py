@@ -15,41 +15,59 @@ from .graph_operations import GraphOperations
 from .graph_store import GRAPH_SCHEMA_VERSION
 
 
+def _describe(db: Path, *, name: str, path: Path, package: bool) -> dict:
+    """读一个工程的元信息：只读，不迁移、不写。"""
+    try:
+        # closing() is required: a bare `with connect(...)` only commits, it
+        # leaves the handle open and Windows then blocks rename/delete.
+        with contextlib.closing(
+            sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True, timeout=1)
+        ) as handle:
+            version = int(handle.execute("PRAGMA user_version").fetchone()[0])
+            title_row = handle.execute("SELECT value FROM meta WHERE key='title'").fetchone()
+            revision_row = handle.execute("SELECT value FROM meta WHERE key='revision'").fetchone()
+        title = title_row[0] if title_row else name
+        revision = int(revision_row[0]) if revision_row else None
+        # Only the current schema is openable; older files are listed so the
+        # user can see and clear them, never silently migrated.
+        status = "ready" if version == GRAPH_SCHEMA_VERSION else "incompatible"
+    except (sqlite3.Error, ValueError, OSError):
+        version, title, revision, status = None, name, None, "unreadable"
+    return {
+        "name": name,
+        "path": str(path),
+        "db": str(db),
+        "package": package,
+        "title": title,
+        "version": version,
+        "revision": revision,
+        "status": status,
+        "last_opened": None,
+        "modified_at": db.stat().st_mtime if db.is_file() else 0.0,
+    }
+
+
 def list_projects(directory: str | Path) -> list[dict]:
-    """List project files read-only; never opens/migrates or writes them."""
+    """List projects read-only; never opens/migrates or writes them.
+
+    裸库（`<名字>.sqlite3`）和工程包（`<名字>.nproj/`）都列，包里读的是
+    `graph.sqlite3` 的元信息。
+    """
+    from .project_package import DB_NAME, PACKAGE_SUFFIX
+
     root = Path(directory).resolve()
     if not root.is_dir():
         return []
-    projects = []
+    projects: list[dict] = []
     for path in root.glob("*.sqlite3"):
-        if not path.is_file():
-            continue
-        try:
-            # closing() is required: a bare `with connect(...)` only commits, it
-            # leaves the handle open and Windows then blocks rename/delete.
-            with contextlib.closing(
-                sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1)
-            ) as db:
-                version = int(db.execute("PRAGMA user_version").fetchone()[0])
-                title_row = db.execute("SELECT value FROM meta WHERE key='title'").fetchone()
-                revision_row = db.execute("SELECT value FROM meta WHERE key='revision'").fetchone()
-            title = title_row[0] if title_row else path.stem
-            revision = int(revision_row[0]) if revision_row else None
-            # Only the current schema is openable; older files are listed so the
-            # user can see and clear them, never silently migrated.
-            status = "ready" if version == GRAPH_SCHEMA_VERSION else "incompatible"
-        except (sqlite3.Error, ValueError, OSError):
-            version, title, revision, status = None, path.stem, None, "unreadable"
-        projects.append({
-            "name": path.stem,
-            "path": str(path),
-            "title": title,
-            "version": version,
-            "revision": revision,
-            "status": status,
-            "last_opened": None,
-            "modified_at": path.stat().st_mtime,
-        })
+        if path.is_file():
+            projects.append(_describe(path, name=path.stem, path=path, package=False))
+    for package in root.glob(f"*{PACKAGE_SUFFIX}"):
+        db = package / DB_NAME
+        if package.is_dir() and db.is_file():
+            projects.append(
+                _describe(db, name=package.stem, path=package, package=True)
+            )
     return sorted(projects, key=lambda item: item["modified_at"], reverse=True)
 
 
@@ -92,9 +110,16 @@ def clear_incompatible(directory: str | Path) -> dict:
     return {"removed": removed, "moved": moved, "kept": kept}
 
 
+def _database(path: str | Path) -> Path:
+    """工程可能是裸库、包目录，也可能是包里的 graph.sqlite3：都归到库文件。"""
+    from .project_package import layout
+
+    return layout(path).db
+
+
 def create_graph_project(path: str | Path) -> GraphOperations:
-    return GraphOperations(path, create=True)
+    return GraphOperations(_database(path), create=True)
 
 
 def open_graph_project(path: str | Path) -> GraphOperations:
-    return GraphOperations(path)
+    return GraphOperations(_database(path))

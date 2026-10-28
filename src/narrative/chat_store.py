@@ -39,8 +39,11 @@ class ChatStore:
     """一个工程的会话目录。没有缓存：读一次是一次的真实内容。"""
 
     def __init__(self, project: Path):
+        from .project_package import layout
+
         self.project = Path(project)
-        self.root = self.project.with_name(self.project.stem + "_chats")
+        # 包和裸工程问同一处：包里的会话在 <包>/chats。
+        self.root = layout(self.project).chats
 
     # -- 读写 ----------------------------------------------------------
 

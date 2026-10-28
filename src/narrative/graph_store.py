@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -81,7 +82,11 @@ class GraphStore:
         elif not self.path.is_file():
             raise ValueError("图项目不存在；请先创建新项目")
         # Probe with a read-only URI before any project connection can write.
-        with sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True) as db:
+        # closing() is required: `with connect(...)` only commits, it leaves the
+        # handle open and Windows then blocks rename/delete (and packing).
+        with contextlib.closing(
+            sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True)
+        ) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version != GRAPH_SCHEMA_VERSION:
                 # v4 and older files are read-only historical projects. Nothing is

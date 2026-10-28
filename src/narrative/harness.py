@@ -259,7 +259,9 @@ def harness_env(ops) -> tuple[HarnessSettings, str, Path]:
     api_key = os.environ.get(settings.key_env) or os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
         raise ValueError(f"缺少 {settings.key_env} 或 DEEPSEEK_API_KEY，无法调用模型")
-    return settings, api_key, ops.path.with_name(ops.path.stem + "_extraction")
+    from .project_package import layout
+
+    return settings, api_key, layout(ops.path).extraction
 
 
 class HarnessRunner:

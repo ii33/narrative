@@ -84,8 +84,11 @@ class MaterialStore:
     """一个工程的节点资料目录。没有缓存：读一次是一次的真实内容。"""
 
     def __init__(self, project: Path):
+        from .project_package import layout
+
         self.project = Path(project)
-        self.root = self.project.with_name(self.project.stem + "_material")
+        # 包和裸工程都问同一处：资料在包里就是 <包>/material。
+        self.root = layout(self.project).material
 
     # -- 读写 ----------------------------------------------------------
 
