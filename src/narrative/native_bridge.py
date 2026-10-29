@@ -243,7 +243,7 @@ class NativeBridge(QObject):
                 raise ValueError("找不到这个工程包")
             return resolved.resolve()
         if resolved.name == project_package.DB_NAME and (
-            resolved.parent / project_package.MANIFEST_NAME
+            resolved.parent / project_package.PROJECT_FILE
         ).is_file():
             return resolved.parent.resolve()
         raise ValueError("工程是一个 .nproj 目录，请选择它")

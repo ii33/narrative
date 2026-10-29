@@ -108,22 +108,27 @@ def clear_incompatible(directory: str | Path) -> dict:
 
 
 def _database(path: str | Path) -> Path:
-    """工程可能是裸库、包目录，也可能是包里的 graph.sqlite3：都归到库文件。"""
-    from .project_package import layout
+    """工程可能是包目录，也可能是包里的 graph.sqlite3：都归到库文件。
 
-    return layout(path).db
+    顺手把旧包的 `manifest.json` 补成 `project.json`——只做一次，之后就只剩一个描述文件。
+    """
+    from .project_package import layout, migrate
+
+    found = layout(path)
+    migrate(found.root)
+    return found.db
 
 
 def create_graph_project(path: str | Path) -> GraphOperations:
-    """建一个工程包：目录、库、manifest 一次到位。"""
+    """建一个工程包：目录、库、描述文件一次到位。"""
     from .project_package import layout as _layout
-    from .project_package import write_manifest
+    from .project_package import write_project
 
     target = _layout(path)
     target.db.parent.mkdir(parents=True, exist_ok=True)
     ops = GraphOperations(target.db, create=True)
     info = ops.graph_project_info()
-    write_manifest(target.root, title=info["title"], project_id=info["project_id"])
+    write_project(target.root, title=info["title"], project_id=info["project_id"])
     return ops
 
 

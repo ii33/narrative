@@ -100,9 +100,9 @@ def test_a_new_project_goes_where_it_is_told(bridge, app, tmp_path: Path) -> Non
     package = tmp_path / "新工程.nproj"
     assert package.is_dir()
     assert (package / "graph.sqlite3").is_file()
-    manifest = json.loads((package / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["format"] == "narrative-project"
-    assert manifest["title"]
+    description = json.loads((package / "project.json").read_text(encoding="utf-8"))
+    assert description["format"] == "narrative-project"
+    assert description["project"]["title"]
 
 
 def test_a_new_project_needs_a_real_folder(bridge, app, tmp_path: Path) -> None:

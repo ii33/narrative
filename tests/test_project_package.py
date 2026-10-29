@@ -1,7 +1,7 @@
-"""工程就是一个 .nproj 目录：库和资料在里面，缓存和会话在旁边。
+"""工程就是一个 .nproj 目录：一份 project.json 描述它，库和资料在它旁边。
 
-旧版那种「一个 .sqlite3 + 三个同级目录」已经不支持了——它正是拷一个文件就丢资料、
-丢会话的形态。这组用例钉住新契约：只认包，包内只有库和资料。
+私有格式是那一个文件（`project.json`）：格式名与版本、这份作品是谁、数据放在哪。
+图片是二进制，只能当文件；缓存和会话不属于这份作品，放在包旁边。
 """
 
 from __future__ import annotations
@@ -16,10 +16,12 @@ from narrative.node_material import MaterialStore
 from narrative.project_catalog import create_graph_project, list_projects, open_graph_project
 from narrative.project_package import (
     DB_NAME,
-    MANIFEST_NAME,
+    LEGACY_MANIFEST,
     PACKAGE_SUFFIX,
+    PROJECT_FILE,
     layout,
-    manifest,
+    migrate,
+    project,
 )
 
 PNG = bytes.fromhex(
@@ -41,17 +43,26 @@ def _package(tmp_path: Path) -> Path:
     return package
 
 
-def test_a_new_project_is_a_package_with_a_manifest(tmp_path: Path) -> None:
+def test_a_new_project_is_a_directory_described_by_one_file(tmp_path: Path) -> None:
     package = _package(tmp_path)
 
     assert package.is_dir()
     assert (package / DB_NAME).is_file()
-    assert (package / MANIFEST_NAME).is_file()
+    # 格式就是这一个文件：没有第二份描述。
+    assert (package / PROJECT_FILE).is_file()
+    assert not (package / LEGACY_MANIFEST).exists()
 
-    payload = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))
+    payload = json.loads((package / PROJECT_FILE).read_text(encoding="utf-8"))
     assert payload["format"] == "narrative-project"
-    assert payload["title"] == open_graph_project(package).graph_project_info()["title"]
-    assert payload["parts"] == {"material": False}
+    assert payload["version"] == 2
+    assert payload["layout"] == {"database": DB_NAME, "material": "material"}
+    assert payload["project"]["title"] == open_graph_project(
+        package
+    ).graph_project_info()["title"]
+    assert payload["project"]["id"]
+    assert isinstance(payload["project"]["schema_version"], int)
+    # 哪几部分存在是文件系统的事实，不写进格式描述（写了会过期）。
+    assert "parts" not in payload
 
 
 def test_the_layout_puts_the_work_inside_and_the_rest_beside(tmp_path: Path) -> None:
@@ -98,11 +109,66 @@ def test_a_directory_that_is_not_a_package_is_refused(tmp_path: Path) -> None:
         layout(folder)
 
 
-def test_the_manifest_reader_returns_what_was_written(tmp_path: Path) -> None:
+def test_an_older_description_is_rewritten_in_the_current_shape(tmp_path: Path) -> None:
+    """已经是 project.json、但版本落后（比如还带着 parts）：按当前格式重写一次。"""
     package = _package(tmp_path)
-    payload = manifest(layout(package))
+    description = json.loads((package / PROJECT_FILE).read_text(encoding="utf-8"))
+    stale = {
+        "format": "narrative-project",
+        "version": 1,
+        "title": description["project"]["title"],
+        "project_id": description["project"]["id"],
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "parts": {"material": True},
+    }
+    (package / PROJECT_FILE).write_text(json.dumps(stale, ensure_ascii=False), encoding="utf-8")
+
+    assert migrate(package) is True
+    payload = json.loads((package / PROJECT_FILE).read_text(encoding="utf-8"))
+    assert payload["version"] == 2
+    assert "parts" not in payload
+    assert payload["project"]["created_at"] == "2026-01-01T00:00:00+00:00"
+    assert payload["project"]["id"] == description["project"]["id"]
+    # 已经是当前版本就不再动它。
+    assert migrate(package) is False
+
+
+def test_the_description_reader_returns_what_was_written(tmp_path: Path) -> None:
+    package = _package(tmp_path)
+    payload = project(layout(package))
     assert payload["format"] == "narrative-project"
-    assert payload["version"] == 1
+    assert payload["version"] == 2
+    assert payload["project"]["title"]
+    assert payload["layout"]["database"] == DB_NAME
+
+
+def test_an_old_manifest_becomes_the_description_file(tmp_path: Path) -> None:
+    """旧包只有一个 manifest.json：打开时改名并补全，不会两份并存。"""
+    package = _package(tmp_path)
+    description = json.loads((package / PROJECT_FILE).read_text(encoding="utf-8"))
+    (package / PROJECT_FILE).unlink()
+    (package / LEGACY_MANIFEST).write_text(
+        json.dumps(
+            {
+                "format": "narrative-project",
+                "version": 1,
+                "title": description["project"]["title"],
+                "project_id": description["project"]["id"],
+                "created_at": "2026-01-01T00:00:00+00:00",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert migrate(package) is True
+    assert not (package / LEGACY_MANIFEST).exists()
+    payload = json.loads((package / PROJECT_FILE).read_text(encoding="utf-8"))
+    assert payload["version"] == 2
+    # 旧文件里写过的创建时间要留着，别在改名时重新盖一个。
+    assert payload["project"]["created_at"] == "2026-01-01T00:00:00+00:00"
+    assert payload["project"]["title"] == description["project"]["title"]
+    assert migrate(package) is False
 
 
 def test_material_and_chats_land_where_the_layout_says(tmp_path: Path) -> None:
