@@ -1,6 +1,6 @@
 """常驻协作者：模型提议调工具，程序执行，把结果喂回去。
 
-harness 不开原生工具调用（`graph_agent.capabilities()` 里 `native_tools=False`），
+harness 不开原生工具调用（运行时的 profile 只暴露 `read_image`/`working_directory`），
 所以这里沿用同一种桥接：模型每轮回一个 JSON——要么调工具，要么给答案。
 
 工具表直接取自 `tool_api`，而且**只放读操作**：协作者能看、能解释、能对照，

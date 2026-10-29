@@ -11,9 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .change_service import ChangeService
-from .graph_analysis_ops import AnalysisService
 from .graph_facades import (
-    GraphAnalysisFacade,
     GraphChangeFacade,
     GraphProfileFacade,
     GraphProjectFacade,
@@ -49,7 +47,6 @@ class GraphOperations:
 
         self._timeline = TimelineService(self._store, self._service, self._properties)
         self._read = GraphReadService(self._store, self._properties, self._service)
-        self._analysis = AnalysisService(self, self._store)
         self._profile = ProfileService(self._store, self._project_id, self._provider_store)
         self._graphrag = GraphRagService(self._store, self._service)
 
@@ -59,7 +56,6 @@ class GraphOperations:
         self.changes = GraphChangeFacade(self._changes)
         self.query = GraphQueryFacade(self._read, self._timeline)
         self.profiles = GraphProfileFacade(self._profile)
-        self.analysis = GraphAnalysisFacade(self._analysis)
         self.graphrag = GraphRagFacade(self._graphrag)
 
     # -- project ---------------------------------------------------------
@@ -68,9 +64,6 @@ class GraphOperations:
 
     def project_info(self) -> _ProjectPath:
         return _ProjectPath(self.project.path())
-
-    def run_dir(self) -> Path:
-        return self.analysis.run_dir()
 
     def import_source(self, title: str, text: str) -> str:
         return self.project.import_source(title, text)
@@ -580,51 +573,3 @@ class GraphOperations:
 
     def save_provider_profile(self, settings: dict) -> dict:
         return self.profiles.save(settings)
-
-    # -- analysis runs ---------------------------------------------------
-    def start_graph_analysis(
-        self,
-        source_ids: list[str],
-        *,
-        task: str | None = None,
-        feedback: str | None = None,
-        feedback_origin: str = "user_input",
-        seed_candidate_id: str | None = None,
-        budget: dict | None = None,
-        api_key: str | None = None,
-    ) -> str:
-        return self.analysis.start(
-            source_ids, task=task, feedback=feedback,
-            feedback_origin=feedback_origin, seed_candidate_id=seed_candidate_id,
-            budget=budget, api_key=api_key,
-        )
-
-    def graph_analysis_status(self, run_id: str) -> dict:
-        return self.analysis.status(run_id)
-
-    def graph_analysis_runs(self) -> list[dict]:
-        return self.analysis.runs()
-
-    def graph_analysis_trace(self, run_id: str) -> dict:
-        return self.analysis.trace(run_id)
-
-    def graph_analysis_response(self, run_id: str, round_number: int) -> dict:
-        return self.analysis.response(run_id, round_number)
-
-    def graph_analysis_control(self, run_id: str) -> dict:
-        return self.analysis.control(run_id)
-
-    def take_graph_instructions(self, run_id: str) -> list[dict]:
-        return self.analysis.take_instructions(run_id)
-
-    def pause_graph_analysis(self, run_id: str) -> None:
-        self.analysis.pause(run_id)
-
-    def resume_graph_analysis(self, run_id: str) -> None:
-        self.analysis.resume(run_id)
-
-    def instruct_graph_analysis(self, run_id: str, text: str) -> str:
-        return self.analysis.instruct(run_id, text)
-
-    def cancel_graph_analysis(self, run_id: str) -> None:
-        self.analysis.cancel(run_id)

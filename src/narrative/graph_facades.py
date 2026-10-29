@@ -9,7 +9,6 @@ delegations to these facades.
 from __future__ import annotations
 
 from .change_service import ChangeService
-from .graph_analysis_ops import AnalysisService
 from .graph_profile_ops import ProfileService
 from .graph_read_ops import GraphReadService
 from .graph_service import GraphService
@@ -237,49 +236,6 @@ class GraphProfileFacade:
 
     def set_title(self, title: str) -> None:
         self.profile.set_title(title)
-
-
-class GraphAnalysisFacade:
-    """Graph analysis runs: start, inspect, pause, instruct, cancel."""
-
-    def __init__(self, analysis: AnalysisService):
-        self.analysis = analysis
-
-    def run_dir(self):
-        return self.analysis.run_dir()
-
-    def start(self, source_ids: list[str], **kwargs) -> str:
-        return self.analysis.start(source_ids, **kwargs)
-
-    def status(self, run_id: str) -> dict:
-        return self.analysis.status(run_id)
-
-    def runs(self) -> list[dict]:
-        return self.analysis.runs()
-
-    def trace(self, run_id: str) -> dict:
-        return self.analysis.trace(run_id)
-
-    def response(self, run_id: str, round_number: int) -> dict:
-        return self.analysis.response(run_id, round_number)
-
-    def control(self, run_id: str) -> dict:
-        return self.analysis.control(run_id)
-
-    def take_instructions(self, run_id: str) -> list[dict]:
-        return self.analysis.take_instructions(run_id)
-
-    def pause(self, run_id: str) -> None:
-        self.analysis.pause(run_id)
-
-    def resume(self, run_id: str) -> None:
-        self.analysis.resume(run_id)
-
-    def instruct(self, run_id: str, text: str) -> str:
-        return self.analysis.instruct(run_id, text)
-
-    def cancel(self, run_id: str) -> None:
-        self.analysis.cancel(run_id)
 
 
 class GraphRagFacade:

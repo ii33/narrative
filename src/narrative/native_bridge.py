@@ -208,7 +208,7 @@ class NativeBridge(QObject):
             return operation(ops)
 
         self._submit(kind, work, apply,
-                     query_epoch=self._query_epoch if kind in {"canvas", "detail", "search", "expand", "timeline", "hierarchy", "reading_hierarchy", "event_compare", "property_context", "property_state", "property_world", "property_history",
+                     query_epoch=self._query_epoch if kind in {"graph_view", "canvas", "detail", "search", "expand", "timeline", "hierarchy", "reading_hierarchy", "event_compare", "property_context", "property_state", "property_world", "property_history",
                                    "node_properties"} else None)
 
     @staticmethod
@@ -1539,57 +1539,3 @@ class NativeBridge(QObject):
             "provider", lambda ops: {"profile": ops.save_provider_profile(self._exact_integers(settings))}
         )
 
-    @Slot("QVariantList", str, "QVariantMap")
-    def startAnalysis(self, source_ids: list, task: str, budget: dict) -> None:
-        def work(ops) -> dict:
-            run_id = ops.start_graph_analysis(
-                [str(item) for item in source_ids], task=task or None, budget=budget or None,
-            )
-            return {"run_id": run_id, "status": "queued"}
-
-        self._project_task("run_started", work)
-
-    @Slot()
-    def loadRuns(self) -> None:
-        self._project_task("runs", lambda ops: {"items": ops.graph_analysis_runs()})
-
-    @Slot(str)
-    def loadTrace(self, run_id: str) -> None:
-        self._project_task("trace", lambda ops: {"trace": ops.graph_analysis_trace(run_id)})
-
-    @Slot(str, int)
-    def loadModelResponse(self, run_id: str, round_number: int) -> None:
-        self._project_task(
-            "model_response", lambda ops: {"response": ops.graph_analysis_response(run_id, round_number)},
-        )
-
-    @Slot(str)
-    def pauseRun(self, run_id: str) -> None:
-        self._project_task("run_control", lambda ops: self._control(ops, "pause", run_id))
-
-    @Slot(str)
-    def resumeRun(self, run_id: str) -> None:
-        self._project_task("run_control", lambda ops: self._control(ops, "resume", run_id))
-
-    @Slot(str, str)
-    def instructRun(self, run_id: str, text: str) -> None:
-        def work(ops) -> dict:
-            instruction_id = ops.instruct_graph_analysis(run_id, text)
-            return {"run_id": run_id, "action": "instruct", "instruction_id": instruction_id,
-                    "control": ops.graph_analysis_control(run_id)}
-
-        self._project_task("run_control", work)
-
-    @Slot(str)
-    def cancelRun(self, run_id: str) -> None:
-        self._project_task("run_control", lambda ops: self._control(ops, "cancel", run_id))
-
-    @staticmethod
-    def _control(ops: GraphOperations, action: str, run_id: str) -> dict:
-        method = {
-            "pause": ops.pause_graph_analysis,
-            "resume": ops.resume_graph_analysis,
-            "cancel": ops.cancel_graph_analysis,
-        }[action]
-        method(run_id)
-        return {"run_id": run_id, "action": action, "control": ops.graph_analysis_control(run_id)}

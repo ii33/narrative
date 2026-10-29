@@ -1,6 +1,5 @@
 import argparse
 import json
-import time
 from pathlib import Path
 
 from . import tool_cli
@@ -8,22 +7,6 @@ from .errors import OperationError
 from .project_catalog import create_graph_project, open_graph_project
 
 CONTEXT_FIELDS = ("context_window", "output_reserve", "compaction_reserve", "compaction_max_tokens")
-
-
-def _context_arguments(parser):
-    for field, description in (
-        ("context_window", "模型上下文窗口token数"),
-        ("output_reserve", "普通输出预留token数"),
-        ("compaction_reserve", "压缩操作预留token数"),
-        ("compaction_max_tokens", "单次压缩摘要输出上限token数"),
-    ):
-        parser.add_argument("--" + field.replace("_", "-"), type=int, help=description)
-
-
-def _save_context_arguments(operations, args):
-    changes = {field: getattr(args, field) for field in CONTEXT_FIELDS if getattr(args, field) is not None}
-    if changes:
-        operations.save_harness_settings(operations.harness_settings() | changes)
 
 
 def _records_arguments(parser):
@@ -64,23 +47,6 @@ def main():
     graph_import = commands.add_parser("graph-import", help="向图项目导入 UTF-8 原文")
     graph_import.add_argument("path", type=Path)
     graph_import.add_argument("--title")
-    graph_analyze = commands.add_parser("graph-analyze", help="启动可观察的多步图代理，产出待审候选")
-    graph_analyze.add_argument("source_id")
-    graph_analyze.add_argument("--task", help="本轮原文分析目标")
-    graph_analyze.add_argument("--feedback", help="修订待审候选时的具体反馈")
-    graph_analyze.add_argument("--seed-candidate-id", help="只读继承待审候选到私有草稿")
-    graph_analyze.add_argument("--feedback-origin", choices=("user_input", "review_agent_guided"), default="user_input")
-    graph_analyze.add_argument("--output-limit", default="inherit", help="inherit、service-default 或本任务正整数输出容量")
-    graph_analyze.add_argument("--research-rounds", type=int, default=3)
-    graph_analyze.add_argument("--request-seconds", type=int, default=180)
-    graph_analyze.add_argument("--max-rounds", type=int)
-    graph_analyze.add_argument("--max-total-tokens", type=int)
-    graph_analyze.add_argument("--wall-seconds", type=int)
-    _context_arguments(graph_analyze)
-    graph_status = commands.add_parser("graph-status", help="查看图项目或代理运行状态")
-    graph_status.add_argument("--run-id")
-    graph_trace = commands.add_parser("graph-trace", help="查看模型回合、工具观察、草稿及预检轨迹")
-    graph_trace.add_argument("run_id")
     graph_query = commands.add_parser("graph-query", help="检索已审核图节点及断言")
     graph_query.add_argument("--query", default="")
     graph_query.add_argument("--node-id")
@@ -109,12 +75,6 @@ def main():
         review_command = commands.add_parser(name, help="人工明确审核图候选")
         review_command.add_argument("candidate_id")
         review_command.add_argument("version", type=int)
-    for name in ("graph-pause", "graph-resume", "graph-cancel"):
-        control_command = commands.add_parser(name, help="协作式控制图代理")
-        control_command.add_argument("run_id")
-    graph_instruct = commands.add_parser("graph-instruct", help="在下一模型请求边界追加任务指令")
-    graph_instruct.add_argument("run_id")
-    graph_instruct.add_argument("text")
     property_precheck = commands.add_parser(
         "property-precheck", aliases=["graph-property-precheck"], help="只读预检 v5 属性追加记录"
     )
@@ -227,26 +187,6 @@ def main():
                 result = graph.graph_project_info()
             elif args.command == "graph-import":
                 result = {"source_id": graph.import_source(args.title or args.path.stem, args.path.read_text(encoding="utf-8"))}
-            elif args.command == "graph-analyze":
-                _save_context_arguments(graph, args)
-                output_limit = args.output_limit if args.output_limit in {"inherit", "service-default"} else int(args.output_limit)
-                budget = {"max_tokens_per_round": output_limit, "research_rounds": args.research_rounds, "request_seconds": args.request_seconds,
-                          "max_rounds": args.max_rounds, "max_total_tokens": args.max_total_tokens, "wall_seconds": args.wall_seconds}
-                run_id = graph.start_graph_analysis([args.source_id], task=args.task, feedback=args.feedback, seed_candidate_id=args.seed_candidate_id, feedback_origin=args.feedback_origin, budget=budget)
-                print(f"图代理任务：{run_id}", flush=True)
-                try:
-                    while True:
-                        result = graph.graph_analysis_status(run_id)
-                        if result["status"] not in {"queued", "running"}:
-                            break
-                        time.sleep(0.5)
-                except KeyboardInterrupt:
-                    graph.cancel_graph_analysis(run_id)
-                    raise SystemExit(130) from None
-            elif args.command == "graph-status":
-                result = graph.graph_analysis_status(args.run_id) if args.run_id else graph.graph_project_info()
-            elif args.command == "graph-trace":
-                result = graph.graph_analysis_trace(args.run_id)
             elif args.command == "graph-query":
                 result = graph.graph_query(query=args.query, node_id=args.node_id)
             elif args.command == "graph-view":
@@ -269,17 +209,6 @@ def main():
             elif args.command == "graph-reject":
                 graph.graph_reject(args.candidate_id, args.version)
                 result = {"status": "rejected"}
-            elif args.command == "graph-pause":
-                graph.pause_graph_analysis(args.run_id)
-                result = graph.graph_analysis_control(args.run_id)
-            elif args.command == "graph-resume":
-                graph.resume_graph_analysis(args.run_id)
-                result = graph.graph_analysis_control(args.run_id)
-            elif args.command == "graph-cancel":
-                graph.cancel_graph_analysis(args.run_id)
-                result = graph.graph_analysis_control(args.run_id)
-            elif args.command == "graph-instruct":
-                result = {"instruction_id": graph.instruct_graph_analysis(args.run_id, args.text)}
             elif args.command == "property-precheck":
                 revision = (
                     args.expected_revision

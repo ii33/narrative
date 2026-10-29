@@ -33,7 +33,7 @@ def test_facade_groups_are_separate_objects(tmp_path) -> None:
     groups = {
         "project": ops.project, "review": ops.review, "properties": ops.properties,
         "changes": ops.changes, "query": ops.query, "profiles": ops.profiles,
-        "analysis": ops.analysis, "graphrag": ops.graphrag,
+        "graphrag": ops.graphrag,
     }
     assert len({id(item) for item in groups.values()}) == len(groups)
     for facade in groups.values():
@@ -54,17 +54,14 @@ def test_compatibility_methods_delegate_to_facades(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(ops.changes, "candidates", record("changes.candidates", []))
     monkeypatch.setattr(ops.query, "view", record("query.view", {}))
     monkeypatch.setattr(ops.profiles, "settings", record("profiles.settings", {}))
-    monkeypatch.setattr(ops.analysis, "runs", record("analysis.runs", []))
 
     assert ops.graph_precheck([], 1) == []
     assert ops.change_candidates() == []
     assert ops.graph_view({"view": "graph"}) == {}
     assert ops.harness_settings() == {}
-    assert ops.graph_analysis_runs() == []
 
     assert [name for name, _ in calls] == [
-        "review.precheck", "changes.candidates", "query.view",
-        "profiles.settings", "analysis.runs",
+        "review.precheck", "changes.candidates", "query.view", "profiles.settings",
     ]
 
 
@@ -84,7 +81,7 @@ def test_property_facade_reuses_one_property_store(tmp_path) -> None:
 
 
 FACADE_GROUPS = {
-    "project", "review", "properties", "changes", "query", "profiles", "analysis", "graphrag",
+    "project", "review", "properties", "changes", "query", "profiles", "graphrag",
 }
 
 
@@ -125,8 +122,7 @@ def _delegation_target(method: str) -> tuple[str, str]:
         "property_disclosure_state", "property_history", "property_world_state",
         "change_precheck", "change_propose", "change_candidates", "change_accept",
         "harness_settings", "provider_catalog", "save_harness_settings",
-        "graphrag_preview", "graphrag_stage_sources", "start_graph_analysis",
-        "graph_analysis_runs", "pause_graph_analysis", "cancel_graph_analysis",
+        "graphrag_preview", "graphrag_stage_sources",
     ],
 )
 def test_compatibility_methods_are_thin_delegations(method: str) -> None:

@@ -20,7 +20,8 @@ MAX_TITLE = 24
 
 
 def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    # 毫秒：一秒内建两个会话时，「最近说过」还分得出先后。
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def _new_id() -> str:
@@ -105,7 +106,8 @@ class ChatStore:
                 "created_at": str(data.get("created_at") or ""),
                 "message_count": len(messages),
             })
-        rows.sort(key=lambda row: (row["updated_at"], row["created_at"]), reverse=True)
+        # 时间戳相同（同一毫秒）时用 id 兜底，列表顺序才不会跟着文件枚举顺序变。
+        rows.sort(key=lambda row: (row["updated_at"], row["created_at"], row["id"]), reverse=True)
         return rows
 
     def rename(self, chat_id: str, title: str) -> dict:

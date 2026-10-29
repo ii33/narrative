@@ -83,7 +83,8 @@ def test_build_candidate_wires_participants_and_scene_children(tmp_path: Path) -
     assert set(scene["events"]) == {
         nodes["林舟刺伤陈默"]["id"], nodes["火纹石改造外形"]["id"]
     }
-    assert not [a for a in snapshot["assertions"] if a["predicate_id"] == "contains_event"]
+    # 断言层已经没了：场景的子事件只是字段，不会额外生成一条关系。
+    assert "assertions" not in snapshot
 
 
 def test_second_run_only_submits_what_is_new(tmp_path: Path) -> None:
@@ -229,7 +230,7 @@ def test_property_changes_hang_on_their_event(tmp_path: Path) -> None:
     assert after["event_id"] == nodes["老周改造林舟身体"]
 
 
-def test_events_compare_by_chain(tmp_path: Path) -> None:
+def test_events_compare_by_disclosure_and_story_stays_unknown(tmp_path: Path) -> None:
     """Events are already ordered by the chain; comparison walks it."""
     ops = create_graph_project(tmp_path / "graph.nproj")
     first = ops.import_source("第一章", "甲出场了。")
@@ -257,10 +258,11 @@ def test_events_compare_by_chain(tmp_path: Path) -> None:
     assert backward["relation"] == "after"
     assert backward["basis"] == "disclosure"
 
-    # The story axis uses the stated relations, not the reading position.
+    # 故事轴没有数据来源：提取不产出事件先后，`predecessors` 只是记录，不参与比较。
     story = ops.graph_event_compare("1", "2", axis="story")
-    assert story["relation"] == "before"
-    assert story["basis"] == "chain"
+    assert story["relation"] == "unknown"
+    assert story["basis"] == "none"
+    assert "不产出事件间关系" in story["reason"]
 
 
 def test_nodes_carry_the_sentence_they_came_from(tmp_path: Path) -> None:
