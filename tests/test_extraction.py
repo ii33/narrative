@@ -55,7 +55,7 @@ def test_parse_rejects_unknown_types() -> None:
 
 
 def _project(tmp_path: Path):
-    ops = create_graph_project(tmp_path / "graph.sqlite3")
+    ops = create_graph_project(tmp_path / "graph.nproj")
     source_id = ops.import_source("第一章", TEXT)
     return ops, source_id, ops.source(source_id)["hash"]
 
@@ -141,7 +141,7 @@ def test_parse_properties_keeps_order_and_rejects_bad_quotes() -> None:
 
 def test_properties_form_one_value_sequence(tmp_path: Path) -> None:
     """Each entry is (value, event); the value at an event is the deepest match."""
-    ops = create_graph_project(tmp_path / "graph.sqlite3")
+    ops = create_graph_project(tmp_path / "graph.nproj")
     source_id = ops.import_source("第一章", PROP_TEXT)
     data = parse_nodes(PROP_RAW, PROP_TEXT) | {
         "source_id": source_id, "source_hash": ops.source(source_id)["hash"]
@@ -202,7 +202,7 @@ ANCHOR_RAW = """
 
 def test_property_changes_hang_on_their_event(tmp_path: Path) -> None:
     """A change is a new value on the event that caused it, not a mutation."""
-    ops = create_graph_project(tmp_path / "graph.sqlite3")
+    ops = create_graph_project(tmp_path / "graph.nproj")
     source_id = ops.import_source("第一章", ANCHOR_TEXT)
     data = parse_nodes(ANCHOR_RAW, ANCHOR_TEXT) | {
         "source_id": source_id, "source_hash": ops.source(source_id)["hash"]
@@ -231,7 +231,7 @@ def test_property_changes_hang_on_their_event(tmp_path: Path) -> None:
 
 def test_events_compare_by_chain(tmp_path: Path) -> None:
     """Events are already ordered by the chain; comparison walks it."""
-    ops = create_graph_project(tmp_path / "graph.sqlite3")
+    ops = create_graph_project(tmp_path / "graph.nproj")
     first = ops.import_source("第一章", "甲出场了。")
     second = ops.import_source("第二章", "乙出场了。")
     candidate = ops.change_propose(
@@ -265,7 +265,7 @@ def test_events_compare_by_chain(tmp_path: Path) -> None:
 
 def test_nodes_carry_the_sentence_they_came_from(tmp_path: Path) -> None:
     """A node is checkable only if its quote survives into the graph."""
-    ops = create_graph_project(tmp_path / "graph.sqlite3")
+    ops = create_graph_project(tmp_path / "graph.nproj")
     source_id = ops.import_source("第一章", ANCHOR_TEXT)
     data = parse_nodes(ANCHOR_RAW, ANCHOR_TEXT) | {
         "source_id": source_id, "source_hash": ops.source(source_id)["hash"]
@@ -293,7 +293,7 @@ def test_same_name_events_stay_separate(tmp_path: Path) -> None:
   {"name": "林舟修炼", "type": "event", "quotes": ["林舟在洞府修炼"], "participants": ["林舟"]}
 ]}
 """
-    ops = create_graph_project(tmp_path / "graph.sqlite3")
+    ops = create_graph_project(tmp_path / "graph.nproj")
     source_id = ops.import_source("第一章", text)
     data = parse_nodes(raw, text) | {
         "source_id": source_id, "source_hash": ops.source(source_id)["hash"]
@@ -320,7 +320,7 @@ def test_late_disclosure_is_not_pulled_back_to_the_start(tmp_path: Path) -> None
    "quotes": ["他今年二十九岁"]}
 ]}
 """
-    ops = create_graph_project(tmp_path / "graph.sqlite3")
+    ops = create_graph_project(tmp_path / "graph.nproj")
     source_id = ops.import_source("第一章", text)
     data = parse_nodes(raw, text) | {
         "source_id": source_id, "source_hash": ops.source(source_id)["hash"]
@@ -356,7 +356,7 @@ def test_text_after_the_last_event_still_gets_an_anchor(tmp_path: Path) -> None:
    "quotes": ["林舟今年二十九岁"]}
 ]}
 """
-    ops = create_graph_project(tmp_path / "graph.sqlite3")
+    ops = create_graph_project(tmp_path / "graph.nproj")
     source_id = ops.import_source("第一章", text)
     data = parse_nodes(raw, text) | {
         "source_id": source_id, "source_hash": ops.source(source_id)["hash"]
@@ -376,7 +376,7 @@ def test_text_after_the_last_event_still_gets_an_anchor(tmp_path: Path) -> None:
 
 def test_story_axis_refuses_to_borrow_the_disclosure_anchor(tmp_path: Path) -> None:
     """A disclosure anchor does not say the value holds at that story event."""
-    ops = create_graph_project(tmp_path / "graph.sqlite3")
+    ops = create_graph_project(tmp_path / "graph.nproj")
     source_id = ops.import_source("第一章", PROP_TEXT)
     data = parse_nodes(PROP_RAW, PROP_TEXT) | {
         "source_id": source_id, "source_hash": ops.source(source_id)["hash"]
@@ -400,7 +400,7 @@ def test_each_node_type_has_its_own_numbering(tmp_path: Path) -> None:
     """每种节点各自一套编号：人是 P1、P2，物品是 I1，两个 1 互不相关。"""
     from narrative.order_ids import prefix_for, split_id
 
-    ops = create_graph_project(tmp_path / "graph.sqlite3")
+    ops = create_graph_project(tmp_path / "graph.nproj")
     source_id = ops.import_source("第一章", TEXT)
     data = parse_nodes(RAW, TEXT) | {
         "source_id": source_id, "source_hash": ops.source(source_id)["hash"]
@@ -460,7 +460,7 @@ def test_inserted_mention_sorts_between_neighbours(tmp_path: Path) -> None:
   {"name": "老周出现", "type": "event", "quotes": ["老周出现了"], "participants": ["林舟"]}
 ]}
 """
-    ops = create_graph_project(tmp_path / "graph.sqlite3")
+    ops = create_graph_project(tmp_path / "graph.nproj")
     source_id = ops.import_source("第一章", text)
     data = parse_nodes(raw, text) | {
         "source_id": source_id, "source_hash": ops.source(source_id)["hash"]
@@ -491,7 +491,7 @@ def test_inserted_mention_sorts_between_neighbours(tmp_path: Path) -> None:
 
 def test_property_retraction_hides_the_record_from_reads(tmp_path: Path) -> None:
     """Retracting keeps the row for audit but removes it from every projection."""
-    ops = create_graph_project(tmp_path / "graph.sqlite3")
+    ops = create_graph_project(tmp_path / "graph.nproj")
     source_id = ops.import_source("第一章", PROP_TEXT)
     data = parse_nodes(PROP_RAW, PROP_TEXT) | {
         "source_id": source_id, "source_hash": ops.source(source_id)["hash"]
@@ -538,7 +538,7 @@ def test_property_retraction_hides_the_record_from_reads(tmp_path: Path) -> None
 
 def test_value_shape_mismatch_is_a_warning_not_a_block(tmp_path: Path) -> None:
     """A property may hold 180 and "矮小"; the declared type is a hint."""
-    ops = create_graph_project(tmp_path / "graph.sqlite3")
+    ops = create_graph_project(tmp_path / "graph.nproj")
     source_id = ops.import_source("第一章", PROP_TEXT)
     data = parse_nodes(PROP_RAW, PROP_TEXT) | {
         "source_id": source_id, "source_hash": ops.source(source_id)["hash"]
@@ -582,7 +582,7 @@ def test_value_shape_mismatch_is_a_warning_not_a_block(tmp_path: Path) -> None:
 
 def test_world_and_cognition_values_do_not_overwrite_each_other(tmp_path: Path) -> None:
     """Same property, different scope: two records, not one."""
-    ops = create_graph_project(tmp_path / "graph.sqlite3")
+    ops = create_graph_project(tmp_path / "graph.nproj")
     source_id = ops.import_source("第一章", PROP_TEXT)
     data = parse_nodes(PROP_RAW, PROP_TEXT) | {
         "source_id": source_id, "source_hash": ops.source(source_id)["hash"]
@@ -626,7 +626,7 @@ def test_world_and_cognition_values_do_not_overwrite_each_other(tmp_path: Path) 
 
 def test_chapter_marks_hang_on_events(tmp_path: Path) -> None:
     """A chapter boundary is a mark on the reading chain, not a break."""
-    ops = create_graph_project(tmp_path / "graph.sqlite3")
+    ops = create_graph_project(tmp_path / "graph.nproj")
     source_id = ops.import_source("第一章", PROP_TEXT)
     revision = ops.graph_project_info()["revision"]
 
@@ -651,7 +651,7 @@ def test_chapter_marks_hang_on_events(tmp_path: Path) -> None:
 
 def test_one_anchor_may_hold_several_disclosures(tmp_path: Path) -> None:
     """An event is a disclosure anchor, not a slot: several values may share it."""
-    ops = create_graph_project(tmp_path / "graph.sqlite3")
+    ops = create_graph_project(tmp_path / "graph.nproj")
     source_id = ops.import_source("第一章", PROP_TEXT)
     data = parse_nodes(PROP_RAW, PROP_TEXT) | {
         "source_id": source_id, "source_hash": ops.source(source_id)["hash"]
@@ -688,7 +688,7 @@ def test_one_anchor_may_hold_several_disclosures(tmp_path: Path) -> None:
 
 def test_same_anchor_keeps_source_order_not_write_order(tmp_path: Path) -> None:
     """Two disclosures at one event: the later sentence wins, whenever it was added."""
-    ops = create_graph_project(tmp_path / "graph.sqlite3")
+    ops = create_graph_project(tmp_path / "graph.nproj")
     source_id = ops.import_source("第一章", PROP_TEXT)
     data = parse_nodes(PROP_RAW, PROP_TEXT) | {
         "source_id": source_id, "source_hash": ops.source(source_id)["hash"]
@@ -735,7 +735,7 @@ def test_same_anchor_keeps_source_order_not_write_order(tmp_path: Path) -> None:
 
 def test_node_properties_orders_by_reading_not_write_order(tmp_path: Path) -> None:
     """One property, two disclosures: the later sentence wins, whenever it was added."""
-    ops = create_graph_project(tmp_path / "node-props.sqlite3")
+    ops = create_graph_project(tmp_path / "node-props.nproj")
     source_id = ops.import_source("第一章", "林舟今年二十九岁。三年后他三十三岁。")
     candidate = ops.graph_propose(
         [
@@ -801,7 +801,7 @@ def test_node_properties_orders_by_reading_not_write_order(tmp_path: Path) -> No
 
 
 def test_node_properties_keeps_one_line_per_aspect(tmp_path: Path) -> None:
-    ops = create_graph_project(tmp_path / "node-props-scope.sqlite3")
+    ops = create_graph_project(tmp_path / "node-props-scope.nproj")
     ops.graph_accept(
         ops.graph_propose(
             [
@@ -862,7 +862,7 @@ def test_parse_keeps_the_category_the_model_chose() -> None:
 
 
 def test_build_candidate_writes_the_category_on_the_disclosure(tmp_path: Path) -> None:
-    ops = create_graph_project(tmp_path / "category.sqlite3")
+    ops = create_graph_project(tmp_path / "category.nproj")
     source_id = ops.import_source("第一章", CATEGORY_TEXT)
     data = parse_nodes(CATEGORY_RAW, CATEGORY_TEXT) | {"source_id": source_id}
 
@@ -883,7 +883,7 @@ def test_build_candidate_writes_the_category_on_the_disclosure(tmp_path: Path) -
 
 
 def test_the_prompt_lists_categories_and_the_names_already_in_use(tmp_path: Path) -> None:
-    ops = create_graph_project(tmp_path / "prompt.sqlite3")
+    ops = create_graph_project(tmp_path / "prompt.nproj")
     source_id = ops.import_source("第一章", PROP_TEXT)
     data = parse_nodes(PROP_RAW, PROP_TEXT) | {"source_id": source_id}
     built = build_candidate(ops, data)

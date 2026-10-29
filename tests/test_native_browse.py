@@ -34,7 +34,7 @@ def _pump(app: QApplication, results: list[tuple[str, dict]], kind: str) -> dict
 
 def test_workspace_opens_on_the_browse_page_with_categories(tmp_path: Path) -> None:
     app = QApplication.instance() or QApplication([])
-    project = tmp_path / "browse.sqlite3"
+    project = tmp_path / "browse.nproj"
     ops = Operations.create_graph_project(project)
     candidate = ops.graph_propose(
         [
@@ -60,7 +60,7 @@ def test_workspace_opens_on_the_browse_page_with_categories(tmp_path: Path) -> N
     )
     ops.property_accept(property_candidate, 1)
 
-    bridge = NativeBridge(tmp_path)
+    bridge = NativeBridge()
     results: list[tuple[str, dict]] = []
     errors: list[tuple[str, str]] = []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))

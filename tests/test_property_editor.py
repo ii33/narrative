@@ -46,7 +46,7 @@ def _project(path: Path):
 
 
 def test_retracting_a_record_hides_it_from_reading(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "retract.sqlite3")
+    ops = _project(tmp_path / "retract.nproj")
 
     result = ops.property_retract(["v2"], "三十岁那句读错了")
     assert result["retracted"] == ["v2"]
@@ -59,7 +59,7 @@ def test_retracting_a_record_hides_it_from_reading(tmp_path: Path) -> None:
 
 def test_the_editor_lists_only_what_still_stands(tmp_path: Path) -> None:
     """编辑器回答「现在是什么」：失效的披露不进列表，但记录一条都没删。"""
-    ops = _project(tmp_path / "editor.sqlite3")
+    ops = _project(tmp_path / "editor.nproj")
     ops.property_retract(["v2"], "读错了")
 
     payload = ops.node_editor("1")
@@ -77,7 +77,7 @@ def test_the_editor_lists_only_what_still_stands(tmp_path: Path) -> None:
 
 def test_an_aspect_with_nothing_left_is_not_listed(tmp_path: Path) -> None:
     """整条失效之后它就不出现了：失效的既不删除也不标注，只是不再显示。"""
-    ops = _project(tmp_path / "empty.sqlite3")
+    ops = _project(tmp_path / "empty.nproj")
     ops.property_retract(["v1", "v2"], "整条读错了")
 
     assert ops.property_node_summary("1")["properties"] == []
@@ -90,7 +90,7 @@ def test_an_aspect_with_nothing_left_is_not_listed(tmp_path: Path) -> None:
     assert [record["value"] for record in stored] == ["二十九岁", "三十岁"]
 
 def test_retraction_needs_a_reason_and_a_real_record(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "bad-retract.sqlite3")
+    ops = _project(tmp_path / "bad-retract.nproj")
 
     with pytest.raises(ValueError):
         ops.property_retract(["v1"], "   ")
@@ -102,7 +102,7 @@ def test_retraction_needs_a_reason_and_a_real_record(tmp_path: Path) -> None:
 
 
 def test_retracting_twice_is_a_no_op(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "twice.sqlite3")
+    ops = _project(tmp_path / "twice.nproj")
     first = ops.property_retract(["v1"], "读错了")
     second = ops.property_retract(["v1"], "再撤一次")
 
@@ -112,7 +112,7 @@ def test_retracting_twice_is_a_no_op(tmp_path: Path) -> None:
 
 def test_a_partial_retraction_keeps_the_line(tmp_path: Path) -> None:
     """撤回一条之后这一方面仍然站得住：行还在，只剩没被撤的那条。"""
-    ops = _project(tmp_path / "partial.sqlite3")
+    ops = _project(tmp_path / "partial.nproj")
     ops.property_retract(["v2"], "读错了")
 
     item = ops.property_node_summary("1")["properties"][0]
@@ -121,7 +121,7 @@ def test_a_partial_retraction_keeps_the_line(tmp_path: Path) -> None:
 
 def test_an_aspect_with_nothing_left_is_gone_from_the_pane(tmp_path: Path) -> None:
     """整条失效之后就不显示了：没有「（已失效）」这种行。"""
-    ops = _project(tmp_path / "gone.sqlite3")
+    ops = _project(tmp_path / "gone.nproj")
     ops.property_retract(["v1", "v2"], "两句都读错了")
 
     assert ops.property_node_summary("1")["properties"] == []
@@ -133,7 +133,7 @@ def test_a_superseded_record_can_be_taken_back_at_an_earlier_cut(tmp_path: Path)
     只有「从事件 3 起不算」那一条时，站在事件 2 上点失效会被当成重复而静默跳过，
     看起来就是「失效没用」。
     """
-    ops = create_graph_project(tmp_path / "earlier.sqlite3")
+    ops = create_graph_project(tmp_path / "earlier.nproj")
     ops.graph_accept(
         ops.graph_propose(
             [
@@ -257,7 +257,7 @@ def _retraction_id(ops) -> str:
 
 def test_a_retraction_can_land_earlier_than_one_that_already_exists(tmp_path: Path) -> None:
     """审计已经说了「从事件 3 起不算」，站在事件 2 再撤一次，说的是「从这里起也不算」。"""
-    ops = _three_events(tmp_path / "earlier-retract.sqlite3")
+    ops = _three_events(tmp_path / "earlier-retract.nproj")
     ops.property_supersede(
         [{"target_id": "v1", "event_id": "3", "reason": "被后一条披露取代"}]
     )

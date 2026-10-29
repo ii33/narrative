@@ -210,7 +210,7 @@ def test_model_gateway_records_upstream_response_bytes():
 
 
 def test_graph_agent_upstream_activity_reads_live_gateway(tmp_path: Path, monkeypatch):
-    ops = GraphOperations(tmp_path / "activity.sqlite3", create=True)
+    ops = GraphOperations(tmp_path / "activity.nproj", create=True)
     sid = ops.import_source("短篇", "甲来了。")
     snapshot = {
         "last_response_utc": "2026-10-19T00:00:00+00:00",
@@ -267,7 +267,7 @@ def test_request_reserve_counts_cjk_and_explicit_output_cap():
 
 
 def test_graph_agent_stops_before_request_when_reserve_exceeds_budget(tmp_path: Path, monkeypatch):
-    ops = GraphOperations(tmp_path / "budget.sqlite3", create=True)
+    ops = GraphOperations(tmp_path / "budget.nproj", create=True)
     sid = ops.import_source("短篇", "甲遇见狼。")
     calls = []
 

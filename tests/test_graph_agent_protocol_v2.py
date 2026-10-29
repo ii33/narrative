@@ -64,7 +64,7 @@ def _property_records() -> list[dict]:
 
 
 def _scripted(tmp_path: Path, monkeypatch, responses, *, before_reply=None, budget=None, base_nodes=None):
-    ops = GraphOperations(tmp_path / "graph.sqlite3", create=True)
+    ops = GraphOperations(tmp_path / "graph.nproj", create=True)
     source_id = ops.import_source("短篇", "屠夫遇见狼。")
     if base_nodes:
         revision = ops.graph_project_info()["revision"]

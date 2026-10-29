@@ -26,10 +26,23 @@ def _legacy_project(path: Path, version: int = 5, title: str = "旧工程") -> P
     return path
 
 
+def _legacy_package(root: Path, version: int = 5, title: str = "旧工程") -> Path:
+    """一个旧版工程包：目录里有库，库是旧 schema。"""
+    root.mkdir(parents=True, exist_ok=True)
+    _legacy_project(root / "graph.sqlite3", version, title)
+    return root
+
+
+def _broken_package(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "graph.sqlite3").write_bytes(b"not a database")
+    return root
+
+
 def test_project_status_follows_the_current_schema(tmp_path: Path) -> None:
-    project_catalog.create_graph_project(tmp_path / "current.sqlite3")
-    _legacy_project(tmp_path / "old.sqlite3")
-    (tmp_path / "broken.sqlite3").write_bytes(b"not a database")
+    project_catalog.create_graph_project(tmp_path / "current.nproj")
+    _legacy_package(tmp_path / "old.nproj")
+    _broken_package(tmp_path / "broken.nproj")
 
     rows = {item["name"]: item for item in project_catalog.list_projects(tmp_path)}
 
@@ -39,25 +52,25 @@ def test_project_status_follows_the_current_schema(tmp_path: Path) -> None:
     assert rows["broken"]["status"] == "unreadable"
 
 
-def test_clear_incompatible_removes_old_files_and_keeps_unreadable(tmp_path: Path) -> None:
-    project_catalog.create_graph_project(tmp_path / "current.sqlite3")
-    _legacy_project(tmp_path / "old.sqlite3")
-    (tmp_path / "broken.sqlite3").write_bytes(b"not a database")
+def test_clear_incompatible_moves_old_packages_and_keeps_unreadable(tmp_path: Path) -> None:
+    project_catalog.create_graph_project(tmp_path / "current.nproj")
+    _legacy_package(tmp_path / "old.nproj")
+    _broken_package(tmp_path / "broken.nproj")
 
     result = project_catalog.clear_incompatible(tmp_path)
 
     cleared = result["removed"] + result["moved"]
-    assert [Path(item["path"]).name for item in cleared] == ["old.sqlite3"]
-    # An unreadable file may still be recoverable, so it is reported, not deleted.
-    assert [Path(item["path"]).name for item in result["kept"]] == ["broken.sqlite3"]
-    assert (tmp_path / "current.sqlite3").exists()
-    assert not (tmp_path / "old.sqlite3").exists()
+    assert [Path(item["path"]).name for item in cleared] == ["old.nproj"]
+    # An unreadable database may still be recoverable, so it is reported, not removed.
+    assert [Path(item["path"]).name for item in result["kept"]] == ["broken.nproj"]
+    assert (tmp_path / "current.nproj").exists()
+    assert not (tmp_path / "old.nproj").exists()
 
 
 def test_clear_incompatible_leaves_a_directory_without_legacy_files_alone(
     tmp_path: Path,
 ) -> None:
-    project_catalog.create_graph_project(tmp_path / "current.sqlite3")
+    project_catalog.create_graph_project(tmp_path / "current.nproj")
 
     result = project_catalog.clear_incompatible(tmp_path)
 
@@ -69,7 +82,7 @@ def test_clear_incompatible_leaves_a_directory_without_legacy_files_alone(
 def test_global_settings_become_the_default_for_new_projects(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setenv("NARRATIVE_PROVIDER_DB", str(tmp_path / "provider.sqlite3"))
+    monkeypatch.setenv("NARRATIVE_PROVIDER_DB", str(tmp_path / "provider.nproj"))
     store = ProviderStore()
     save_global_settings(
         store,
@@ -81,7 +94,7 @@ def test_global_settings_become_the_default_for_new_projects(
         },
     )
 
-    ops = project_catalog.create_graph_project(tmp_path / "fresh.sqlite3")
+    ops = project_catalog.create_graph_project(tmp_path / "fresh.nproj")
 
     profile = ops.provider_profile()
     assert profile["model"] == "ark-code-latest"
@@ -96,7 +109,7 @@ def test_global_settings_become_the_default_for_new_projects(
 def test_global_settings_survive_without_any_project(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setenv("NARRATIVE_PROVIDER_DB", str(tmp_path / "provider.sqlite3"))
+    monkeypatch.setenv("NARRATIVE_PROVIDER_DB", str(tmp_path / "provider.nproj"))
     store = ProviderStore()
 
     assert global_settings(store)["provider"] == "ark"

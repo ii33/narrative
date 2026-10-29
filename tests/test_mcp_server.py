@@ -65,7 +65,7 @@ def test_tools_list_needs_a_project_argument_without_a_default() -> None:
 
 
 def test_calling_a_tool_returns_text_content(tmp_path: Path) -> None:
-    project = _project(tmp_path / "mcp.sqlite3")
+    project = _project(tmp_path / "mcp.nproj")
     reply = mcp_server.handle(
         {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
          "params": {"name": "get_node", "arguments": {"node_id": "1"}}},
@@ -77,7 +77,7 @@ def test_calling_a_tool_returns_text_content(tmp_path: Path) -> None:
 
 
 def test_an_unknown_tool_is_reported_not_crashed(tmp_path: Path) -> None:
-    project = _project(tmp_path / "mcp-bad.sqlite3")
+    project = _project(tmp_path / "mcp-bad.nproj")
     reply = mcp_server.handle(
         {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
          "params": {"name": "no_such_tool", "arguments": {}}},
@@ -95,7 +95,7 @@ def test_unknown_method_is_a_jsonrpc_error() -> None:
 
 
 def test_stdio_round_trip(tmp_path: Path) -> None:
-    project = _project(tmp_path / "mcp-io.sqlite3")
+    project = _project(tmp_path / "mcp-io.nproj")
     lines = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
         {"jsonrpc": "2.0", "method": "notifications/initialized"},

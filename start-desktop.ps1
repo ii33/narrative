@@ -1,5 +1,4 @@
 param(
-    [string]$ProjectsDir = 'data/graph-projects',
     [string]$Project = '',
     [double]$QaExitAfterSeconds = 0,
     [string]$RenderLog = ''
@@ -11,8 +10,7 @@ $pythonw = Join-Path $projectRoot '.venv\Scripts\pythonw.exe'
 if (-not (Test-Path -LiteralPath $pythonw)) {
     throw 'Desktop dependencies are missing. Run uv sync --extra desktop in the project directory.'
 }
-$projectsPath = [IO.Path]::GetFullPath((Join-Path $projectRoot $ProjectsDir))
-$arguments = @('-m', 'narrative.native_app', '--projects-dir', ('"' + $projectsPath + '"'))
+$arguments = @('-m', 'narrative.native_app')
 if ($Project) {
     $arguments += @('--project', ('"' + $Project + '"'))
 }

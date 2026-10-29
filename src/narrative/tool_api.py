@@ -215,14 +215,6 @@ def _state_of(ops, ids: list[str], cut: str, limit: int = 20) -> list[dict]:
     return out
 
 
-def _pack_project(ops, params: dict) -> dict:
-    """把裸工程收成一个包：库和资料进包，缓存与会话留在包旁边。"""
-    from .project_package import pack
-
-    dest = params.get("dest") or None
-    return pack(ops.path, dest=dest, move=bool(params.get("move", True)))
-
-
 def _list_moments(ops, _params: dict) -> dict:
     """阅读位置的层级：一列一层（场景 → 事件），给 cut 挑合法值。"""
     from .browse_view import moment_tree
@@ -824,16 +816,6 @@ _register(Tool(
         "cut": {"type": "string", "description": "阅读位置（事件编号）；省略为最新"},
     },
     _material_view,
-))
-_register(Tool(
-    "pack_project",
-    "把工程收成一个包（<名字>.nproj/：库 + 资料；缓存与会话留在旁边），默认搬家",
-    {
-        "dest": {"type": "string", "description": "包放在哪；默认与工程同级"},
-        "move": {"type": "boolean", "description": "默认 true；false 表示复制一份"},
-    },
-    _pack_project,
-    writes=True,
 ))
 _register(Tool(
     "statistics",

@@ -21,8 +21,7 @@ QML_PATH = Path(__file__).with_name("qml") / "Main.qml"
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="叙事图原生工作台（Qt Quick）")
-    parser.add_argument("--projects-dir", type=Path, default=Path("data/graph-projects"), help="新图项目目录")
-    parser.add_argument("--project", help="启动后打开目录内现有图项目名")
+    parser.add_argument("--project", help="启动后打开这个工程包（.nproj 目录）")
     parser.add_argument("--render-log", type=Path, help="记录真实 Qt Quick 渲染后端及 Qt RHI 适配器日志")
     parser.add_argument("--qa-snapshot", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--qa-exit-after-seconds", type=float, help=argparse.SUPPRESS)
@@ -122,9 +121,9 @@ def main(argv: list[str] | None = None) -> int:
         record(f"qt:{category}:{getattr(mode, 'name', str(mode))}: {message}")
 
     qInstallMessageHandler(qt_message)
-    record(f"startup pid={os.getpid()} qml={QML_PATH} projects_dir={args.projects_dir.resolve()}")
+    record(f"startup pid={os.getpid()} qml={QML_PATH}")
     record(f"requested_backend={os.environ.get('QSG_RHI_BACKEND', '<Qt platform default>')}")
-    bridge = NativeBridge(args.projects_dir.resolve())
+    bridge = NativeBridge()
     # 慢操作写进日志：界面卡的时候，能看出是数据慢、界面慢，还是整体都慢。
     bridge.slowOperation.connect(lambda kind, ms: record(f"slow {kind} {ms}ms"))
     app.aboutToQuit.connect(bridge.close)

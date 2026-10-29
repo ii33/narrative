@@ -43,7 +43,7 @@ def test_the_catalog_is_read_only_and_comes_from_the_tool_table() -> None:
 
 
 def test_a_turn_can_call_a_tool_and_then_answer(tmp_path: Path) -> None:
-    project = _project(tmp_path / "chat.sqlite3")
+    project = _project(tmp_path / "chat.nproj")
     result = assistant.run_turn(
         _script(
             {"tool": "list_nodes", "args": {}},
@@ -61,7 +61,7 @@ def test_a_turn_can_call_a_tool_and_then_answer(tmp_path: Path) -> None:
 
 
 def test_a_write_tool_is_refused_not_executed(tmp_path: Path) -> None:
-    project = _project(tmp_path / "write.sqlite3")
+    project = _project(tmp_path / "write.nproj")
     before = tool_api.call("statistics", {}, project=project)["properties"]["value_records"]
     result = assistant.run_turn(
         _script(
@@ -80,7 +80,7 @@ def test_a_write_tool_is_refused_not_executed(tmp_path: Path) -> None:
 
 
 def test_a_broken_tool_call_comes_back_as_an_error(tmp_path: Path) -> None:
-    project = _project(tmp_path / "broken.sqlite3")
+    project = _project(tmp_path / "broken.nproj")
     result = assistant.run_turn(
         _script(
             {"tool": "get_node", "args": {"node_id": "P99"}},
@@ -95,7 +95,7 @@ def test_a_broken_tool_call_comes_back_as_an_error(tmp_path: Path) -> None:
 
 def test_a_plain_reply_is_taken_as_the_answer(tmp_path: Path) -> None:
     """模型不按 JSON 回（或者直接说话）时，不能把它当成工具调用。"""
-    project = _project(tmp_path / "plain.sqlite3")
+    project = _project(tmp_path / "plain.nproj")
     result = assistant.run_turn(
         lambda _instruction: "我不知道，图里还没有这条。",
         "有这条吗",
@@ -113,7 +113,7 @@ PNG = bytes.fromhex(
 
 def test_an_attached_image_goes_in_as_a_content_block(tmp_path: Path) -> None:
     """有图就发内容块：一段文字 + 一张图，而不是把路径写进正文。"""
-    project = _project(tmp_path / "image.sqlite3")
+    project = _project(tmp_path / "image.nproj")
     image = tmp_path / "ref.png"
     image.write_bytes(PNG)
     seen: dict = {}
@@ -132,7 +132,7 @@ def test_an_attached_image_goes_in_as_a_content_block(tmp_path: Path) -> None:
 
 
 def test_an_unreadable_attachment_falls_back_to_text(tmp_path: Path) -> None:
-    project = _project(tmp_path / "noimage.sqlite3")
+    project = _project(tmp_path / "noimage.nproj")
     note = tmp_path / "note.txt"
     note.write_text("不是图片", encoding="utf-8")
     seen: dict = {}
@@ -146,7 +146,7 @@ def test_an_unreadable_attachment_falls_back_to_text(tmp_path: Path) -> None:
 
 
 def test_the_loop_stops_at_the_step_limit(tmp_path: Path) -> None:
-    project = _project(tmp_path / "loop.sqlite3")
+    project = _project(tmp_path / "loop.nproj")
     result = assistant.run_turn(
         lambda _instruction: json.dumps({"tool": "list_nodes", "args": {}}),
         "一直查",

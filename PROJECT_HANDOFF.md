@@ -77,7 +77,7 @@ uv run narrative --db data/graph-projects/launch.sqlite3 ui
 
 ~~~powershell
 uv sync --extra desktop
-uv run narrative-desktop --projects-dir data/graph-projects
+uv run narrative-desktop
 ~~~
 
 也可启动 Windows 桌面脚本 start-desktop.cmd。项目 README 还列有 start.cmd、端口和数据库目录参数。

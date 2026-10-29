@@ -50,7 +50,7 @@ def _project(path: Path):
 
 
 def test_steps_follow_the_granularity(tmp_path: Path) -> None:
-    _ops, snapshot = _project(tmp_path / "steps.sqlite3")
+    _ops, snapshot = _project(tmp_path / "steps.nproj")
 
     assert [step["id"] for step in steps(snapshot, "scene")] == ["4", "7"]
     assert [step["id"] for step in steps(snapshot, "event")] == ["5", "6", "8"]
@@ -59,7 +59,7 @@ def test_steps_follow_the_granularity(tmp_path: Path) -> None:
 
 
 def test_a_scene_cuts_where_its_last_event_is(tmp_path: Path) -> None:
-    _ops, snapshot = _project(tmp_path / "anchor.sqlite3")
+    _ops, snapshot = _project(tmp_path / "anchor.nproj")
 
     cut = cut_for(snapshot, "4")
     # 场景 4 的最后一个事件是 6：读完场景＝读到事件 6。
@@ -75,7 +75,7 @@ def test_a_scene_cuts_where_its_last_event_is(tmp_path: Path) -> None:
 def test_related_nodes_of_a_scene_include_its_events(
     tmp_path: Path,
 ) -> None:
-    _ops, snapshot = _project(tmp_path / "related.sqlite3")
+    _ops, snapshot = _project(tmp_path / "related.nproj")
 
     # 场景自己 + 它包含的两个事件 + 两个事件里出现过的人。
     # 事件属于场景，所以「只看这一步的相关节点」不能把它们筛掉。
@@ -86,7 +86,7 @@ def test_related_nodes_of_a_scene_include_its_events(
 
 
 def test_the_list_obeys_the_cut_only_when_asked(tmp_path: Path) -> None:
-    _ops, snapshot = _project(tmp_path / "cut.sqlite3")
+    _ops, snapshot = _project(tmp_path / "cut.nproj")
 
     narrowed = browse_view(snapshot, cut_id="4", time_filter=True)
     # 读到事件 6（位置 10）：位置 20 的老周和第二个场景还没出现。
@@ -102,7 +102,7 @@ def test_the_list_obeys_the_cut_only_when_asked(tmp_path: Path) -> None:
 def test_counts_follow_the_other_conditions_but_not_the_type_filter(
     tmp_path: Path,
 ) -> None:
-    _ops, snapshot = _project(tmp_path / "counts.sqlite3")
+    _ops, snapshot = _project(tmp_path / "counts.nproj")
 
     by_type = browse_view(snapshot, node_type="person")
     assert [node["name"] for node in by_type["nodes"]] == ["林舟", "陈默", "老周"]
@@ -121,14 +121,14 @@ def test_counts_follow_the_other_conditions_but_not_the_type_filter(
 
 
 def test_query_matches_aliases(tmp_path: Path) -> None:
-    _ops, snapshot = _project(tmp_path / "alias.sqlite3")
+    _ops, snapshot = _project(tmp_path / "alias.nproj")
 
     assert [node["id"] for node in browse_view(snapshot, query="陈总")["nodes"]] == ["2"]
 
 
 def test_switching_granularity_keeps_the_reading_position(tmp_path: Path) -> None:
     """场景的切点是它的最后一个事件，事件的切点是包含它的场景——同一个位置，两种说法。"""
-    _ops, snapshot = _project(tmp_path / "alt.sqlite3")
+    _ops, snapshot = _project(tmp_path / "alt.nproj")
 
     assert step_for_granularity(snapshot, "4", "event") == "6"
     assert step_for_granularity(snapshot, "6", "scene") == "4"
@@ -155,7 +155,7 @@ def test_an_event_outside_every_scene_lands_on_the_scene_it_finished() -> None:
 
 
 def test_the_payload_carries_both_granularities_of_the_cut(tmp_path: Path) -> None:
-    ops, _snapshot = _project(tmp_path / "cutalt.sqlite3")
+    ops, _snapshot = _project(tmp_path / "cutalt.nproj")
 
     view = browse_view(ops.graph_snapshot(), cut_id="4")
     assert view["cut_alt"] == {"scene": "4", "event": "6"}

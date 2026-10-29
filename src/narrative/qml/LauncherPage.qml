@@ -18,37 +18,22 @@ Item {
     readonly property var effortOptions: ["不设置", "low", "medium", "high"]
 
     ListModel { id: projectRows }
-    // 目录里扫到的工程 + 打开过的外部工程，合成一张表。
-    property var catalogProjects: []
+    // 没有「工程目录」这回事：列表就是打开过的那些工程包。
     property var recentItems: []
+    // 新建工程放哪：由人选，默认家目录。
+    property string newProjectParent: bridge.homeDirectory()
 
     function rebuildProjectRows() {
         projectRows.clear()
-        var seen = ({})
-        for (var i = 0; i < catalogProjects.length; ++i) {
-            var row = catalogProjects[i]
-            seen[row.path] = true
-            projectRows.append({
-                path: row.path || "",
-                name: row.name || "",
-                title: row.title || "",
-                revision: row.revision || 0,
-                openable: row.openable === true,
-                statusText: row.statusText || "",
-                external: false
-            })
-        }
-        // 打开过的工程可能不在这个目录里；它照样属于「我的工程」。
-        for (var r = 0; r < recentItems.length; ++r) {
-            var item = recentItems[r]
-            if (seen[item.path]) continue
+        for (var i = 0; i < recentItems.length; ++i) {
+            var item = recentItems[i]
             projectRows.append({
                 path: item.path,
                 name: item.name,
                 title: item.title || item.name,
                 revision: 0,
                 openable: item.exists === true,
-                statusText: item.exists ? "外部" : "找不到了",
+                statusText: item.exists ? "工程包" : "找不到了",
                 external: true
             })
         }
@@ -57,7 +42,6 @@ Item {
     readonly property int projectCount: projectRows.count
 
     Component.onCompleted: {
-        bridge.refreshProjects()
         bridge.loadRecentProjects()
         bridge.loadGlobalSettings()
     }
@@ -123,25 +107,6 @@ Item {
         function onResultReady(kind, payload) {
             if (kind === "recent_projects") {
                 recentItems = payload.items || []
-                page.rebuildProjectRows()
-            } else if (kind === "projects" || kind === "projects_cleared") {
-                var rows = payload.projects || []
-                var catalog = []
-                for (var i = 0; i < rows.length; ++i) {
-                    var row = rows[i]
-                    var ok = row.status === "ready"
-                    catalog.push({
-                        path: row.path || "",
-                        name: row.name || "",
-                        title: row.title || "",
-                        revision: row.revision || 0,
-                        openable: ok,
-                        statusText: ok ? "可用"
-                            : row.status === "incompatible" ? ("不兼容 · v" + (row.version === null ? "?" : row.version))
-                            : "无法读取"
-                    })
-                }
-                catalogProjects = catalog
                 page.rebuildProjectRows()
                 if (kind === "projects_cleared") {
                     var cleared = (payload.removed || []).length + (payload.moved || []).length
@@ -234,36 +199,9 @@ Item {
                         // 否则右边缘会把最后一个字吃掉。
                         leftPadding: 14
                         rightPadding: 14
-                        onClicked: openMenu.open()
+                        onClicked: packageDialog.open()
+                    }
 
-                        Menu {
-                            id: openMenu
-                            y: parent.height
-                            MenuItem {
-                                text: "工程包（.nproj 文件夹）…"
-                                onTriggered: packageDialog.open()
-                            }
-                            MenuItem {
-                                text: "旧版工程文件（.sqlite3）…"
-                                onTriggered: legacyDialog.open()
-                            }
-                        }
-                    }
-                    Button {
-                        text: "刷新"
-                        flat: true
-                        leftPadding: 12
-                        rightPadding: 12
-                        onClicked: bridge.refreshProjects()
-                    }
-                    Button {
-                        objectName: "clearIncompatibleButton"
-                        text: "清除不兼容"
-                        flat: true
-                        leftPadding: 12
-                        rightPadding: 12
-                        onClicked: bridge.clearIncompatibleProjects()
-                    }
                 }
 
                 Rectangle {
@@ -357,7 +295,7 @@ Item {
                         Label {
                             anchors.centerIn: parent
                             visible: projectRows.count === 0
-                            text: "还没有工程。可以新建一个，或用上面的「打开工程…」选一个 .sqlite3。"
+                            text: "还没有工程。在下面新建一个，或点「打开工程…」选一个 .nproj 目录。"
                             color: t.muted
                         }
                     }
@@ -384,20 +322,48 @@ Item {
                                 font.weight: Font.DemiBold
                             }
                             Label {
-                                text: "每个工程一个独立数据库，互不影响。"
+                                text: "一个工程就是一个 .nproj 目录：库和资料在里面，缓存与会话在旁边。"
                                 color: t.muted
                                 font.pixelSize: 11
+                            }
+                            RowLayout {
+                                spacing: 6
+                                Label {
+                                    text: "位置"
+                                    color: t.muted
+                                    font.pixelSize: 11
+                                }
+                                Label {
+                                    objectName: "newProjectParent"
+                                    text: page.newProjectParent
+                                    color: t.ink
+                                    font.pixelSize: 11
+                                    elide: Text.ElideMiddle
+                                    Layout.maximumWidth: 300
+                                }
+                                Label {
+                                    text: "选择…"
+                                    color: t.accent
+                                    font.pixelSize: 11
+                                    font.underline: true
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: parentDialog.open()
+                                    }
+                                }
                             }
                         }
                         Item { Layout.fillWidth: true }
                         TextField {
                             id: nameField
                             objectName: "projectNameField"
-                            Layout.preferredWidth: 240
+                            Layout.preferredWidth: 200
                             placeholderText: "代号，例如 my-novel"
                             onAccepted: {
                                 if (nameField.text.trim().length > 0 && !app.busy)
-                                    bridge.createProject(nameField.text.trim())
+                                    bridge.createProjectAt(page.newProjectParent,
+                                                           nameField.text.trim())
                             }
                         }
                         Button {
@@ -405,7 +371,8 @@ Item {
                             text: app.busy ? "创建中…" : "创建并进入"
                             highlighted: true
                             enabled: !app.busy && nameField.text.trim().length > 0
-                            onClicked: bridge.createProject(nameField.text.trim())
+                            onClicked: bridge.createProjectAt(page.newProjectParent,
+                                                              nameField.text.trim())
                         }
                     }
                 }
@@ -566,18 +533,17 @@ Item {
         }
     }
 
-    // 打开工程：工程可以放在任何地方，不要求先搬进 projects 目录。
-    // 新工程是 .nproj 目录；旧版的裸 .sqlite3 仍然能开。
+    // 打开工程：工程是一个 .nproj 目录，放在哪都行。
     FolderDialog {
         id: packageDialog
-        title: "打开工程包（.nproj 文件夹）"
+        title: "打开工程（.nproj 文件夹）"
         onAccepted: bridge.openProjectUrl(selectedFolder)
     }
 
-    FileDialog {
-        id: legacyDialog
-        title: "打开旧版工程文件（.sqlite3）"
-        nameFilters: ["旧版工程 (*.sqlite3)", "所有文件 (*)"]
-        onAccepted: bridge.openProjectUrl(selectedFile)
+    // 新建工程放哪：没有默认工程目录，让用户选。
+    FolderDialog {
+        id: parentDialog
+        title: "新建工程放在哪个文件夹"
+        onAccepted: page.newProjectParent = bridge.urlToPath(selectedFolder)
     }
 }

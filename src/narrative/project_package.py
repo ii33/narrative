@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import shutil
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -43,7 +42,6 @@ class Layout:
     material: Path
     extraction: Path
     chats: Path
-    package: bool
 
     def asdict(self) -> dict:
         return {
@@ -52,7 +50,6 @@ class Layout:
             "material": str(self.material),
             "extraction": str(self.extraction),
             "chats": str(self.chats),
-            "package": self.package,
         }
 
 
@@ -70,44 +67,33 @@ def _package_layout(root: Path) -> Layout:
         material=root / "material",
         extraction=sibling / f"{root.stem}_extraction",
         chats=sibling / f"{root.stem}_chats",
-        package=True,
-    )
-
-
-def _loose_layout(db: Path) -> Layout:
-    parent = db.parent
-    stem = db.stem
-    return Layout(
-        root=parent,
-        db=db,
-        material=parent / f"{stem}_material",
-        extraction=parent / f"{stem}_extraction",
-        chats=parent / f"{stem}_chats",
-        package=False,
     )
 
 
 def layout(path: str | Path) -> Layout:
-    """工程在哪、库叫什么、三个目录在哪。目录、包目录、库文件都收。"""
+    """工程就是一个 `.nproj` 目录：库和资料在里面，缓存和会话在它旁边。
+
+    只认包。旧版那种「一个 `.sqlite3` + 三个同级目录」不再支持——它正是拷一个文件
+    就丢资料、丢会话的形态，留着只会让人继续那样存。
+    """
     target = Path(path)
     if target.is_dir():
         if target.suffix.lower() == PACKAGE_SUFFIX or (target / MANIFEST_NAME).is_file():
             return _package_layout(target)
         if (target / DB_NAME).is_file():
             return _package_layout(target)
-        found = sorted(target.glob("*.sqlite3"))
-        if len(found) == 1:
-            return layout(found[0])
-        if not found:
-            # 空目录：按包处理，库还没建。
+        if not any(target.iterdir()):
+            # 空目录：当成还没建库的包。
             return _package_layout(target)
-        raise ValueError(f"目录里有多个库，请指定是哪一个：{target}")
-    if not target.is_file():
-        # 还没建库的路径也认：资料和会话可以先于库存在。
-        return _loose_layout(target)
+        raise ValueError(f"这个目录不是工程包：{target}")
     if target.name == DB_NAME and (target.parent / MANIFEST_NAME).is_file():
         return _package_layout(target.parent)
-    return _loose_layout(target)
+    if target.suffix.lower() == PACKAGE_SUFFIX:
+        # 还不存在的包目录：建库时再创建。
+        return _package_layout(target)
+    if target.suffix.lower() == ".sqlite3":
+        raise ValueError("旧版单文件工程已不再支持：请把它放进 <名字>.nproj/ 再打开")
+    raise ValueError(f"工程是一个 .nproj 目录，这个路径不是：{target}")
 
 
 def write_manifest(
@@ -170,70 +156,5 @@ def manifest(layout_: Layout) -> dict:
         "version": VERSION,
         "title": meta["title"],
         "project_id": meta["project_id"],
-        "package": layout_.package,
         "parts": {name: (layout_.root / name).is_dir() for name in PARTS},
-    }
-
-
-def _move_db(db: Path, target: Path) -> None:
-    """库连同 WAL 一起搬：只搬主文件会丢掉还没合并的事务。"""
-    db.rename(target)
-    for suffix in ("-wal", "-shm"):
-        sidecar = db.with_name(db.name + suffix)
-        if sidecar.is_file():
-            sidecar.rename(target.with_name(target.name + suffix))
-
-
-def pack(
-    project: str | Path,
-    *,
-    dest: str | Path | None = None,
-    move: bool = True,
-) -> dict:
-    """把裸工程收成一个包。
-
-    默认搬家（同一块盘上是改目录项，瞬时完成）；`move=False` 复制一份留着原工程。
-    已经是包的话原样返回，不重复套一层。
-    """
-    current = layout(project)
-    if current.package:
-        return {"package": str(current.root), "moved": False, "note": "已经是工程包"}
-    root = Path(dest) if dest else current.db.with_name(current.db.stem + PACKAGE_SUFFIX)
-    if root.exists():
-        raise ValueError(f"目标已存在：{root}")
-    root.mkdir(parents=True)
-    target_db = root / DB_NAME
-    if move:
-        _move_db(current.db, target_db)
-    else:
-        # 复制用 sqlite 的备份口，WAL 里的内容一并带过去。
-        with contextlib.closing(sqlite3.connect(current.db)) as source:
-            with contextlib.closing(sqlite3.connect(target_db)) as target:
-                source.backup(target)
-    packed: list[str] = []
-    for name in PARTS:
-        source = getattr(current, name)
-        if not source.is_dir() or source == root / name:
-            continue
-        target = root / name
-        if move:
-            source.rename(target)
-        else:
-            shutil.copytree(source, target)
-        packed.append(name)
-    # 缓存和会话留在包旁边：`<名字>_extraction`、`<名字>_chats`。搬库时名字没变，
-    # 所以不用动它们；复制（move=False）时也不该把别人的会话复制一份。
-    meta = _meta(target_db)
-    payload = write_manifest(
-        root,
-        title=meta["title"],
-        project_id=meta["project_id"],
-        parts={name: name in packed for name in PARTS},
-    )
-    return {
-        "package": str(root),
-        "db": str(target_db),
-        "parts": packed,
-        "moved": move,
-        "title": payload["title"],
     }

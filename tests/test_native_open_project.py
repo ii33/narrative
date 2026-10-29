@@ -1,4 +1,8 @@
-"""工程可以放在任何地方：「打开工程…」走绝对路径，不要求先搬进 projects 目录。"""
+"""工程就是一个 .nproj 目录，放在哪都行——没有「工程目录」这回事。
+
+启动页的列表是「打开过的工程」，不是扫某个文件夹的结果。这组用例钉住：
+按绝对路径打开、按包打开、新建在指定位置、最近打开记得住、不认的东西明确报错。
+"""
 
 from __future__ import annotations
 
@@ -12,7 +16,6 @@ from PySide6.QtWidgets import QApplication
 
 from narrative.native_bridge import NativeBridge
 from narrative.project_catalog import create_graph_project
-from narrative.project_package import pack
 
 
 @pytest.fixture()
@@ -24,13 +27,13 @@ def app():
 def bridge(tmp_path: Path, app, monkeypatch):
     # 最近打开的记录存在全局设置库；测试不能碰用户真正的那一份。
     monkeypatch.setenv("NARRATIVE_PROVIDER_DB", str(tmp_path / "settings.sqlite3"))
-    return NativeBridge(tmp_path / "projects")
+    return NativeBridge()
 
 
-def _project(path: Path) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    create_graph_project(path)
-    return path
+def _package(tmp_path: Path, name: str = "book") -> Path:
+    package = tmp_path / f"{name}.nproj"
+    create_graph_project(package)
+    return package
 
 
 def _wait(app, results: list, kind: str, timeout: float = 20) -> dict:
@@ -44,41 +47,29 @@ def _wait(app, results: list, kind: str, timeout: float = 20) -> dict:
     raise TimeoutError(kind)
 
 
-def test_a_project_outside_the_catalog_opens_by_absolute_path(bridge, app, tmp_path: Path) -> None:
-    outside = _project(tmp_path / "elsewhere" / "trial.sqlite3")
-    results: list[tuple[str, dict]] = []
-    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
-
-    bridge.openProject(str(outside))
-    payload = _wait(app, results, "project")
-
-    assert payload["project"]["path"] == str(outside)
-
-
-def test_a_file_url_opens_too(bridge, app, tmp_path: Path) -> None:
-    """QML 的 FileDialog 给的是 file:///…，桥接要认。"""
-    outside = _project(tmp_path / "deep" / "one.sqlite3")
-    results: list[tuple[str, dict]] = []
-    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
-
-    bridge.openProjectUrl(QUrl.fromLocalFile(str(outside)).toString())
-    payload = _wait(app, results, "project")
-    assert payload["project"]["path"] == str(outside)
-
-
-def test_a_package_opens_by_its_directory(bridge, app, tmp_path: Path) -> None:
-    loose = _project(tmp_path / "loose" / "book.sqlite3")
-    package = Path(pack(loose)["package"])
+def test_a_package_opens_by_absolute_path(bridge, app, tmp_path: Path) -> None:
+    package = _package(tmp_path)
     results: list[tuple[str, dict]] = []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
 
     bridge.openProject(str(package))
     payload = _wait(app, results, "project")
-    # 报出来的是包里的库；包本身是它的上一级。
+
     assert Path(payload["project"]["path"]).parent == package
 
 
-def test_something_that_is_not_a_project_says_so(bridge, app, tmp_path: Path) -> None:
+def test_a_file_url_opens_too(bridge, app, tmp_path: Path) -> None:
+    """QML 的 FolderDialog 给的是 file:///…，桥接要认。"""
+    package = _package(tmp_path, "deep")
+    results: list[tuple[str, dict]] = []
+    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
+
+    bridge.openProjectUrl(QUrl.fromLocalFile(str(package)).toString())
+    payload = _wait(app, results, "project")
+    assert Path(payload["project"]["path"]).parent == package
+
+
+def test_something_that_is_not_a_package_says_so(bridge, app, tmp_path: Path) -> None:
     junk = tmp_path / "notes.txt"
     junk.write_text("not a project", encoding="utf-8")
     errors: list[tuple[str, str]] = []
@@ -86,21 +77,46 @@ def test_something_that_is_not_a_project_says_so(bridge, app, tmp_path: Path) ->
 
     bridge.openProject(str(junk))
     app.processEvents()
-    assert errors and "不是工程" in errors[0][1]
+    assert errors and ".nproj" in errors[0][1]
 
 
-def test_a_bare_name_still_only_resolves_inside_the_catalog(bridge, app, tmp_path: Path) -> None:
+def test_a_bare_relative_name_is_refused(bridge, app) -> None:
+    """没有工程目录可解析，只写名字没有意义。"""
     errors: list[tuple[str, str]] = []
     bridge.errorOccurred.connect(lambda kind, message: errors.append((kind, message)))
 
-    bridge.openProject("../elsewhere/trial")
+    bridge.openProject("book")
     app.processEvents()
-    assert errors and "图项目目录" in errors[0][1]
+    assert errors and "完整路径" in errors[0][1]
+
+
+def test_a_new_project_goes_where_it_is_told(bridge, app, tmp_path: Path) -> None:
+    results: list[tuple[str, dict]] = []
+    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
+
+    bridge.createProjectAt(str(tmp_path), "新工程")
+    _wait(app, results, "project")
+
+    package = tmp_path / "新工程.nproj"
+    assert package.is_dir()
+    assert (package / "graph.sqlite3").is_file()
+    manifest = json.loads((package / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["format"] == "narrative-project"
+    assert manifest["title"]
+
+
+def test_a_new_project_needs_a_real_folder(bridge, app, tmp_path: Path) -> None:
+    errors: list[tuple[str, str]] = []
+    bridge.errorOccurred.connect(lambda kind, message: errors.append((kind, message)))
+
+    bridge.createProjectAt(str(tmp_path / "missing"), "x")
+    app.processEvents()
+    assert errors and "文件夹" in errors[0][1]
 
 
 def test_recent_projects_remember_what_was_opened(bridge, app, tmp_path: Path) -> None:
-    first = _project(tmp_path / "elsewhere" / "one.sqlite3")
-    second = _project(tmp_path / "elsewhere" / "two.sqlite3")
+    first = _package(tmp_path, "one")
+    second = _package(tmp_path, "two")
     results: list[tuple[str, dict]] = []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
 
@@ -118,14 +134,14 @@ def test_recent_projects_remember_what_was_opened(bridge, app, tmp_path: Path) -
 
 
 def test_forgetting_a_recent_project_drops_it(bridge, app, tmp_path: Path) -> None:
-    path = _project(tmp_path / "elsewhere" / "gone.sqlite3")
+    package = _package(tmp_path, "gone")
     results: list[tuple[str, dict]] = []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
-    bridge.openProject(str(path))
+    bridge.openProject(str(package))
     _wait(app, results, "project")
 
     del results[:]
-    bridge.forgetRecentProject(str(path))
+    bridge.forgetRecentProject(str(package))
     items = _wait(app, results, "recent_projects")["items"]
     assert items == []
 
@@ -133,46 +149,14 @@ def test_forgetting_a_recent_project_drops_it(bridge, app, tmp_path: Path) -> No
 def test_a_recent_project_that_moved_is_listed_but_marked_missing(
     bridge, app, tmp_path: Path
 ) -> None:
-    path = _project(tmp_path / "elsewhere" / "moved.sqlite3")
+    package = _package(tmp_path, "moved")
     results: list[tuple[str, dict]] = []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
-    bridge.openProject(str(path))
+    bridge.openProject(str(package))
     _wait(app, results, "project")
 
-    path.unlink()
+    (package / "graph.sqlite3").unlink()
     del results[:]
     bridge.loadRecentProjects()
     items = _wait(app, results, "recent_projects")["items"]
     assert [row["exists"] for row in items] == [False]
-
-
-def test_a_new_project_is_a_package(bridge, app, tmp_path: Path) -> None:
-    """新工程是一个 .nproj 目录：库、资料、缓存、会话都装在里头，拷一个目录就搬走了。"""
-    results: list[tuple[str, dict]] = []
-    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
-
-    bridge.createProject("新工程")
-    _wait(app, results, "project")
-
-    package = tmp_path / "projects" / "新工程.nproj"
-    assert package.is_dir()
-    assert (package / "graph.sqlite3").is_file()
-    manifest = json.loads((package / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["format"] == "narrative-project"
-    assert manifest["title"]
-    # 裸库不再产生：新建只留一个包目录。
-    assert not (tmp_path / "projects" / "新工程.sqlite3").exists()
-
-
-def test_a_new_project_shows_up_in_the_catalog(bridge, app, tmp_path: Path) -> None:
-    results: list[tuple[str, dict]] = []
-    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
-
-    bridge.createProject("上架的")
-    _wait(app, results, "project")
-
-    del results[:]
-    bridge.refreshProjects()
-    listed = _wait(app, results, "projects")["projects"]
-    assert [row["name"] for row in listed] == ["上架的"]
-    assert listed[0]["status"] == "ready"

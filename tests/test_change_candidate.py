@@ -11,7 +11,7 @@ from narrative.operations import Operations
 
 
 def _project(tmp_path: Path):
-    ops = Operations.create_graph_project(tmp_path / "graph.sqlite3")
+    ops = Operations.create_graph_project(tmp_path / "graph.nproj")
     ops.import_source("t", "甲把信交给乙。")
     return ops
 

@@ -67,7 +67,7 @@ def _household(ops) -> None:
 
 
 def test_a_rename_reads_old_records_under_the_new_name(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "rename.sqlite3")
+    ops = _project(tmp_path / "rename.nproj")
     _household(ops)
 
     result = ops.property_rename(["family_background"], "出身")
@@ -92,7 +92,7 @@ def test_a_rename_reads_old_records_under_the_new_name(tmp_path: Path) -> None:
 
 
 def test_a_rename_does_not_touch_other_aspects(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "others.sqlite3")
+    ops = _project(tmp_path / "others.nproj")
     _household(ops)
     ops.property_rename(["family_background"], "出身")
 
@@ -101,7 +101,7 @@ def test_a_rename_does_not_touch_other_aspects(tmp_path: Path) -> None:
 
 
 def test_renaming_a_line_moves_every_spelling(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "line.sqlite3")
+    ops = _project(tmp_path / "line.nproj")
     _accept(ops, _definitions("cultivation", "cultivation_stage") + [
         _value("v1", "2", "cultivation", "灵寂期"),
         _value("v2", "2", "cultivation_stage", "辟谷期"),
@@ -117,7 +117,7 @@ def test_renaming_a_line_moves_every_spelling(tmp_path: Path) -> None:
 
 
 def test_renaming_twice_follows_the_chain(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "chain.sqlite3")
+    ops = _project(tmp_path / "chain.nproj")
     _household(ops)
     ops.property_rename(["family_background"], "出身")
     # 改过的名字还能再改：链条要一路跟到底。
@@ -130,7 +130,7 @@ def test_renaming_twice_follows_the_chain(tmp_path: Path) -> None:
 
 
 def test_retracting_a_rename_restores_the_old_name(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "undo.sqlite3")
+    ops = _project(tmp_path / "undo.nproj")
     _household(ops)
     ops.property_rename(["family_background"], "出身")
 
@@ -148,7 +148,7 @@ def test_retracting_a_rename_restores_the_old_name(tmp_path: Path) -> None:
 
 
 def test_a_rename_refuses_a_name_that_another_aspect_owns(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "clash.sqlite3")
+    ops = _project(tmp_path / "clash.nproj")
     _household(ops)
 
     # 目标是另一个方面的名字：那是合并，不该悄悄发生。
@@ -164,7 +164,7 @@ def test_a_rename_refuses_a_name_that_another_aspect_owns(tmp_path: Path) -> Non
 
 def test_a_rename_onto_one_of_the_row_names_is_allowed(tmp_path: Path) -> None:
     """整行两个名字时，改到其中一个上就是把这个方面统一成那个名字。"""
-    ops = _project(tmp_path / "consolidate.sqlite3")
+    ops = _project(tmp_path / "consolidate.nproj")
     _accept(ops, _definitions("cultivation", "cultivation_stage") + [
         _value("v1", "2", "cultivation", "灵寂期"),
         _value("v2", "2", "cultivation_stage", "辟谷期"),
@@ -176,7 +176,7 @@ def test_a_rename_onto_one_of_the_row_names_is_allowed(tmp_path: Path) -> None:
 
 
 def test_the_audit_sees_one_name_after_a_rename(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "audit.sqlite3")
+    ops = _project(tmp_path / "audit.nproj")
     _household(ops)
     ops.property_rename(["family_background"], "出身")
 
@@ -189,7 +189,7 @@ def test_the_audit_sees_one_name_after_a_rename(tmp_path: Path) -> None:
 
 def test_a_new_value_under_the_new_name_supersedes_the_old_one(tmp_path: Path) -> None:
     """改名之后补的披露要和改名前的接上，否则同一条线会出现两个当前值。"""
-    ops = _project(tmp_path / "supersede.sqlite3")
+    ops = _project(tmp_path / "supersede.nproj")
     _household(ops)
     ops.property_rename(["family_background"], "出身")
 
@@ -271,7 +271,7 @@ def test_a_rename_cannot_form_a_cycle() -> None:
 
 def test_the_inbound_side_reads_the_new_name(tmp_path: Path) -> None:
     """反向引用用的是同一份记录，名字也得跟着改。"""
-    ops = _project(tmp_path / "inbound.sqlite3")
+    ops = _project(tmp_path / "inbound.nproj")
     _accept(ops, [
         {"kind": "property_definition", "id": "leader", "value_type": "node",
          "cardinality": "one", "persistence": "until_changed"},

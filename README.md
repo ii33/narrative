@@ -61,15 +61,15 @@ narrative-mcp --project P                      # MCP over stdio
 
 ```powershell
 uv sync --extra desktop
-uv run narrative-desktop --projects-dir data/graph-projects
+uv run narrative-desktop
 ```
 
 Windows 也可在依赖安装后双击根目录 `start-desktop.cmd`；它会打开可见的 Qt 窗口并在后台记录渲染诊断。首次安装或升级桌面依赖仍需在项目目录运行 `uv sync --extra desktop`。启动脚本要求 `.venv` 中已有 `pythonw.exe`，缺少时会提示先安装依赖。
 
-也可在启动时打开项目目录中的现有工程：
+也可在启动时直接打开某个工程包：
 
 ```powershell
-uv run narrative-desktop --projects-dir data/graph-projects --project my-novel
+uv run narrative-desktop --project D:/小说/my-novel.nproj
 ```
 
 窗口分两级：
@@ -78,7 +78,8 @@ uv run narrative-desktop --projects-dir data/graph-projects --project my-novel
 启动 → 工程列表（+ 全局设置） → 打开工程 → 操作界面
 ```
 
-**工程列表**是唯一入口：列出目录下的工程（可用 / 不兼容 / 无法读取）、新建工程、清除不兼容文件，
+**工程列表**是唯一入口：列出打开过的工程包（打不开的标「找不到了」，可以移除）、「打开工程…」选一个
+`.nproj` 目录、新建工程时选一个位置；
 右侧是**全局设置**——模型服务地址、模型 ID、密钥变量、推理强度、token 预算与超时。
 全局设置存在应用级配置库（默认 `~/.narrative/provider-settings.sqlite3`），不进工程库；
 工程没有单独配置时沿用全局值。
@@ -153,9 +154,8 @@ runtime-bin 两个包）。0.2 起运行时改说 Anthropic Messages（`POST /v1
 包里只放「这份作品」：库和资料。缓存重跑就有，会话是聊天记录——两者都在包旁边，
 跟着包一起被复制、备份、发给别人是不合适的。
 
-`narrative pack --project <工程.sqlite3>` 收包（默认搬家，`pack_project` 工具里 `move=false` 是复制）。
-两种布局都认：`--project` 给裸库、给包目录、给包里的 `graph.sqlite3` 都行，读写路径是同一套——
-包里包外的区别只在根目录在哪。裸工程照旧能开，不必先打包。
+工程只有这一种形态：新建时选一个位置，就在那里建出 `<名字>.nproj/`。没有「工程目录」要维护，
+启动页列的是你打开过的那些包；`--project` 给包目录、或给包里的 `graph.sqlite3` 都行，读写是同一套路径。
 
 属性分类的完整约定见 [`docs/PROPERTY_CATEGORIES.md`](docs/PROPERTY_CATEGORIES.md)：
 大类只管显示位置，与 `scope`（世界／认知／声称）各管一件事；移动分类不改变取值、

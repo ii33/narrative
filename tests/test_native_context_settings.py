@@ -10,7 +10,7 @@ from narrative.operations import Operations
 
 
 def test_provider_settings_round_trip_and_provider_switch(tmp_path: Path) -> None:
-    ops = Operations.create_graph_project(tmp_path / "settings.sqlite3")
+    ops = Operations.create_graph_project(tmp_path / "settings.nproj")
 
     saved = ops.save_provider_profile({
         "provider": "ark",
@@ -45,7 +45,7 @@ def test_provider_settings_round_trip_and_provider_switch(tmp_path: Path) -> Non
 
 
 def test_provider_settings_reject_reserves_above_the_window(tmp_path: Path) -> None:
-    ops = Operations.create_graph_project(tmp_path / "invalid.sqlite3")
+    ops = Operations.create_graph_project(tmp_path / "invalid.nproj")
 
     with pytest.raises(ValueError, match="有效输出预留"):
         ops.save_provider_profile({
@@ -57,7 +57,7 @@ def test_provider_settings_reject_reserves_above_the_window(tmp_path: Path) -> N
 
 
 def test_provider_settings_require_exact_integers(tmp_path: Path) -> None:
-    ops = Operations.create_graph_project(tmp_path / "floats.sqlite3")
+    ops = Operations.create_graph_project(tmp_path / "floats.nproj")
 
     with pytest.raises(ValueError):
         ops.save_provider_profile({"provider": "ark", "context_window": 1.5})

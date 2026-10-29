@@ -21,7 +21,7 @@ POLICY = {
 
 @pytest.mark.parametrize("graph", [True, False])
 def test_profiles_roundtrip_context_fields_and_preserve_explicit_old_caps(tmp_path, graph):
-    path = tmp_path / "profiles.sqlite3"
+    path = tmp_path / "profiles.nproj"
     ops = GraphOperations(path, create=True)
     saved = ops.save_harness_settings({"provider": "ark", "max_tokens": 16384, **POLICY})
     ops.save_harness_settings({"provider": "openai", "model": "account-model"})
@@ -40,7 +40,7 @@ def test_profiles_roundtrip_context_fields_and_preserve_explicit_old_caps(tmp_pa
 
 
 def test_graph_schema_lists_only_node_object_kinds(tmp_path):
-    ops = GraphOperations(tmp_path / "schema.sqlite3", create=True)
+    ops = GraphOperations(tmp_path / "schema.nproj", create=True)
     schema = ops.graph_schema()
     assert schema["object_kinds"] == ["node", "context", "timeline", "source_order"]
     assert set(schema["fields"]) == {"node", "context", "timeline", "source_order"}
@@ -89,7 +89,7 @@ def test_cli_forwards_context_flags_through_operations(monkeypatch, capsys, comm
 
 
 def test_invalid_task_output_override_fails_before_runner_key_or_run_creation(tmp_path, monkeypatch):
-    ops = GraphOperations(tmp_path / "invalid.sqlite3", create=True)
+    ops = GraphOperations(tmp_path / "invalid.nproj", create=True)
     sid = ops.import_source("短文", "甲来了。")
     ops.save_harness_settings({
         "provider": "ark", "model": "test-model", "max_tokens": 200,
@@ -108,7 +108,7 @@ def test_invalid_task_output_override_fails_before_runner_key_or_run_creation(tm
 
 
 def test_graph_agent_persists_context_compaction_and_every_actual_request(tmp_path, monkeypatch):
-    ops = GraphOperations(tmp_path / "metadata.sqlite3", create=True)
+    ops = GraphOperations(tmp_path / "metadata.nproj", create=True)
     sid = ops.import_source("短文", "甲来了。")
     calls = []
     model_requests = [

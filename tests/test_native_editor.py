@@ -41,7 +41,7 @@ def workspace(tmp_path: Path):
     """一个人物，一条属性上有两条一模一样的披露（不同事件）。"""
     app = QApplication.instance() or QApplication([])
     assert isinstance(app, QApplication)
-    project = tmp_path / "editor.sqlite3"
+    project = tmp_path / "editor.nproj"
     ops = Operations.create_graph_project(project)
     source = ops.import_source("第一章", "林舟是总经理。林舟还是总经理。")
     candidate = ops.graph_propose(
@@ -73,7 +73,7 @@ def workspace(tmp_path: Path):
     )
     ops.property_accept(property_candidate, 1)
 
-    bridge = NativeBridge(tmp_path)
+    bridge = NativeBridge()
     results: list[tuple[str, dict]] = []
     errors: list[tuple[str, str]] = []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))

@@ -51,7 +51,7 @@ def _project(path: Path) -> Path:
 
 @pytest.fixture()
 def project(tmp_path: Path) -> Path:
-    return _project(tmp_path / "tools.sqlite3")
+    return _project(tmp_path / "tools.nproj")
 
 
 def test_the_tool_list_describes_every_tool() -> None:
@@ -252,7 +252,7 @@ PROPOSAL = {
 
 def test_extract_build_computes_the_candidate_without_writing(tmp_path: Path) -> None:
     """落库这一步是纯计算：编号、锚点都在这里定，但图一动不动。"""
-    project, source_id = _fresh_project(tmp_path / "build.sqlite3")
+    project, source_id = _fresh_project(tmp_path / "build.nproj")
     text = "林舟推门进来。老周笑了。"
     _seed_extraction(project, source_id, text, PROPOSAL)
 
@@ -280,7 +280,7 @@ def test_extract_build_computes_the_candidate_without_writing(tmp_path: Path) ->
 
 
 def test_extract_commit_makes_a_pending_candidate_only(tmp_path: Path) -> None:
-    project, source_id = _fresh_project(tmp_path / "commit.sqlite3")
+    project, source_id = _fresh_project(tmp_path / "commit.nproj")
     _seed_extraction(project, source_id, "林舟推门进来。老周笑了。", PROPOSAL)
 
     before = tool_api.call("project_info", {}, project=project)["project"]["revision"]
@@ -300,7 +300,7 @@ def test_extract_commit_makes_a_pending_candidate_only(tmp_path: Path) -> None:
 
 
 def test_extract_build_needs_a_proposal_first(tmp_path: Path) -> None:
-    project, source_id = _fresh_project(tmp_path / "empty.sqlite3")
+    project, source_id = _fresh_project(tmp_path / "empty.nproj")
     with pytest.raises(tool_api.ToolError, match="extract_propose"):
         tool_api.call("extract_build", {"source_id": source_id}, project=project)
 

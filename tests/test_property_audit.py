@@ -126,7 +126,7 @@ def test_unused_definition_is_an_info_not_an_error() -> None:
 
 
 def test_audit_can_be_limited_to_the_nodes_of_one_extraction(tmp_path: Path) -> None:
-    ops = create_graph_project(tmp_path / "audit.sqlite3")
+    ops = create_graph_project(tmp_path / "audit.nproj")
     ops.graph_accept(
         ops.graph_propose(
             [

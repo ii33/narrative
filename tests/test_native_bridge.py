@@ -12,7 +12,7 @@ from narrative.operations import Operations
 
 def test_bridge_project_source_review_and_incremental_canvas(tmp_path) -> None:
     app = QApplication.instance() or QApplication([])
-    bridge = NativeBridge(tmp_path)
+    bridge = NativeBridge()
     results: list[tuple[str, dict]] = []
     errors: list[tuple[str, str]] = []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
@@ -31,7 +31,7 @@ def test_bridge_project_source_review_and_incremental_canvas(tmp_path) -> None:
         return results[-1][1]
 
     try:
-        project = invoke("project", lambda: bridge.createProject("native-test"))
+        project = invoke("project", lambda: bridge.createProjectAt(str(tmp_path), "native-test"))
         assert project["project"]["revision"] >= 0
         ark = invoke("provider", bridge.loadProviderProfile)["profile"]
         invoke("provider", lambda: bridge.saveProviderProfile(ark | {"model": "saved-ark-model"}))
@@ -95,7 +95,7 @@ def test_bridge_query_epoch_discards_slow_filter_and_preserves_revision_zero(tmp
     from narrative.graph_operations import GraphOperations
 
     app = QApplication.instance() or QApplication([])
-    bridge = NativeBridge(tmp_path)
+    bridge = NativeBridge()
     results, errors = [], []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
     bridge.errorOccurred.connect(lambda kind, message: errors.append((kind, message)))
@@ -119,7 +119,7 @@ def test_bridge_query_epoch_discards_slow_filter_and_preserves_revision_zero(tmp
         assert condition(), errors
 
     try:
-        bridge.createProject("epoch")
+        bridge.createProjectAt(str(tmp_path), "epoch")
         until(lambda: any(k == "project" for k, _ in results))
         bridge.loadGraphView({"node_types": ["person"]})
         assert started.wait(3)
@@ -147,7 +147,7 @@ def test_bridge_compare_and_temporal_candidate_call_operations(tmp_path, monkeyp
     from narrative.graph_operations import GraphOperations
 
     app = QApplication.instance() or QApplication([])
-    bridge = NativeBridge(tmp_path)
+    bridge = NativeBridge()
     results: list[tuple[str, dict]] = []
     errors: list[tuple[str, str]] = []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
@@ -186,7 +186,7 @@ def test_bridge_compare_and_temporal_candidate_call_operations(tmp_path, monkeyp
         return results[-1][1]
 
     try:
-        invoke("project", lambda: bridge.createProject("compare-test"))
+        invoke("project", lambda: bridge.createProjectAt(str(tmp_path), "compare-test"))
         compared = invoke("event_compare", lambda: bridge.compareEvents("e1", "e2"))
         assert compared["relation"] == "before"
         assert compared["assertion_ids"] == ["t1"]
@@ -204,7 +204,7 @@ def test_bridge_compare_and_temporal_candidate_call_operations(tmp_path, monkeyp
 
 def test_bridge_disclosure_query_and_change_candidates(tmp_path) -> None:
     app = QApplication.instance() or QApplication([])
-    bridge = NativeBridge(tmp_path)
+    bridge = NativeBridge()
     results: list[tuple[str, dict]] = []
     errors: list[tuple[str, str]] = []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
@@ -223,7 +223,7 @@ def test_bridge_disclosure_query_and_change_candidates(tmp_path) -> None:
         return results[-1][1]
 
     try:
-        invoke("project", lambda: bridge.createProject("disclosure-test"))
+        invoke("project", lambda: bridge.createProjectAt(str(tmp_path), "disclosure-test"))
         imported = invoke("source_imported", lambda: bridge.importSource("短章", "林舟皮肤黝黑。"))
         source_id = imported["source_id"]
         ops = Operations.open_graph_project(tmp_path / "disclosure-test.nproj")
@@ -262,7 +262,7 @@ def test_bridge_disclosure_query_and_change_candidates(tmp_path) -> None:
 def test_bridge_revises_node_type_and_retracts(tmp_path) -> None:
     """Type correction and retraction must be reachable from the UI, not scripts."""
     app = QApplication.instance() or QApplication([])
-    bridge = NativeBridge(tmp_path)
+    bridge = NativeBridge()
     results: list[tuple[str, dict]] = []
     errors: list[tuple[str, str]] = []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
@@ -281,7 +281,7 @@ def test_bridge_revises_node_type_and_retracts(tmp_path) -> None:
         return results[-1][1]
 
     try:
-        invoke("project", lambda: bridge.createProject("node-edit"))
+        invoke("project", lambda: bridge.createProjectAt(str(tmp_path), "node-edit"))
         invoke("source_imported", lambda: bridge.importSource("短章", "甲出场了。"))
         ops = Operations.open_graph_project(tmp_path / "node-edit.nproj")
         candidate = ops.change_propose(
@@ -334,7 +334,7 @@ def test_a_broken_slow_report_does_not_swallow_the_result(tmp_path) -> None:
     看起来就是「连工程列表都加载不出来」。
     """
     app = QApplication.instance() or QApplication([])
-    bridge = NativeBridge(tmp_path)
+    bridge = NativeBridge()
     results: list[str] = []
     bridge.resultReady.connect(lambda kind, payload: results.append(kind))
 
@@ -357,7 +357,7 @@ def test_a_broken_slow_report_does_not_swallow_the_result(tmp_path) -> None:
 def test_a_lost_result_does_not_wedge_the_window(tmp_path) -> None:
     """结果永远不回来时，界面不能一直停在「处理中」：下一次操作前把它放弃掉。"""
     app = QApplication.instance() or QApplication([])
-    bridge = NativeBridge(tmp_path)
+    bridge = NativeBridge()
     bridge.STALE_AFTER_SECONDS = 0.2
     busy: list[bool] = []
     errors: list[tuple[str, str]] = []

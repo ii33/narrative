@@ -55,7 +55,7 @@ def _link(assertion_id, evidence_id):
 
 
 def test_graph_review_context_time_and_as_of(tmp_path):
-    path = tmp_path / "new.sqlite3"
+    path = tmp_path / "new.nproj"
     ops = Operations.create_graph_project(path)
     source_id = ops.import_source("一章", "甲在码头送别乙。甲说钥匙丢了。后来甲把钥匙交给乙。")
     before = ops.graph_project_info()["revision"]
@@ -124,11 +124,11 @@ def test_graph_review_context_time_and_as_of(tmp_path):
     # Reading-position evaluation only; story-time cuts are out of scope here.
     assert ops.property_state("key", "holder")["state"] == {"kind": "known", "value": "p3"}
     with pytest.raises(ValueError, match="不存在"):
-        Operations.open_graph_project(tmp_path / "old.sqlite3")
+        Operations.open_graph_project(tmp_path / "old.nproj")
 
 
 def test_graph_temporal_cycle_missing_reference_and_shared_evidence(tmp_path):
-    ops = Operations.create_graph_project(tmp_path / "p.sqlite3")
+    ops = Operations.create_graph_project(tmp_path / "p.nproj")
     source_id = ops.import_source("正文", "先开门，后关门。")
     base = [
         {"kind": "node", "id": "e1", "node_type": "event", "name": "开门"},
@@ -156,7 +156,7 @@ def test_graph_temporal_cycle_missing_reference_and_shared_evidence(tmp_path):
 
 
 def test_graph_refuses_legacy_database_without_editing_it(tmp_path):
-    path = tmp_path / "old.sqlite3"
+    path = tmp_path / "old.nproj"
     with sqlite3.connect(path) as db:
         db.execute("PRAGMA user_version=3")
     with pytest.raises(ValueError, match="v4"):
@@ -166,7 +166,7 @@ def test_graph_refuses_legacy_database_without_editing_it(tmp_path):
 
 
 def test_graph_event_cut_partial_order_and_dependency_revision(tmp_path):
-    ops = Operations.create_graph_project(tmp_path / "relative.sqlite3")
+    ops = Operations.create_graph_project(tmp_path / "relative.nproj")
     sid = ops.import_source("交接", "甲把钥匙交给乙。随后乙开门。最后乙锁门。")
     q = _evidence(ops, sid, "甲把钥匙交给乙", "q")
     base = [
@@ -225,7 +225,7 @@ def test_graph_event_cut_partial_order_and_dependency_revision(tmp_path):
 
 
 def test_graph_source_order_is_explicit_and_unique(tmp_path):
-    ops = Operations.create_graph_project(tmp_path / "order.sqlite3")
+    ops = Operations.create_graph_project(tmp_path / "order.nproj")
     first = ops.import_source("甲章", "甲先发现钥匙。")
     second = ops.import_source("乙章", "乙后来得知。")
     revision = ops.graph_project_info()["revision"]
@@ -238,7 +238,7 @@ def test_graph_source_order_is_explicit_and_unique(tmp_path):
 
 
 def test_graph_branch_and_claim_are_not_promoted_to_canon_world(tmp_path):
-    ops = Operations.create_graph_project(tmp_path / "contexts.sqlite3")
+    ops = Operations.create_graph_project(tmp_path / "contexts.nproj")
     sid = ops.import_source("分支", "甲说钥匙在乙手里；假设甲仍持有。")
     base = [
         {"kind": "node", "id": "key", "node_type": "item", "name": "钥匙"},

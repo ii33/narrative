@@ -13,9 +13,9 @@ from narrative.project_catalog import create_graph_project
 
 def _bridge(tmp_path: Path):
     app = QApplication.instance() or QApplication([])
-    project = tmp_path / "chat.sqlite3"
+    project = tmp_path / "chat.nproj"
     create_graph_project(project)
-    bridge = NativeBridge(tmp_path)
+    bridge = NativeBridge()
     results: list[tuple[str, dict]] = []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
     return app, bridge, results, project

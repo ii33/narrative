@@ -11,7 +11,7 @@ from narrative.chat_store import ChatStore
 
 @pytest.fixture()
 def store(tmp_path: Path) -> ChatStore:
-    return ChatStore(tmp_path / "book.sqlite3")
+    return ChatStore(tmp_path / "book.nproj")
 
 
 def test_a_new_chat_starts_empty_and_titled(store: ChatStore) -> None:

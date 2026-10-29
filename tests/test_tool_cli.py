@@ -45,7 +45,7 @@ def test_every_alias_points_at_a_real_tool() -> None:
 
 
 def test_the_material_aliases_reach_the_same_answers(capsys, tmp_path: Path) -> None:
-    project = _project(tmp_path / "cli-material.sqlite3")
+    project = _project(tmp_path / "cli-material.nproj")
     assert tool_cli.main([
         "add-material", "1", "青衫少年", "--detail", "洗得发白的青衫",
         "--project", str(project), "--json",
@@ -65,7 +65,7 @@ def test_the_material_aliases_reach_the_same_answers(capsys, tmp_path: Path) -> 
 
 
 def test_generic_call_with_json(capsys, tmp_path: Path) -> None:
-    project = _project(tmp_path / "cli.sqlite3")
+    project = _project(tmp_path / "cli.nproj")
     code = tool_cli.main([
         "tool", "call", "get_node", '{"node_id": "1"}', "--project", str(project),
     ])
@@ -74,14 +74,14 @@ def test_generic_call_with_json(capsys, tmp_path: Path) -> None:
 
 
 def test_named_alias_reads_a_node(capsys, tmp_path: Path) -> None:
-    project = _project(tmp_path / "cli-node.sqlite3")
+    project = _project(tmp_path / "cli-node.nproj")
     assert tool_cli.main(["node", "1", "--project", str(project)]) == 0
     printed = capsys.readouterr().out
     assert "林舟" in printed and "person" in printed
 
 
 def test_named_alias_writes_a_value(capsys, tmp_path: Path) -> None:
-    project = _project(tmp_path / "cli-write.sqlite3")
+    project = _project(tmp_path / "cli-write.nproj")
     assert tool_cli.main([
         "add-property", "1", "age", "二十九岁", "2", "--project", str(project),
     ]) == 0
@@ -92,6 +92,6 @@ def test_named_alias_writes_a_value(capsys, tmp_path: Path) -> None:
 
 
 def test_a_bad_tool_exits_with_a_message(capsys, tmp_path: Path) -> None:
-    project = _project(tmp_path / "cli-bad.sqlite3")
+    project = _project(tmp_path / "cli-bad.nproj")
     assert tool_cli.main(["tool", "call", "nope", "{}", "--project", str(project)]) == 2
     assert "nope" in capsys.readouterr().err

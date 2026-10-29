@@ -122,7 +122,7 @@ def test_an_already_invalid_record_is_not_marked_twice() -> None:
 def test_an_invalid_value_still_counts_before_the_disclosure_that_ended_it(
     tmp_path: Path,
 ) -> None:
-    ops, source = _project(tmp_path / "cut.sqlite3")
+    ops, source = _project(tmp_path / "cut.nproj")
     ops.property_accept(
         ops.property_propose(
             [
@@ -153,7 +153,7 @@ def test_an_invalid_value_still_counts_before_the_disclosure_that_ended_it(
 # -- 模型判断 --------------------------------------------------------------
 
 def test_the_review_round_can_end_a_value_nothing_replaced(tmp_path: Path) -> None:
-    ops, source = _project(tmp_path / "review.sqlite3")
+    ops, source = _project(tmp_path / "review.nproj")
     ops.property_accept(
         ops.property_propose(
             [
@@ -184,7 +184,7 @@ def test_the_review_round_can_end_a_value_nothing_replaced(tmp_path: Path) -> No
 
 
 def test_a_judgment_that_cannot_be_located_is_dropped(tmp_path: Path) -> None:
-    ops, source = _project(tmp_path / "unresolved.sqlite3")
+    ops, source = _project(tmp_path / "unresolved.nproj")
     ops.property_accept(
         ops.property_propose(
             [_definition(), _value("v1", "心里发怵", "2", 0, source_id=source,
@@ -214,7 +214,7 @@ def test_a_judgment_that_cannot_be_located_is_dropped(tmp_path: Path) -> None:
 
 def test_an_invalidated_value_is_not_shown_at_all(tmp_path: Path) -> None:
     """失效只有一个结果：不显示。没有并集视图，也没有失效条数、失效于哪次披露。"""
-    ops, source = _project(tmp_path / "union.sqlite3")
+    ops, source = _project(tmp_path / "union.nproj")
     ops.property_accept(
         ops.property_propose(
             [

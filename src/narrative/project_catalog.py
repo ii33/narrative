@@ -50,8 +50,7 @@ def _describe(db: Path, *, name: str, path: Path, package: bool) -> dict:
 def list_projects(directory: str | Path) -> list[dict]:
     """List projects read-only; never opens/migrates or writes them.
 
-    裸库（`<名字>.sqlite3`）和工程包（`<名字>.nproj/`）都列，包里读的是
-    `graph.sqlite3` 的元信息。
+    只列工程包（`<名字>.nproj/`），读的是包里 `graph.sqlite3` 的元信息。
     """
     from .project_package import DB_NAME, PACKAGE_SUFFIX
 
@@ -59,9 +58,6 @@ def list_projects(directory: str | Path) -> list[dict]:
     if not root.is_dir():
         return []
     projects: list[dict] = []
-    for path in root.glob("*.sqlite3"):
-        if path.is_file():
-            projects.append(_describe(path, name=path.stem, path=path, package=False))
     for package in root.glob(f"*{PACKAGE_SUFFIX}"):
         db = package / DB_NAME
         if package.is_dir() and db.is_file():
@@ -72,14 +68,15 @@ def list_projects(directory: str | Path) -> list[dict]:
 
 
 def clear_incompatible(directory: str | Path) -> dict:
-    """Remove project files whose schema version is not the current one.
+    """Move away project packages whose schema version is not the current one.
 
-    A file is removed only when it sits directly in ``directory``, has the
-    ``.sqlite3`` suffix and reports a readable, older version. Unreadable files
-    are reported instead of deleted: a corrupt file may still be recoverable.
+    Only packages sitting directly in ``directory`` are considered. A package
+    that reports a readable, older version is removed; one that cannot be read
+    at all is reported instead — a corrupt database may still be recoverable.
 
-    Deletion can be refused by a host trash guard, so a refused file is moved
-    into ``_removed/`` instead — out of the project list, still recoverable.
+    Deletion can be refused by a host trash guard, and a directory cannot be
+    unlinked anyway, so a refused package is renamed into ``_removed/``: out of
+    the project list, still there if you want it back.
     """
     root = Path(directory).resolve()
     removed: list[dict] = []
@@ -87,7 +84,7 @@ def clear_incompatible(directory: str | Path) -> dict:
     kept: list[dict] = []
     for item in list_projects(root):
         path = Path(item["path"]).resolve()
-        if path.parent != root or path.suffix.lower() != ".sqlite3":
+        if path.parent != root or path.suffix.lower() != ".nproj":
             continue
         if item["status"] == "ready":
             continue
@@ -118,7 +115,16 @@ def _database(path: str | Path) -> Path:
 
 
 def create_graph_project(path: str | Path) -> GraphOperations:
-    return GraphOperations(_database(path), create=True)
+    """建一个工程包：目录、库、manifest 一次到位。"""
+    from .project_package import layout as _layout
+    from .project_package import write_manifest
+
+    target = _layout(path)
+    target.db.parent.mkdir(parents=True, exist_ok=True)
+    ops = GraphOperations(target.db, create=True)
+    info = ops.graph_project_info()
+    write_manifest(target.root, title=info["title"], project_id=info["project_id"])
+    return ops
 
 
 def open_graph_project(path: str | Path) -> GraphOperations:

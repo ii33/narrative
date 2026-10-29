@@ -22,7 +22,7 @@ NODES = [
 
 
 def _project(tmp_path: Path):
-    ops = create_graph_project(tmp_path / "graph.sqlite3")
+    ops = create_graph_project(tmp_path / "graph.nproj")
     source_id = ops.import_source("第一章", TEXT)
     nodes = []
     for item in NODES:

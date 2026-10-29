@@ -48,7 +48,7 @@ def _pump(app: QApplication, results: list[tuple[str, dict]], kind: str) -> dict
 def workspace(tmp_path: Path):
     app = QApplication.instance() or QApplication([])
     assert isinstance(app, QApplication)
-    project = tmp_path / "chat.sqlite3"
+    project = tmp_path / "chat.nproj"
     ops = Operations.create_graph_project(project)
     ops.graph_accept(
         ops.graph_propose(
@@ -62,7 +62,7 @@ def workspace(tmp_path: Path):
         1,
     )
 
-    bridge = NativeBridge(tmp_path)
+    bridge = NativeBridge()
     results: list[tuple[str, dict]] = []
     errors: list[tuple[str, str]] = []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))

@@ -44,7 +44,7 @@ def test_the_agent_lists_the_extraction_steps() -> None:
 
 
 def test_the_agent_runs_a_pure_step_on_a_cached_extraction(tmp_path: Path) -> None:
-    ops, source = _project(tmp_path / "agent-extract.sqlite3")
+    ops, source = _project(tmp_path / "agent-extract.nproj")
     before = ops.graph_project_info()["revision"]
 
     built = graph_agent._tool(ops, [source], "extract_build", {"source_id": source}, {})
@@ -57,13 +57,13 @@ def test_the_agent_runs_a_pure_step_on_a_cached_extraction(tmp_path: Path) -> No
 
 
 def test_the_agent_cannot_reach_a_source_outside_the_run(tmp_path: Path) -> None:
-    ops, source = _project(tmp_path / "agent-guard.sqlite3")
+    ops, source = _project(tmp_path / "agent-guard.nproj")
     with pytest.raises(ValueError, match="不在本轮任务里"):
         graph_agent._tool(ops, [], "extract_build", {"source_id": source}, {})
 
 
 def test_extraction_tools_take_only_a_source_id(tmp_path: Path) -> None:
-    ops, source = _project(tmp_path / "agent-args.sqlite3")
+    ops, source = _project(tmp_path / "agent-args.nproj")
     with pytest.raises(ValueError, match="只接受 source_id"):
         graph_agent._tool(ops, [source], "extract_build", {"source_id": source, "x": 1}, {})
     with pytest.raises(ValueError, match="须提供 source_id"):

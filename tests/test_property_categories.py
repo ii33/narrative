@@ -112,7 +112,7 @@ def test_a_hint_that_the_project_removed_falls_back() -> None:
 # -- projection ------------------------------------------------------------
 
 def test_one_property_can_show_under_two_categories(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "split.sqlite3")
+    ops = _project(tmp_path / "split.nproj")
     revision = ops.graph_project_info()["revision"]
     ops.property_accept(
         ops.property_propose(
@@ -144,7 +144,7 @@ def test_one_property_can_show_under_two_categories(tmp_path: Path) -> None:
 
 
 def test_extraction_category_beats_the_name_hint(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "explicit.sqlite3")
+    ops = _project(tmp_path / "explicit.nproj")
     revision = ops.graph_project_info()["revision"]
     ops.property_accept(
         ops.property_propose(
@@ -166,7 +166,7 @@ def test_extraction_category_beats_the_name_hint(tmp_path: Path) -> None:
 def test_moving_a_category_appends_a_record_and_leaves_the_value_alone(
     tmp_path: Path,
 ) -> None:
-    ops = _project(tmp_path / "move.sqlite3")
+    ops = _project(tmp_path / "move.nproj")
     revision = ops.graph_project_info()["revision"]
     ops.property_accept(
         ops.property_propose(
@@ -201,7 +201,7 @@ def test_moving_a_category_appends_a_record_and_leaves_the_value_alone(
 
 
 def test_retracting_a_move_restores_the_previous_grouping(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "undo.sqlite3")
+    ops = _project(tmp_path / "undo.nproj")
     revision = ops.graph_project_info()["revision"]
     ops.property_accept(
         ops.property_propose(
@@ -234,7 +234,7 @@ def test_retracting_a_move_restores_the_previous_grouping(tmp_path: Path) -> Non
 
 
 def test_only_value_records_can_be_moved(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "badmove.sqlite3")
+    ops = _project(tmp_path / "badmove.nproj")
     revision = ops.graph_project_info()["revision"]
     ops.property_accept(
         ops.property_propose(
@@ -255,7 +255,7 @@ def test_only_value_records_can_be_moved(tmp_path: Path) -> None:
 # -- the other end of a relation -------------------------------------------
 
 def test_a_holder_record_is_readable_from_the_holder_too(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "inbound.sqlite3")
+    ops = _project(tmp_path / "inbound.nproj")
     revision = ops.graph_project_info()["revision"]
     definition = {
         "kind": "property_definition", "id": "holder", "value_type": "node",
@@ -284,7 +284,7 @@ def test_a_holder_record_is_readable_from_the_holder_too(tmp_path: Path) -> None
 # -- vocabulary as project config ------------------------------------------
 
 def test_renaming_a_category_migrates_its_records(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "vocab.sqlite3")
+    ops = _project(tmp_path / "vocab.nproj")
     revision = ops.graph_project_info()["revision"]
     ops.property_accept(
         ops.property_propose(
@@ -312,7 +312,7 @@ def test_renaming_a_category_migrates_its_records(tmp_path: Path) -> None:
 def test_a_wholesale_vocabulary_rewrite_is_not_guessed_as_a_rename(
     tmp_path: Path,
 ) -> None:
-    ops = _project(tmp_path / "rewrite.sqlite3")
+    ops = _project(tmp_path / "rewrite.nproj")
     revision = ops.graph_project_info()["revision"]
     ops.property_accept(
         ops.property_propose(
@@ -332,7 +332,7 @@ def test_a_wholesale_vocabulary_rewrite_is_not_guessed_as_a_rename(
 
 
 def test_audit_flags_a_category_outside_the_vocabulary(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "audit.sqlite3")
+    ops = _project(tmp_path / "audit.nproj")
     revision = ops.graph_project_info()["revision"]
     ops.property_accept(
         ops.property_propose(
@@ -355,7 +355,7 @@ def test_audit_flags_a_category_outside_the_vocabulary(tmp_path: Path) -> None:
 
 
 def test_a_move_that_points_nowhere_is_an_error(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "dangling.sqlite3")
+    ops = _project(tmp_path / "dangling.nproj")
     revision = ops.graph_project_info()["revision"]
     ops.property_accept(
         ops.property_propose(
@@ -386,7 +386,7 @@ def test_aspect_is_the_first_token_of_the_name() -> None:
 
 
 def test_two_names_for_one_aspect_share_a_line(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "aspect.sqlite3")
+    ops = _project(tmp_path / "aspect.nproj")
     revision = ops.graph_project_info()["revision"]
     ops.property_accept(
         ops.property_propose(
@@ -420,7 +420,7 @@ def test_two_names_for_one_aspect_share_a_line(tmp_path: Path) -> None:
 
 
 def test_property_labels_come_from_the_backend(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "labels.sqlite3")
+    ops = _project(tmp_path / "labels.nproj")
     revision = ops.graph_project_info()["revision"]
     ops.property_accept(
         ops.property_propose(
@@ -461,7 +461,7 @@ def _two_names(ops, revision: int) -> None:
 
 
 def test_merging_two_names_reads_them_as_one(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "merge.sqlite3")
+    ops = _project(tmp_path / "merge.nproj")
     _two_names(ops, ops.graph_project_info()["revision"])
 
     merged = ops.property_merge("cultivation_stage", "cultivation")
@@ -486,7 +486,7 @@ def test_merging_two_names_reads_them_as_one(tmp_path: Path) -> None:
 
 
 def test_retracting_a_merge_splits_the_names_again(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "unmerge.sqlite3")
+    ops = _project(tmp_path / "unmerge.nproj")
     _two_names(ops, ops.graph_project_info()["revision"])
     ops.property_merge("cultivation_stage", "cultivation")
 
@@ -509,7 +509,7 @@ def test_retracting_a_merge_splits_the_names_again(tmp_path: Path) -> None:
 
 
 def test_a_merge_needs_two_existing_names(tmp_path: Path) -> None:
-    ops = _project(tmp_path / "badmerge.sqlite3")
+    ops = _project(tmp_path / "badmerge.nproj")
     _two_names(ops, ops.graph_project_info()["revision"])
 
     with pytest.raises(ValueError):
@@ -550,7 +550,7 @@ def _timeline(path: Path):
 
 
 def test_a_reading_cut_shows_the_state_at_that_event(tmp_path: Path) -> None:
-    ops = _timeline(tmp_path / "cut.sqlite3")
+    ops = _timeline(tmp_path / "cut.nproj")
 
     latest = ops.property_node_summary("1")
     assert latest["cut"] is None
@@ -573,7 +573,7 @@ def test_a_reading_cut_shows_the_state_at_that_event(tmp_path: Path) -> None:
 
 
 def test_a_cut_before_the_first_disclosure_shows_nothing(tmp_path: Path) -> None:
-    ops = _timeline(tmp_path / "cut-early.sqlite3")
+    ops = _timeline(tmp_path / "cut-early.nproj")
 
     # 「初到」这个事件还没有任何披露，读到这里就什么都不知道。
     early = ops.property_node_summary("1", cut="2")
@@ -588,7 +588,7 @@ def test_a_cut_before_the_first_disclosure_shows_nothing(tmp_path: Path) -> None
 
 def test_inbound_records_follow_the_reading_cut(tmp_path: Path) -> None:
     """反向引用也是披露：还没读到的那一端不该出现。"""
-    ops = create_graph_project(tmp_path / "inbound-cut.sqlite3")
+    ops = create_graph_project(tmp_path / "inbound-cut.nproj")
     ops.graph_accept(
         ops.graph_propose(
             [

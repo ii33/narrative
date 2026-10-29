@@ -46,10 +46,8 @@ class NativeBridge(QObject):
     # 结果要是永远不回来，界面就会一直卡在「处理中」，什么都点不动。
     STALE_AFTER_SECONDS = 10.0
 
-    def __init__(self, project_directory: str | Path, parent: QObject | None = None):
+    def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
-        self._directory = Path(project_directory).resolve()
-        self._directory.mkdir(parents=True, exist_ok=True)
         self._project_path: Path | None = None
         self._canvas = CanvasState()
         self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="narrative-native")
@@ -238,40 +236,17 @@ class NativeBridge(QObject):
             raise ValueError("请选择项目")
         supplied = Path(text)
         if not supplied.is_absolute():
-            return self._inside(supplied)
+            raise ValueError("请给出工程的完整路径（.nproj 目录）")
         resolved = supplied.expanduser()
-        if resolved.suffix.lower() == ".nproj":
+        if resolved.suffix.lower() == project_package.PACKAGE_SUFFIX:
             if not resolved.is_dir():
                 raise ValueError("找不到这个工程包")
             return resolved.resolve()
-        if resolved.suffix.lower() == ".sqlite3":
-            if not resolved.is_file():
-                raise ValueError("找不到这个工程文件")
-            return resolved.resolve()
-        if resolved.is_dir() and (resolved / "graph.sqlite3").is_file():
-            return resolved.resolve()
-        raise ValueError("这个路径不是工程（要 .sqlite3 文件或 .nproj 目录）")
-
-    def _inside(self, supplied: Path) -> Path:
-        """图项目目录里的名字：只认这一层，别处请写绝对路径。"""
-        path = self._directory / supplied
-        # 工程包是一个目录：直接用它，不再补 .sqlite3。
-        if path.suffix.lower() == project_package.PACKAGE_SUFFIX:
-            resolved = path.resolve()
-            if resolved.parent != self._directory or not resolved.is_dir():
-                raise ValueError("工程包须位于所选图项目目录")
-            return resolved
-        # 光写名字时，先找同名工程包（新工程都是包）。
-        if path.suffix == "":
-            packed = path.with_suffix(project_package.PACKAGE_SUFFIX)
-            if packed.is_dir():
-                return packed.resolve()
-        if path.suffix == "":
-            path = path.with_suffix(".sqlite3")
-        path = path.resolve()
-        if path.parent != self._directory or path.suffix.lower() != ".sqlite3":
-            raise ValueError("项目须位于所选图项目目录")
-        return path
+        if resolved.name == project_package.DB_NAME and (
+            resolved.parent / project_package.MANIFEST_NAME
+        ).is_file():
+            return resolved.parent.resolve()
+        raise ValueError("工程是一个 .nproj 目录，请选择它")
 
     @staticmethod
     def _project_view(ops: GraphOperations) -> dict:
@@ -287,10 +262,6 @@ class NativeBridge(QObject):
                 )
             },
         }
-
-    @Slot()
-    def refreshProjects(self) -> None:
-        self._submit("projects", lambda: {"projects": project_catalog.list_projects(self._directory)})
 
     @Slot()
     def loadGlobalSettings(self) -> None:
@@ -318,16 +289,6 @@ class NativeBridge(QObject):
         self._submit("global_settings", work)
 
     @Slot()
-    def clearIncompatibleProjects(self) -> None:
-        """Remove project files this build cannot open (older schema versions)."""
-
-        def work() -> dict:
-            result = project_catalog.clear_incompatible(self._directory)
-            return result | {"projects": project_catalog.list_projects(self._directory)}
-
-        self._submit("projects_cleared", work)
-
-    @Slot()
     def closeProject(self) -> None:
         """Return to the launcher: drop the open project and its cached reads."""
         self._epoch += 1
@@ -339,16 +300,32 @@ class NativeBridge(QObject):
         self._close_assistant()
         self.resultReady.emit("project_closed", {})
 
-    @Slot(str)
-    def createProject(self, name: str) -> None:
+    @Slot(str, result=str)
+    def urlToPath(self, url: str) -> str:
+        """QML 的 FolderDialog 给的是 file:///…，界面要显示成路径。"""
+        from PySide6.QtCore import QUrl
+
+        return QUrl(url).toLocalFile() or url
+
+    @Slot(result=str)
+    def homeDirectory(self) -> str:
+        """新建工程时的默认位置。没有「工程目录」，所以退到用户目录。"""
+        return str(Path.home())
+
+    @Slot(str, str)
+    def createProjectAt(self, parent_url: str, name: str) -> None:
+        """在选定的位置建一个工程包。没有「默认工程目录」这回事。"""
         if not re.fullmatch(r"[\w-]{1,64}", name):
             self.errorOccurred.emit("project", "项目名只能含字母、数字、中文、下划线或短横线")
             return
-        # 新工程就是一个包：库、资料、提取缓存、会话都装在 <名字>.nproj 里，
-        # 备份和搬家只要拷一个目录，不会漏掉旁边那三个。
-        path = self._directory / f"{name}{project_package.PACKAGE_SUFFIX}"
-        legacy = self._directory / f"{name}.sqlite3"
-        if path.exists() or legacy.exists():
+        from PySide6.QtCore import QUrl
+
+        folder = Path(QUrl(parent_url).toLocalFile() or parent_url)
+        if not folder.is_dir():
+            self.errorOccurred.emit("project", "请先选一个存在的文件夹")
+            return
+        path = folder / f"{name}{project_package.PACKAGE_SUFFIX}"
+        if path.exists():
             self.errorOccurred.emit("project", "同名项目已经存在")
             return
         self._epoch += 1
@@ -360,12 +337,7 @@ class NativeBridge(QObject):
         epoch = self._epoch
 
         def work() -> dict:
-            path.mkdir(parents=True)
-            ops = project_catalog.create_graph_project(path / project_package.DB_NAME)
-            info = ops.graph_project_info()
-            project_package.write_manifest(
-                path, title=info["title"], project_id=info["project_id"]
-            )
+            ops = project_catalog.create_graph_project(path)
             return self._project_view(ops)
 
         def apply(result: dict) -> dict:
@@ -467,8 +439,9 @@ class NativeBridge(QObject):
                 title = project_package._meta(db)["title"] if db.is_file() else ""
                 if not title or title == db.stem:  # 读不到时 _meta 回落到文件名
                     title = name
+                # 看库在不在，不看目录：包还在、库被删了，点进去只会报错。
                 items.append(
-                    {"path": text, "name": name, "title": title, "exists": path.exists()}
+                    {"path": text, "name": name, "title": title, "exists": db.is_file()}
                 )
             return {"items": items}
 

@@ -38,7 +38,7 @@ def _two_chapters(path: Path):
 def test_the_list_stops_at_the_reading_position_in_the_same_chapter(
     tmp_path: Path,
 ) -> None:
-    ops, first, _second = _two_chapters(tmp_path / "cut-same.sqlite3")
+    ops, first, _second = _two_chapters(tmp_path / "cut-same.nproj")
 
     early = ops.graph_query(disclosure_cut={"source_id": first, "start": 5})
     assert [node["name"] for node in early["nodes"]] == ["林舟"]
@@ -48,7 +48,7 @@ def test_the_list_stops_at_the_reading_position_in_the_same_chapter(
 
 
 def test_a_later_chapter_is_not_known_yet(tmp_path: Path) -> None:
-    ops, first, second = _two_chapters(tmp_path / "cut-chapters.sqlite3")
+    ops, first, second = _two_chapters(tmp_path / "cut-chapters.nproj")
 
     # 读到第一章末尾：第二章的人物还不存在。
     cut = ops.graph_query(disclosure_cut={"source_id": first, "start": 10_000})

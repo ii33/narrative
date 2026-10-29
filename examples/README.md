@@ -19,7 +19,7 @@ $env:PYTHONPATH=(Resolve-Path .\src).Path
 打开原生可交互界面：
 
 ```powershell
-.\.venv\Scripts\python.exe -m narrative.native_app --projects-dir data\graph-projects --project branch-merge-demo
+.\.venv\Scripts\python.exe -m narrative.native_app --project data\graph-projects\branch-merge-demo.nproj
 ```
 
 进入“时间轴”，用“事件比较”选择 A2 与 B1，应显示未知；关闭比较面板可查看
@@ -47,7 +47,7 @@ Open the persistent demo in the native Qt window from the repository root:
 ```powershell
 $env:PYTHONPATH=(Resolve-Path .\src).Path
 Remove-Item Env:QT_QPA_PLATFORM -ErrorAction SilentlyContinue
-.\.venv\Scripts\python.exe -m narrative.native_app --projects-dir data\graph-projects --project property-story-demo
+.\.venv\Scripts\python.exe -m narrative.native_app --project data\graph-projects\property-story-demo.nproj
 ```
 
 Select **节点状态**, enter node `key` and property `holder`, then click **查询状态与历史**. The page shows the current state, accepted history, and the aggregate world projection. Use the `at` field for a JSON story TimeRef, such as `{"timeline_id":"story","form":"event_boundary","event_id":"flashback","boundary":"start"}`.

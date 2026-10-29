@@ -21,7 +21,7 @@ from narrative.operations import Operations
 
 
 def _project(tmp_path: Path) -> Path:
-    ops = Operations.create_graph_project(tmp_path / "book.sqlite3")
+    ops = Operations.create_graph_project(tmp_path / "book.nproj")
     ops.import_source("t", "甲把信交给乙。")
     revision = ops.graph_project_info()["revision"]
     ops.change_propose(
@@ -34,7 +34,7 @@ def _project(tmp_path: Path) -> Path:
         source="manual",
         note="原文提取：第一回",
     )
-    return tmp_path / "book.sqlite3"
+    return tmp_path / "book.nproj"
 
 
 @pytest.fixture()
@@ -62,8 +62,8 @@ def _wait(app, results: list, kind: str, timeout: float = 25) -> dict:
 
 @pytest.fixture()
 def window(app, tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("NARRATIVE_PROVIDER_DB", str(tmp_path / "settings.sqlite3"))
-    bridge = NativeBridge(tmp_path)
+    monkeypatch.setenv("NARRATIVE_PROVIDER_DB", str(tmp_path / "settings.nproj"))
+    bridge = NativeBridge()
     results: list[tuple[str, dict]] = []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
     errors: list[tuple[str, str]] = []

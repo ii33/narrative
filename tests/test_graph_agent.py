@@ -36,7 +36,7 @@ def test_sdk_error_summary_redacts_secrets_and_omits_other_event_content():
 
 
 def test_graph_agent_observes_tool_precheck_then_proposes_pending(tmp_path: Path, monkeypatch):
-    db = tmp_path / "graph.sqlite3"
+    db = tmp_path / "graph.nproj"
     ops = GraphOperations(db, create=True)
     source_id = ops.import_source("短篇", "屠夫遇见狼。")
     base_revision = ops.graph_project_info()["revision"]
@@ -119,7 +119,7 @@ def test_graph_agent_observes_tool_precheck_then_proposes_pending(tmp_path: Path
 
 
 def test_graph_agent_seeds_pending_candidate_without_accepting_parent(tmp_path: Path, monkeypatch):
-    ops = GraphOperations(tmp_path / "seed.sqlite3", create=True)
+    ops = GraphOperations(tmp_path / "seed.nproj", create=True)
     source_id = ops.import_source("短篇", "甲从门前经过。")
     revision = ops.graph_project_info()["revision"]
     parent_id = ops.graph_propose([{"kind": "node", "id": "p1", "node_type": "person", "name": "甲"}], revision, source="model")
@@ -169,7 +169,7 @@ def test_graph_agent_seeds_pending_candidate_without_accepting_parent(tmp_path: 
 
 
 def test_graph_agent_provider_failure_stops_without_retry(tmp_path: Path, monkeypatch):
-    ops = GraphOperations(tmp_path / "failed.sqlite3", create=True)
+    ops = GraphOperations(tmp_path / "failed.nproj", create=True)
     source_id = ops.import_source("短篇", "甲来了。")
     calls = []
 
@@ -208,7 +208,7 @@ def test_graph_agent_provider_failure_stops_without_retry(tmp_path: Path, monkey
 
 
 def test_graph_agent_pause_and_instruction_apply_at_next_request_boundary(tmp_path: Path, monkeypatch):
-    ops = GraphOperations(tmp_path / "control.sqlite3", create=True)
+    ops = GraphOperations(tmp_path / "control.nproj", create=True)
     source_id = ops.import_source("短篇", "甲来了。")
     entered = threading.Event()
     release = threading.Event()
@@ -283,7 +283,7 @@ def test_graph_agent_pause_and_instruction_apply_at_next_request_boundary(tmp_pa
 
 
 def test_graph_agent_real_sdk_session_dispatches_graph_tools(tmp_path: Path):
-    ops = GraphOperations(tmp_path / "sdk.sqlite3", create=True)
+    ops = GraphOperations(tmp_path / "sdk.nproj", create=True)
     source_id = ops.import_source("短篇", "甲遇见狼。")
     base_revision = ops.graph_project_info()["revision"]
     base = ops.graph_propose([
@@ -357,7 +357,7 @@ def test_graph_agent_real_sdk_session_dispatches_graph_tools(tmp_path: Path):
 
 
 def test_property_tool_flags_staged_graph_dependency_without_writes(tmp_path: Path):
-    db = tmp_path / "staged-property.sqlite3"
+    db = tmp_path / "staged-property.nproj"
     ops = GraphOperations(db, create=True)
     source_id = ops.import_source("短篇", "屠夫遇见狼。")
     revision = ops.graph_project_info()["revision"]
@@ -390,7 +390,7 @@ def test_property_tool_flags_staged_graph_dependency_without_writes(tmp_path: Pa
 
 
 def test_property_tool_preserves_accepted_graph_operations(tmp_path: Path):
-    db = tmp_path / "accepted-property.sqlite3"
+    db = tmp_path / "accepted-property.nproj"
     ops = GraphOperations(db, create=True)
     source_id = ops.import_source("短篇", "屠夫遇见狼。")
     revision = ops.graph_project_info()["revision"]
@@ -428,7 +428,7 @@ def test_property_propose_accepts_advertised_source_argument_without_changing_pr
     generic "参数无效" error ended the run before it could retry. Provenance must
     stay system-controlled, but a reasonable argument must not fail the call.
     """
-    db = tmp_path / "source-argument-property.sqlite3"
+    db = tmp_path / "source-argument-property.nproj"
     ops = GraphOperations(db, create=True)
     source_id = ops.import_source("短篇", "屠夫遇见狼。")
     revision = ops.graph_project_info()["revision"]

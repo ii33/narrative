@@ -13,7 +13,7 @@ from narrative.operations import Operations
 
 def test_native_property_candidate_and_state_history(tmp_path) -> None:
     app = QApplication.instance() or QApplication([])
-    project_path = tmp_path / "property-native.sqlite3"
+    project_path = tmp_path / "property-native.nproj"
     ops = Operations.create_graph_project(project_path)
     nodes = [
         {"kind": "node", "id": "key", "node_type": "item", "name": "Key"},
@@ -22,7 +22,7 @@ def test_native_property_candidate_and_state_history(tmp_path) -> None:
     candidate_id = ops.graph_propose(nodes, ops.graph_project_info()["revision"])
     ops.graph_accept(candidate_id, 1)
 
-    bridge = NativeBridge(tmp_path)
+    bridge = NativeBridge()
     results: list[tuple[str, dict]] = []
     errors: list[tuple[str, str]] = []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))

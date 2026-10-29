@@ -63,7 +63,7 @@ def workspace(tmp_path: Path):
     """一个人物、一件物品、两个事件；进工程后停在人物上。"""
     app = QApplication.instance() or QApplication([])
     assert isinstance(app, QApplication)
-    project = tmp_path / "material.sqlite3"
+    project = tmp_path / "material.nproj"
     ops = Operations.create_graph_project(project)
     source = ops.import_source("第一章", "林舟出场了。火纹石认主。")
     candidate = ops.graph_propose(
@@ -95,7 +95,7 @@ def workspace(tmp_path: Path):
     )
     ops.property_accept(property_candidate, 1)
 
-    bridge = NativeBridge(tmp_path)
+    bridge = NativeBridge()
     results: list[tuple[str, dict]] = []
     errors: list[tuple[str, str]] = []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
@@ -234,7 +234,7 @@ def test_an_image_carries_its_own_caption(workspace, tmp_path: Path) -> None:
     assert image["caption"] == "正面"
     copied = Path(image["path"])
     assert copied.is_file()
-    assert copied.parent.parent.parent == tmp_path / "material_material"
+    assert copied.parent.parent.parent == tmp_path / "material.nproj" / "material"
 
     del results[:]
     bridge.updateMaterialImageCaption("1", card_id, image["id"], "正面，束发")

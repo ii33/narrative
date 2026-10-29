@@ -143,8 +143,8 @@ def _seed(path: Path) -> Path:
 @pytest.fixture()
 def workspace(tmp_path: Path):
     app = QApplication.instance() or QApplication([])
-    project = _seed(tmp_path / "categories.sqlite3")
-    bridge = NativeBridge(tmp_path)
+    project = _seed(tmp_path / "categories.nproj")
+    bridge = NativeBridge()
     results: list[tuple[str, dict]] = []
     errors: list[tuple[str, str]] = []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
@@ -560,8 +560,8 @@ def test_jumping_to_a_listed_node_keeps_the_filters(workspace) -> None:
 def test_a_reading_cut_switches_the_state(tmp_path: Path) -> None:
     """切到某个事件，右侧只显示读到这里时已经披露的内容。"""
     app = QApplication.instance() or QApplication([])
-    project = _seed(tmp_path / "cut.sqlite3")
-    bridge = NativeBridge(tmp_path)
+    project = _seed(tmp_path / "cut.nproj")
+    bridge = NativeBridge()
     results: list[tuple[str, dict]] = []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
     engine = QQmlApplicationEngine()
@@ -628,7 +628,7 @@ def test_the_pane_can_add_a_record(workspace) -> None:
 
 def test_a_hand_written_record_is_checked_against_the_source(tmp_path: Path) -> None:
     """补录的引文和模型的一样要能唯一定位，否则预检拒绝。"""
-    project = tmp_path / "manual.sqlite3"
+    project = tmp_path / "manual.nproj"
     ops = Operations.create_graph_project(project)
     source_id = ops.import_source("第一章", "林舟脸色铁青地走进房间。")
     ops.graph_accept(
@@ -642,7 +642,7 @@ def test_a_hand_written_record_is_checked_against_the_source(tmp_path: Path) -> 
         1,
     )
 
-    bridge = NativeBridge(tmp_path)
+    bridge = NativeBridge()
     results: list[tuple[str, dict]] = []
     bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
     try:

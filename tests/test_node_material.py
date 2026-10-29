@@ -17,7 +17,7 @@ PNG = base64.b64decode(
 
 @pytest.fixture()
 def store(tmp_path: Path) -> MaterialStore:
-    return MaterialStore(tmp_path / "book.sqlite3")
+    return MaterialStore(tmp_path / "book.nproj")
 
 
 @pytest.fixture()

@@ -1,4 +1,8 @@
-"""工程包：库、资料、提取缓存、会话收进一个目录，读写还是同一套路径。"""
+"""工程就是一个 .nproj 目录：库和资料在里面，缓存和会话在旁边。
+
+旧版那种「一个 .sqlite3 + 三个同级目录」已经不支持了——它正是拷一个文件就丢资料、
+丢会话的形态。这组用例钉住新契约：只认包，包内只有库和资料。
+"""
 
 from __future__ import annotations
 
@@ -7,11 +11,16 @@ from pathlib import Path
 
 import pytest
 
-from narrative import tool_api
 from narrative.chat_store import ChatStore
 from narrative.node_material import MaterialStore
 from narrative.project_catalog import create_graph_project, list_projects, open_graph_project
-from narrative.project_package import DB_NAME, MANIFEST_NAME, layout, pack
+from narrative.project_package import (
+    DB_NAME,
+    MANIFEST_NAME,
+    PACKAGE_SUFFIX,
+    layout,
+    manifest,
+)
 
 PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
@@ -19,10 +28,9 @@ PNG = bytes.fromhex(
 )
 
 
-def _loose(tmp_path: Path) -> Path:
-    """一个裸工程：库 + 资料 + 会话 + 提取缓存，四样都在同级目录里。"""
-    project = tmp_path / "book.sqlite3"
-    ops = create_graph_project(project)
+def _package(tmp_path: Path) -> Path:
+    package = tmp_path / f"book{PACKAGE_SUFFIX}"
+    ops = create_graph_project(package)
     ops.graph_accept(
         ops.graph_propose(
             [{"kind": "node", "id": "1", "node_type": "person", "name": "林舟"}],
@@ -30,84 +38,86 @@ def _loose(tmp_path: Path) -> Path:
         ),
         1,
     )
-    store = MaterialStore(project)
-    card = store.add_card("1", "青衫少年", "洗得发白的青衫")
-    store.add_image("1", card["id"], _png(tmp_path))
-    ChatStore(project).create()
-    (project.with_name("book_extraction")).mkdir()
-    (project.with_name("book_extraction") / "cache.json").write_text("{}", encoding="utf-8")
-    return project
+    return package
 
 
-def _png(tmp_path: Path) -> Path:
-    path = tmp_path / "ref.png"
-    path.write_bytes(PNG)
-    return path
+def test_a_new_project_is_a_package_with_a_manifest(tmp_path: Path) -> None:
+    package = _package(tmp_path)
 
-
-def test_a_loose_project_is_a_database_with_three_siblings(tmp_path: Path) -> None:
-    project = _loose(tmp_path)
-    found = layout(project)
-    assert found.package is False
-    assert found.db == project
-    assert found.material.name == "book_material"
-    assert found.chats.name == "book_chats"
-    assert found.extraction.name == "book_extraction"
-
-
-def test_packing_puts_the_work_in_one_directory_and_leaves_the_rest_beside(
-    tmp_path: Path,
-) -> None:
-    """包是「这份作品」：库和资料。缓存能重跑、会话是聊天记录，都不进包。"""
-    project = _loose(tmp_path)
-    result = pack(project)
-
-    package = tmp_path / "book.nproj"
-    assert Path(result["package"]) == package
-    assert result["moved"] is True
-    assert result["parts"] == ["material"]
-
-    # 库和资料进了包，原来的散件不在了。
-    assert not project.exists()
-    assert not (tmp_path / "book_material").exists()
+    assert package.is_dir()
     assert (package / DB_NAME).is_file()
     assert (package / MANIFEST_NAME).is_file()
-    assert (package / "material").is_dir()
 
-    # 缓存和会话留在包旁边，不进包。
-    assert (tmp_path / "book_extraction").is_dir()
-    assert (tmp_path / "book_chats").is_dir()
-    assert not (package / "extraction").exists()
-    assert not (package / "chats").exists()
-
-    manifest = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))
-    assert manifest["format"] == "narrative-project"
-    # 标题取自库里的 meta，不是文件名。
-    assert manifest["title"] == open_graph_project(package).graph_project_info()["title"]
-    assert manifest["parts"] == {"material": True}
+    payload = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert payload["format"] == "narrative-project"
+    assert payload["title"] == open_graph_project(package).graph_project_info()["title"]
+    assert payload["parts"] == {"material": False}
 
 
-def test_the_package_reads_and_writes_like_before(tmp_path: Path) -> None:
-    project = _loose(tmp_path)
-    package = Path(pack(project)["package"])
-
+def test_the_layout_puts_the_work_inside_and_the_rest_beside(tmp_path: Path) -> None:
+    package = _package(tmp_path)
     found = layout(package)
-    assert found.package is True
-    # 库还是那个库：节点、资料、图片都在。
-    ops = open_graph_project(package)
-    assert [node["name"] for node in ops.graph_snapshot()["nodes"]] == ["林舟"]
+
+    assert found.root == package
+    assert found.db == package / DB_NAME
+    assert found.material == package / "material"
+    # 缓存和会话不进包：它们在包旁边，名字和包同名。
+    assert found.extraction == tmp_path / "book_extraction"
+    assert found.chats == tmp_path / "book_chats"
+    assert package not in found.extraction.parents
+    assert package not in found.chats.parents
+
+
+def test_a_database_inside_a_package_resolves_to_the_package(tmp_path: Path) -> None:
+    package = _package(tmp_path)
+    assert layout(package / DB_NAME).root == package
+
+
+def test_a_path_that_does_not_exist_yet_is_a_package(tmp_path: Path) -> None:
+    target = tmp_path / f"future{PACKAGE_SUFFIX}"
+    assert layout(target).root == target
+
+
+def test_a_bare_sqlite_file_is_refused(tmp_path: Path) -> None:
+    loose = tmp_path / "old.sqlite3"
+    loose.write_bytes(b"")
+    with pytest.raises(ValueError, match="旧版单文件工程"):
+        layout(loose)
+
+
+def test_a_plain_file_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="不是"):
+        layout(tmp_path / "notes.txt")
+
+
+def test_a_directory_that_is_not_a_package_is_refused(tmp_path: Path) -> None:
+    folder = tmp_path / "stuff"
+    folder.mkdir()
+    (folder / "notes.txt").write_text("x", encoding="utf-8")
+    with pytest.raises(ValueError, match="不是工程包"):
+        layout(folder)
+
+
+def test_the_manifest_reader_returns_what_was_written(tmp_path: Path) -> None:
+    package = _package(tmp_path)
+    payload = manifest(layout(package))
+    assert payload["format"] == "narrative-project"
+    assert payload["version"] == 1
+
+
+def test_material_and_chats_land_where_the_layout_says(tmp_path: Path) -> None:
+    package = _package(tmp_path)
+    found = layout(package)
 
     store = MaterialStore(package)
-    cards = store.view("1")["cards"]
-    assert cards[0]["title"] == "青衫少年"
-    assert Path(cards[0]["images"][0]["path"]).is_file()
-    assert str(package) in cards[0]["images"][0]["path"]
+    card = store.add_card("1", "青衫少年", "洗得发白的青衫")
+    image = tmp_path / "ref.png"
+    image.write_bytes(PNG)
+    record = store.add_image("1", card["id"], image)
 
-    # 往包里继续写：落在 <包>/material 下，不是包外面。
-    store.add_card("1", "认主之后")
     assert (package / "material" / "1.json").is_file()
+    assert Path(found.material / record["file"]).is_file()
 
-    # 会话落在包旁边，不是包里面。
     chats = ChatStore(package)
     chat = chats.create()
     chats.append(chat["id"], "user", "第三章里林舟见过谁？")
@@ -115,56 +125,11 @@ def test_the_package_reads_and_writes_like_before(tmp_path: Path) -> None:
     assert not (package / "chats").exists()
 
 
-def test_extraction_cache_lives_beside_the_package(tmp_path: Path) -> None:
-    project = _loose(tmp_path)
-    package = Path(pack(project)["package"])
-    ops = open_graph_project(package)
-    # 缓存不进包：它在包旁边，名字和包同名。
-    path = tool_api._extraction_path(ops, "src1")
-    assert package not in path.parents
-    assert path.parent == tmp_path / "book_extraction"
+def test_the_catalog_lists_packages_only(tmp_path: Path) -> None:
+    _package(tmp_path)
+    # 一个裸库不该出现在列表里。
+    (tmp_path / "loose.sqlite3").write_bytes(b"")
 
-
-def test_the_catalog_lists_packages_and_bare_files(tmp_path: Path) -> None:
-    pack(_loose(tmp_path))
-    other = tmp_path / "other.sqlite3"
-    create_graph_project(other)
-
-    listed = {item["name"]: item for item in list_projects(tmp_path)}
-    assert listed["book"]["package"] is True
-    assert listed["other"]["package"] is False
-    # 包里读的是 graph.sqlite3 的元信息。
-    assert listed["book"]["db"].endswith("graph.sqlite3")
-
-
-def test_packing_twice_is_a_no_op(tmp_path: Path) -> None:
-    project = _loose(tmp_path)
-    package = Path(pack(project)["package"])
-    again = pack(package)
-    assert again["moved"] is False
-    assert "已经是工程包" in again["note"]
-
-
-def test_a_copy_leaves_the_original_alone(tmp_path: Path) -> None:
-    project = _loose(tmp_path)
-    result = pack(project, move=False)
-    assert project.is_file()
-    assert (tmp_path / "book_material").is_dir()
-    assert (Path(result["package"]) / DB_NAME).is_file()
-
-
-def test_packing_refuses_to_overwrite(tmp_path: Path) -> None:
-    project = _loose(tmp_path)
-    (tmp_path / "book.nproj").mkdir()
-    with pytest.raises(ValueError, match="已存在"):
-        pack(project)
-
-
-def test_the_tool_packs_through_the_same_function(tmp_path: Path) -> None:
-    project = _loose(tmp_path)
-    result = tool_api.call("pack_project", {}, project=project)
-    assert Path(result["package"]).name == "book.nproj"
-    # 包能直接打开：工具面里 --project 给包目录就行。
-    info = tool_api.call("project_info", {}, project=Path(result["package"]))
-    assert info["project"]["title"] == "未命名作品"
-    assert info["project"]["path"].endswith("graph.sqlite3")
+    listed = list_projects(tmp_path)
+    assert [row["name"] for row in listed] == ["book"]
+    assert listed[0]["status"] == "ready"

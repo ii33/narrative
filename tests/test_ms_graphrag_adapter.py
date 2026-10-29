@@ -8,7 +8,7 @@ from narrative.graph_operations import GraphOperations
 
 
 def test_preview_checks_exact_quote_and_leaves_graph_unchanged(tmp_path):
-    ops = GraphOperations(tmp_path / "project.sqlite3", create=True)
+    ops = GraphOperations(tmp_path / "project.nproj", create=True)
     source_id = ops.import_source("合成短章", "林舟把铜钥匙交给沈岚。次日沈岚打开蓝柜。")
     revision = ops.graph_project_info()["revision"]
     export_path = tmp_path / "export.json"
@@ -46,7 +46,7 @@ def test_preview_checks_exact_quote_and_leaves_graph_unchanged(tmp_path):
 
 
 def test_stage_sources_uses_fresh_root_without_changing_project(tmp_path):
-    ops = GraphOperations(tmp_path / "project.sqlite3", create=True)
+    ops = GraphOperations(tmp_path / "project.nproj", create=True)
     source_id = ops.import_source("合成短章", "阿舟把铜钥匙交给沈岚。")
     revision = ops.graph_project_info()["revision"]
     root = tmp_path / "graphrag-run"
