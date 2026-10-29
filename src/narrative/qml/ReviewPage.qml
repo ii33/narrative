@@ -21,14 +21,57 @@ Item {
     ListModel { id: candidateRows }
     ListModel { id: objectRows }
 
+    // 两种候选并存：提取走的是「变更候选」（change_propose），旧的图候选还在老工程里。
+    // 各自拉一次，合并成一张表，用 kind 区分。
+    property var graphRows: []
+    property var changeRows: []
+
     function load() {
+        bridge.loadChangeCandidates(filter)
         bridge.loadCandidates(filter)
+    }
+
+    function rebuildCandidates() {
+        candidateRows.clear()
+        for (var i = 0; i < changeRows.length; ++i) {
+            var c = changeRows[i]
+            candidateRows.append({
+                id: c.id || "",
+                kind: "change",
+                note: c.note || c.id || "",
+                status: c.status || "",
+                source: c.source || "",
+                counts: (c.graph_count || 0) + " 图 · " + (c.property_count || 0) + " 属性",
+                created: c.created_at || ""
+            })
+        }
+        for (var j = 0; j < graphRows.length; ++j) {
+            var g = graphRows[j]
+            candidateRows.append({
+                id: g.id || "",
+                kind: "graph",
+                note: g.note || g.id || "",
+                status: g.status || "",
+                source: g.source || "",
+                counts: (g.operation_count || g.graph_count || 0) + " 项",
+                created: g.created_at || ""
+            })
+        }
+        if (candidateRows.count > 0 && selectedId.length === 0)
+            page.pick(candidateRows.get(0).id)
+    }
+
+    function kindOf(id) {
+        for (var i = 0; i < candidateRows.count; ++i)
+            if (candidateRows.get(i).id === id) return candidateRows.get(i).kind
+        return "graph"
     }
 
     function pick(id) {
         selectedId = id
         current = ({})
-        bridge.candidateDetail(id)
+        if (kindOf(id) === "change") bridge.changeCandidateDetail(id)
+        else bridge.candidateDetail(id)
     }
 
     function applyAudit(report, scope) {
@@ -71,22 +114,26 @@ Item {
         target: bridge
         function onResultReady(kind, payload) {
             if (kind === "candidates") {
-                candidateRows.clear()
-                var rows = payload.candidates || []
-                for (var i = 0; i < rows.length; ++i) {
-                    var row = rows[i]
-                    candidateRows.append({
-                        id: row.id || "",
-                        status: row.status || "",
-                        source: row.source || "",
-                        created: row.created_at || ""
-                    })
-                }
-                if (candidateRows.count > 0 && selectedId.length === 0)
-                    page.pick(candidateRows.get(0).id)
+                page.graphRows = payload.items || []
+                page.rebuildCandidates()
+            } else if (kind === "change_candidates") {
+                page.changeRows = payload.items || []
+                page.rebuildCandidates()
             } else if (kind === "candidate") {
                 current = payload
                 page.rebuildObjects()
+            } else if (kind === "change_candidate") {
+                var detail = payload.candidate || ({})
+                current = {
+                    candidate: detail,
+                    objects: detail.graph_objects || [],
+                    kind: "change"
+                }
+                page.rebuildObjects()
+            } else if (kind === "change_review") {
+                app.toast("已处理，修订号 " + (payload.revision || ""), false)
+                selectedId = ""
+                page.load()
             } else if (kind === "property_audit") {
                 page.applyAudit(payload, "全部属性")
                 app.toast("审核完成：" + page.auditErrors + " 个错误 / "
@@ -150,10 +197,13 @@ Item {
                     spacing: 4
                     delegate: Rectangle {
                         required property string id
+                        required property string kind
+                        required property string note
                         required property string status
                         required property string source
+                        required property string counts
                         width: ListView.view.width
-                        height: 50
+                        height: 52
                         radius: 6
                         color: page.selectedId === id ? t.accentSoft : "transparent"
                         Column {
@@ -162,16 +212,19 @@ Item {
                             anchors.verticalCenter: parent.verticalCenter
                             spacing: 2
                             Label {
-                                text: id
+                                text: note
                                 color: t.ink
                                 font.pixelSize: 12
                                 elide: Text.ElideRight
                                 width: 220
                             }
                             Label {
-                                text: source + " · " + status
+                                text: (kind === "change" ? "变更" : "图") + " · " + status
+                                    + " · " + counts
                                 color: t.muted
                                 font.pixelSize: 10
+                                elide: Text.ElideRight
+                                width: 220
                             }
                         }
                         MouseArea {
@@ -182,7 +235,7 @@ Item {
                     Label {
                         anchors.centerIn: parent
                         visible: candidateRows.count === 0
-                        text: "没有候选"
+                        text: "没有候选。提取出来的候选会出现在这里。"
                         color: t.muted
                     }
                 }
@@ -206,15 +259,21 @@ Item {
                 }
                 Item { Layout.fillWidth: true }
                 Button {
+                    objectName: "acceptCandidateButton"
                     text: "接受"
                     highlighted: true
                     enabled: current.candidate !== undefined && current.candidate !== null
-                    onClicked: bridge.acceptCandidate(current.candidate.id, current.candidate.version)
+                    onClicked: current.kind === "change"
+                        ? bridge.acceptChangeCandidate(current.candidate.id, current.candidate.version)
+                        : bridge.acceptCandidate(current.candidate.id, current.candidate.version)
                 }
                 Button {
+                    objectName: "rejectCandidateButton"
                     text: "拒绝"
                     enabled: current.candidate !== undefined && current.candidate !== null
-                    onClicked: bridge.rejectCandidate(current.candidate.id, current.candidate.version)
+                    onClicked: current.kind === "change"
+                        ? bridge.rejectChangeCandidate(current.candidate.id, current.candidate.version)
+                        : bridge.rejectCandidate(current.candidate.id, current.candidate.version)
                 }
             }
 

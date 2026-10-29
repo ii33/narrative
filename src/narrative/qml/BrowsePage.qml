@@ -1024,11 +1024,31 @@ Item {
                             onClicked: page.select(id)
                         }
                     }
-                    Label {
+                    Column {
                         anchors.centerIn: parent
+                        spacing: 6
                         visible: rows.count === 0
-                        text: page.isEmptyProject ? "这个工程还没有节点。" : "该分类下没有节点。"
-                        color: t.muted
+
+                        Label {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            text: page.isEmptyProject
+                                ? "这个工程还没有节点。模型提取的候选要先在「审核」里接受，才会进图。"
+                                : "该分类下没有节点。"
+                            color: t.muted
+                        }
+                        Label {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            visible: page.isEmptyProject
+                            objectName: "goReviewLink"
+                            text: "去审核 →"
+                            color: t.accent
+                            font.underline: true
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: app.currentPage = "review"
+                            }
+                        }
                     }
                 }
             }
