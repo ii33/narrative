@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -143,3 +144,35 @@ def test_a_recent_project_that_moved_is_listed_but_marked_missing(
     bridge.loadRecentProjects()
     items = _wait(app, results, "recent_projects")["items"]
     assert [row["exists"] for row in items] == [False]
+
+
+def test_a_new_project_is_a_package(bridge, app, tmp_path: Path) -> None:
+    """新工程是一个 .nproj 目录：库、资料、缓存、会话都装在里头，拷一个目录就搬走了。"""
+    results: list[tuple[str, dict]] = []
+    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
+
+    bridge.createProject("新工程")
+    _wait(app, results, "project")
+
+    package = tmp_path / "projects" / "新工程.nproj"
+    assert package.is_dir()
+    assert (package / "graph.sqlite3").is_file()
+    manifest = json.loads((package / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["format"] == "narrative-project"
+    assert manifest["title"]
+    # 裸库不再产生：新建只留一个包目录。
+    assert not (tmp_path / "projects" / "新工程.sqlite3").exists()
+
+
+def test_a_new_project_shows_up_in_the_catalog(bridge, app, tmp_path: Path) -> None:
+    results: list[tuple[str, dict]] = []
+    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
+
+    bridge.createProject("上架的")
+    _wait(app, results, "project")
+
+    del results[:]
+    bridge.refreshProjects()
+    listed = _wait(app, results, "projects")["projects"]
+    assert [row["name"] for row in listed] == ["上架的"]
+    assert listed[0]["status"] == "ready"

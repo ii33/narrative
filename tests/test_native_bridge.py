@@ -46,7 +46,7 @@ def test_bridge_project_source_review_and_incremental_canvas(tmp_path) -> None:
         source = invoke("source", lambda: bridge.sourceText(source_id))["source"]
         assert "狼来到河边" in source["text"]
 
-        ops = Operations.open_graph_project(tmp_path / "native-test.sqlite3")
+        ops = Operations.open_graph_project(tmp_path / "native-test.nproj")
         revision = ops.graph_project_info()["revision"]
         evidence = ops.locate(source_id, "狼来到河边")[0] | {"id": "quote"}
         objects = [
@@ -226,7 +226,7 @@ def test_bridge_disclosure_query_and_change_candidates(tmp_path) -> None:
         invoke("project", lambda: bridge.createProject("disclosure-test"))
         imported = invoke("source_imported", lambda: bridge.importSource("短章", "林舟皮肤黝黑。"))
         source_id = imported["source_id"]
-        ops = Operations.open_graph_project(tmp_path / "disclosure-test.sqlite3")
+        ops = Operations.open_graph_project(tmp_path / "disclosure-test.nproj")
         evidence = ops.locate(source_id, "皮肤黝黑")[0]
         revision = ops.graph_project_info()["revision"]
         graph = [
@@ -283,7 +283,7 @@ def test_bridge_revises_node_type_and_retracts(tmp_path) -> None:
     try:
         invoke("project", lambda: bridge.createProject("node-edit"))
         invoke("source_imported", lambda: bridge.importSource("短章", "甲出场了。"))
-        ops = Operations.open_graph_project(tmp_path / "node-edit.sqlite3")
+        ops = Operations.open_graph_project(tmp_path / "node-edit.nproj")
         candidate = ops.change_propose(
             [
                 {"kind": "node", "id": "n_jia", "node_type": "person", "name": "甲"},

@@ -137,22 +137,8 @@ Windows 上删不掉页面正开着的图片，所以删除是尽力而为：记
 runtime-bin 两个包）。0.2 起运行时改说 Anthropic Messages（`POST /v1/messages`、`x-api-key`），
 而供应商只认 chat/completions——本地网关两种都收，翻译在 `messages_bridge.py`，请求和流式事件一一对应。
 
-工程可以是一个**包**：`<名字>.nproj/` 里装着库、资料、提取缓存和会话，拷贝、备份、发给别人都是搬一个目录。
-
-```
-<名字>.nproj/
-  manifest.json     这份包是什么、什么时候封的
-  graph.sqlite3     图
-  material/         资料卡 JSON + 图片
-  extraction/       提取缓存 + 运行时工作目录
-  chats/            协作者会话
-```
-
-`narrative pack --project <工程.sqlite3>` 收包（默认搬家，`pack_project` 工具里 `move=false` 是复制）。
-两种布局都认：`--project` 给裸库、给包目录、给包里的 `graph.sqlite3` 都行，读写路径是同一套——
-包里包外的区别只在根目录在哪。裸工程照旧能开，不必先打包。
-
-工程可以是一个**包**：`<名字>.nproj/` 里装着库、资料、提取缓存和会话，拷贝、备份、发给别人都是搬一个目录。
+工程就是一个**包**：`<名字>.nproj/` 里装着库、资料、提取缓存和会话，拷贝、备份、发给别人都是搬一个目录。
+界面里「新建工程」直接建成包；早先的裸 `.sqlite3` 仍然能打开。
 
 ```
 <名字>.nproj/

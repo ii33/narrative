@@ -18,7 +18,41 @@ Item {
     readonly property var effortOptions: ["不设置", "low", "medium", "high"]
 
     ListModel { id: projectRows }
-    ListModel { id: recentRows }
+    // 目录里扫到的工程 + 打开过的外部工程，合成一张表。
+    property var catalogProjects: []
+    property var recentItems: []
+
+    function rebuildProjectRows() {
+        projectRows.clear()
+        var seen = ({})
+        for (var i = 0; i < catalogProjects.length; ++i) {
+            var row = catalogProjects[i]
+            seen[row.path] = true
+            projectRows.append({
+                path: row.path || "",
+                name: row.name || "",
+                title: row.title || "",
+                revision: row.revision || 0,
+                openable: row.openable === true,
+                statusText: row.statusText || "",
+                external: false
+            })
+        }
+        // 打开过的工程可能不在这个目录里；它照样属于「我的工程」。
+        for (var r = 0; r < recentItems.length; ++r) {
+            var item = recentItems[r]
+            if (seen[item.path]) continue
+            projectRows.append({
+                path: item.path,
+                name: item.name,
+                title: item.title || item.name,
+                revision: 0,
+                openable: item.exists === true,
+                statusText: item.exists ? "外部" : "找不到了",
+                external: true
+            })
+        }
+    }
     // 自检用：界面自己以为列表里有几条。
     readonly property int projectCount: projectRows.count
 
@@ -88,22 +122,15 @@ Item {
         target: bridge
         function onResultReady(kind, payload) {
             if (kind === "recent_projects") {
-                recentRows.clear()
-                var recent = payload.items || []
-                for (var r = 0; r < recent.length; ++r) {
-                    recentRows.append({
-                        path: recent[r].path || "",
-                        name: recent[r].name || "",
-                        exists: recent[r].exists === true
-                    })
-                }
+                recentItems = payload.items || []
+                page.rebuildProjectRows()
             } else if (kind === "projects" || kind === "projects_cleared") {
-                projectRows.clear()
                 var rows = payload.projects || []
+                var catalog = []
                 for (var i = 0; i < rows.length; ++i) {
                     var row = rows[i]
                     var ok = row.status === "ready"
-                    projectRows.append({
+                    catalog.push({
                         path: row.path || "",
                         name: row.name || "",
                         title: row.title || "",
@@ -114,6 +141,8 @@ Item {
                             : "无法读取"
                     })
                 }
+                catalogProjects = catalog
+                page.rebuildProjectRows()
                 if (kind === "projects_cleared") {
                     var cleared = (payload.removed || []).length + (payload.moved || []).length
                     var kept = (payload.kept || []).length
@@ -201,69 +230,39 @@ Item {
                         text: "打开工程…"
                         highlighted: true
                         enabled: !app.busy
-                        onClicked: openDialog.open()
+                        // 中文在系统字体下的实测宽度比 Qt 估的宽一点，留出余量，
+                        // 否则右边缘会把最后一个字吃掉。
+                        leftPadding: 14
+                        rightPadding: 14
+                        onClicked: openMenu.open()
+
+                        Menu {
+                            id: openMenu
+                            y: parent.height
+                            MenuItem {
+                                text: "工程包（.nproj 文件夹）…"
+                                onTriggered: packageDialog.open()
+                            }
+                            MenuItem {
+                                text: "旧版工程文件（.sqlite3）…"
+                                onTriggered: legacyDialog.open()
+                            }
+                        }
                     }
                     Button {
                         text: "刷新"
                         flat: true
+                        leftPadding: 12
+                        rightPadding: 12
                         onClicked: bridge.refreshProjects()
                     }
                     Button {
                         objectName: "clearIncompatibleButton"
                         text: "清除不兼容"
                         flat: true
+                        leftPadding: 12
+                        rightPadding: 12
                         onClicked: bridge.clearIncompatibleProjects()
-                    }
-                }
-
-                // 最近打开：工程可以放在任何地方，不在 projects 目录里的靠这一行回来。
-                Flow {
-                    Layout.fillWidth: true
-                    spacing: 6
-                    visible: recentRows.count > 0
-
-                    Repeater {
-                        model: recentRows
-                        delegate: Rectangle {
-                            required property string path
-                            required property string name
-                            required property bool exists
-
-                            height: 26
-                            width: chipRow.implicitWidth + 22
-                            radius: 13
-                            color: exists ? t.accentSoft : "transparent"
-                            border.color: t.line
-
-                            MouseArea {
-                                anchors.fill: parent
-                                enabled: exists
-                                cursorShape: exists ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                onClicked: bridge.openProject(path)
-                            }
-
-                            Row {
-                                id: chipRow
-                                anchors.centerIn: parent
-                                spacing: 8
-                                Label {
-                                    text: name
-                                    font.pixelSize: 11
-                                    color: exists ? t.ink : t.muted
-                                }
-                                Label {
-                                    objectName: "forgetRecent"
-                                    text: "×"
-                                    font.pixelSize: 12
-                                    color: t.muted
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: bridge.forgetRecentProject(path)
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
 
@@ -287,6 +286,7 @@ Item {
                             required property int revision
                             required property bool openable
                             required property string statusText
+                            required property bool external
 
                             width: ListView.view.width
                             height: 64
@@ -321,9 +321,24 @@ Item {
                                     }
                                 }
                                 Label {
-                                    text: openable ? ("修订 " + revision) : statusText
+                                    text: openable
+                                        ? (external ? statusText : "修订 " + revision)
+                                        : statusText
                                     color: openable ? t.muted : t.bad
                                     font.pixelSize: 11
+                                }
+                                Label {
+                                    objectName: "forgetRecent"
+                                    visible: external
+                                    text: "移除"
+                                    color: t.muted
+                                    font.pixelSize: 11
+                                    font.underline: true
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: bridge.forgetRecentProject(path)
+                                    }
                                 }
                                 Button {
                                     text: "打开"
@@ -552,11 +567,17 @@ Item {
     }
 
     // 打开工程：工程可以放在任何地方，不要求先搬进 projects 目录。
-    // 工程包（.nproj）选它里面的 graph.sqlite3 即可，layout() 会认出包。
+    // 新工程是 .nproj 目录；旧版的裸 .sqlite3 仍然能开。
+    FolderDialog {
+        id: packageDialog
+        title: "打开工程包（.nproj 文件夹）"
+        onAccepted: bridge.openProjectUrl(selectedFolder)
+    }
+
     FileDialog {
-        id: openDialog
-        title: "打开工程"
-        nameFilters: ["工程 (*.sqlite3)", "所有文件 (*)"]
+        id: legacyDialog
+        title: "打开旧版工程文件（.sqlite3）"
+        nameFilters: ["旧版工程 (*.sqlite3)", "所有文件 (*)"]
         onAccepted: bridge.openProjectUrl(selectedFile)
     }
 }

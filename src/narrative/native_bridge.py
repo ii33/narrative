@@ -16,7 +16,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from . import graph_profile_ops, project_catalog, providers
+from . import graph_profile_ops, project_catalog, project_package, providers
 from .browse_view import moment_tree
 from .extraction import build_candidate, extract_chapter
 from .graph_operations import GraphOperations
@@ -256,11 +256,16 @@ class NativeBridge(QObject):
         """图项目目录里的名字：只认这一层，别处请写绝对路径。"""
         path = self._directory / supplied
         # 工程包是一个目录：直接用它，不再补 .sqlite3。
-        if path.suffix.lower() == ".nproj":
+        if path.suffix.lower() == project_package.PACKAGE_SUFFIX:
             resolved = path.resolve()
             if resolved.parent != self._directory or not resolved.is_dir():
                 raise ValueError("工程包须位于所选图项目目录")
             return resolved
+        # 光写名字时，先找同名工程包（新工程都是包）。
+        if path.suffix == "":
+            packed = path.with_suffix(project_package.PACKAGE_SUFFIX)
+            if packed.is_dir():
+                return packed.resolve()
         if path.suffix == "":
             path = path.with_suffix(".sqlite3")
         path = path.resolve()
@@ -339,8 +344,11 @@ class NativeBridge(QObject):
         if not re.fullmatch(r"[\w-]{1,64}", name):
             self.errorOccurred.emit("project", "项目名只能含字母、数字、中文、下划线或短横线")
             return
-        path = self._directory / f"{name}.sqlite3"
-        if path.exists():
+        # 新工程就是一个包：库、资料、提取缓存、会话都装在 <名字>.nproj 里，
+        # 备份和搬家只要拷一个目录，不会漏掉旁边那三个。
+        path = self._directory / f"{name}{project_package.PACKAGE_SUFFIX}"
+        legacy = self._directory / f"{name}.sqlite3"
+        if path.exists() or legacy.exists():
             self.errorOccurred.emit("project", "同名项目已经存在")
             return
         self._epoch += 1
@@ -352,7 +360,12 @@ class NativeBridge(QObject):
         epoch = self._epoch
 
         def work() -> dict:
-            ops = project_catalog.create_graph_project(path)
+            path.mkdir(parents=True)
+            ops = project_catalog.create_graph_project(path / project_package.DB_NAME)
+            info = ops.graph_project_info()
+            project_package.write_manifest(
+                path, title=info["title"], project_id=info["project_id"]
+            )
             return self._project_view(ops)
 
         def apply(result: dict) -> dict:
@@ -360,6 +373,7 @@ class NativeBridge(QObject):
             self._canvas.clear()
             # 换了工程就是换了话题：旧的会话不该把上一个工程的内容带进来。
             self._close_assistant()
+            self._remember_project(path)
             return result
 
         self._submit("project", work, apply, epoch=epoch)
@@ -442,8 +456,20 @@ class NativeBridge(QObject):
             items = []
             for text in self._recent_paths():
                 path = Path(text)
-                name = path.parent.name if path.suffix.lower() == ".sqlite3" else path.stem
-                items.append({"path": text, "name": name, "exists": path.exists()})
+                if path.suffix.lower() == project_package.PACKAGE_SUFFIX:
+                    name, db = path.stem, path / project_package.DB_NAME
+                elif path.name == project_package.DB_NAME:
+                    # 包里的库：名字该是包的名字，不是 "graph"。
+                    name, db = path.parent.stem, path
+                else:
+                    name, db = path.stem, path
+                # 列表上该显示工程自己的标题；读不到就用名字。
+                title = project_package._meta(db)["title"] if db.is_file() else ""
+                if not title or title == db.stem:  # 读不到时 _meta 回落到文件名
+                    title = name
+                items.append(
+                    {"path": text, "name": name, "title": title, "exists": path.exists()}
+                )
             return {"items": items}
 
         self._submit("recent_projects", work)

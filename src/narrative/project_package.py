@@ -102,8 +102,35 @@ def layout(path: str | Path) -> Layout:
     return _loose_layout(target)
 
 
+def write_manifest(
+    root: str | Path,
+    *,
+    title: str,
+    project_id: str,
+    parts: dict | None = None,
+) -> dict:
+    """写 manifest。新建工程时直接落在包目录里，不用先建裸库再搬家。"""
+    payload = {
+        "format": FORMAT,
+        "version": VERSION,
+        "title": title,
+        "project_id": project_id,
+        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "parts": parts or {name: False for name in PARTS},
+    }
+    Path(root, MANIFEST_NAME).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return payload
+
+
 def _meta(db: Path) -> dict:
-    """标题和工程号：只读，打不开就当没有。"""
+    """标题和工程号：只读，打不开就当没有。
+
+    先 resolve：相对路径的 `as_uri()` 会抛 ValueError，被下面的 except 吞掉，
+    于是每个相对路径建出来的包都写着「graph」——这个坑真的踩过。
+    """
+    db = Path(db).resolve()
     try:
         with contextlib.closing(
             sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True, timeout=1)
@@ -187,16 +214,11 @@ def pack(
             shutil.copytree(source, target)
         packed.append(name)
     meta = _meta(target_db)
-    payload = {
-        "format": FORMAT,
-        "version": VERSION,
-        "title": meta["title"],
-        "project_id": meta["project_id"],
-        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "parts": {name: name in packed for name in PARTS},
-    }
-    (root / MANIFEST_NAME).write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    payload = write_manifest(
+        root,
+        title=meta["title"],
+        project_id=meta["project_id"],
+        parts={name: name in packed for name in PARTS},
     )
     return {
         "package": str(root),
