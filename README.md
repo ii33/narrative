@@ -145,9 +145,13 @@ runtime-bin 两个包）。0.2 起运行时改说 Anthropic Messages（`POST /v1
   manifest.json     这份包是什么、什么时候封的
   graph.sqlite3     图
   material/         资料卡 JSON + 图片
-  extraction/       提取缓存 + 运行时工作目录
-  chats/            协作者会话
+
+<名字>_extraction/  提取缓存（能重跑，不进包）
+<名字>_chats/       协作者会话（聊天记录，不进包）
 ```
+
+包里只放「这份作品」：库和资料。缓存重跑就有，会话是聊天记录——两者都在包旁边，
+跟着包一起被复制、备份、发给别人是不合适的。
 
 `narrative pack --project <工程.sqlite3>` 收包（默认搬家，`pack_project` 工具里 `move=false` 是复制）。
 两种布局都认：`--project` 给裸库、给包目录、给包里的 `graph.sqlite3` 都行，读写路径是同一套——

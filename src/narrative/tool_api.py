@@ -216,7 +216,7 @@ def _state_of(ops, ids: list[str], cut: str, limit: int = 20) -> list[dict]:
 
 
 def _pack_project(ops, params: dict) -> dict:
-    """把裸工程收成一个包：库、资料、提取缓存、会话进同一个目录。"""
+    """把裸工程收成一个包：库和资料进包，缓存与会话留在包旁边。"""
     from .project_package import pack
 
     dest = params.get("dest") or None
@@ -827,7 +827,7 @@ _register(Tool(
 ))
 _register(Tool(
     "pack_project",
-    "把工程收成一个包（<名字>.nproj/：库 + 资料 + 提取缓存 + 会话），默认搬家",
+    "把工程收成一个包（<名字>.nproj/：库 + 资料；缓存与会话留在旁边），默认搬家",
     {
         "dest": {"type": "string", "description": "包放在哪；默认与工程同级"},
         "move": {"type": "boolean", "description": "默认 true；false 表示复制一份"},

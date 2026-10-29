@@ -55,26 +55,36 @@ def test_a_loose_project_is_a_database_with_three_siblings(tmp_path: Path) -> No
     assert found.extraction.name == "book_extraction"
 
 
-def test_packing_moves_everything_into_one_directory(tmp_path: Path) -> None:
+def test_packing_puts_the_work_in_one_directory_and_leaves_the_rest_beside(
+    tmp_path: Path,
+) -> None:
+    """包是「这份作品」：库和资料。缓存能重跑、会话是聊天记录，都不进包。"""
     project = _loose(tmp_path)
     result = pack(project)
 
     package = tmp_path / "book.nproj"
     assert Path(result["package"]) == package
     assert result["moved"] is True
-    assert sorted(result["parts"]) == ["chats", "extraction", "material"]
+    assert result["parts"] == ["material"]
 
-    # 原来的散件都不在了，只剩包。
+    # 库和资料进了包，原来的散件不在了。
     assert not project.exists()
     assert not (tmp_path / "book_material").exists()
     assert (package / DB_NAME).is_file()
     assert (package / MANIFEST_NAME).is_file()
+    assert (package / "material").is_dir()
+
+    # 缓存和会话留在包旁边，不进包。
+    assert (tmp_path / "book_extraction").is_dir()
+    assert (tmp_path / "book_chats").is_dir()
+    assert not (package / "extraction").exists()
+    assert not (package / "chats").exists()
 
     manifest = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))
     assert manifest["format"] == "narrative-project"
     # 标题取自库里的 meta，不是文件名。
     assert manifest["title"] == open_graph_project(package).graph_project_info()["title"]
-    assert manifest["parts"] == {"material": True, "extraction": True, "chats": True}
+    assert manifest["parts"] == {"material": True}
 
 
 def test_the_package_reads_and_writes_like_before(tmp_path: Path) -> None:
@@ -97,20 +107,22 @@ def test_the_package_reads_and_writes_like_before(tmp_path: Path) -> None:
     store.add_card("1", "认主之后")
     assert (package / "material" / "1.json").is_file()
 
+    # 会话落在包旁边，不是包里面。
     chats = ChatStore(package)
     chat = chats.create()
     chats.append(chat["id"], "user", "第三章里林舟见过谁？")
-    assert (package / "chats" / f"{chat['id']}.json").is_file()
+    assert (tmp_path / "book_chats" / f"{chat['id']}.json").is_file()
+    assert not (package / "chats").exists()
 
 
-def test_extraction_cache_follows_the_package(tmp_path: Path) -> None:
+def test_extraction_cache_lives_beside_the_package(tmp_path: Path) -> None:
     project = _loose(tmp_path)
     package = Path(pack(project)["package"])
     ops = open_graph_project(package)
-    # 工具的缓存路径也指向包里。
+    # 缓存不进包：它在包旁边，名字和包同名。
     path = tool_api._extraction_path(ops, "src1")
-    assert package in path.parents
-    assert path.parent.name == "extraction"
+    assert package not in path.parents
+    assert path.parent == tmp_path / "book_extraction"
 
 
 def test_the_catalog_lists_packages_and_bare_files(tmp_path: Path) -> None:

@@ -30,7 +30,8 @@ DB_NAME = "graph.sqlite3"
 MANIFEST_NAME = "manifest.json"
 FORMAT = "narrative-project"
 VERSION = 1
-PARTS = ("material", "extraction", "chats")
+# 包里只装「这份作品」：库和资料。提取缓存能重跑，会话是对话记录，都放在包旁边。
+PARTS = ("material",)
 
 
 @dataclass(frozen=True)
@@ -56,12 +57,19 @@ class Layout:
 
 
 def _package_layout(root: Path) -> Layout:
+    """包目录里是库和资料；缓存和会话在包旁边。
+
+    缓存可以重跑，会话是聊天记录——两者都不属于「这份作品」，不该跟着包被复制、
+    备份或发给别人。裸工程本来就是这个排法（`<名字>_extraction` 等），包沿用同一套，
+    只是把库和资料收进了一个目录。
+    """
+    sibling = root.parent
     return Layout(
         root=root,
         db=root / DB_NAME,
         material=root / "material",
-        extraction=root / "extraction",
-        chats=root / "chats",
+        extraction=sibling / f"{root.stem}_extraction",
+        chats=sibling / f"{root.stem}_chats",
         package=True,
     )
 
@@ -205,7 +213,7 @@ def pack(
     packed: list[str] = []
     for name in PARTS:
         source = getattr(current, name)
-        if not source.is_dir():
+        if not source.is_dir() or source == root / name:
             continue
         target = root / name
         if move:
@@ -213,6 +221,8 @@ def pack(
         else:
             shutil.copytree(source, target)
         packed.append(name)
+    # 缓存和会话留在包旁边：`<名字>_extraction`、`<名字>_chats`。搬库时名字没变，
+    # 所以不用动它们；复制（move=False）时也不该把别人的会话复制一份。
     meta = _meta(target_db)
     payload = write_manifest(
         root,
