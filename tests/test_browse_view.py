@@ -115,7 +115,7 @@ def test_counts_follow_the_other_conditions_but_not_the_type_filter(
     assert related["counts"] == {"event": 2, "person": 2, "scene": 1}
 
     # 搜索也一样：计数说的是"这些条件之下有什么"。
-    searched = browse_view(snapshot, query="曾")
+    searched = browse_view(snapshot, query="陈")
     assert [node["name"] for node in searched["nodes"]] == ["陈默"]
     assert searched["counts"] == {"person": 1}
 

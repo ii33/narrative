@@ -207,7 +207,7 @@ graph_revision_changed: False
 
 当前主线从“推断故事时间/认知时间”转为“按原文披露顺序整理可回查数据”。
 
-- 新增 `scripts/chapter_disclosure_index.py` 与 `docs/CHAPTER_DISCLOSURE.md`。
+- 新增 `scripts/chapter_disclosure_index.py`（披露清单的生成器；它跑在具体工程上，产物不入库）。
 - 三章结果：75 实体、620 次实体提及、118 claim（精确 60 / 部分 49 / 未定位 9）、114 relationship（共现定位 30 / 未定位 84）。
 - `report.html` 提供章节阅读、原文高亮、条目表和未定位清单；`index.json` 提供结构化数据。
 - 该结果是只读披露清单，不写入正式图，也不推断故事时间；未定位项保留原因，不猜位置。

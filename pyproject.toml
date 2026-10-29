@@ -15,8 +15,40 @@ desktop = ["PySide6>=6.8,<7"]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+# 本机的 data/ 有上万个工程文件；不剪枝的话构建会把整棵树走一遍（慢到被系统杀掉）。
+skip-excluded-dirs = true
+exclude = ["/data", "/artifacts", "/.workbuddy-ai", "/.venv", "/dist"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/narrative"]
+# 发布包里只有代码和合成样例：原文、工程库、提取缓存、会话、资料一律不进。
+exclude = [
+  "src/narrative/texts",
+  "**/*.sqlite*",
+  "**/*.db",
+  "**/*.db-wal",
+  "**/*.db-shm",
+  "**/*_extraction/**",
+  "**/*_chats/**",
+  "**/*_material/**",
+  "**/__pycache__/**",
+]
+
+[tool.hatch.build.targets.sdist]
+# 显式列目录：默认会走遍整个工程树，而本机的 data/ 里有上万个工程文件——
+# 既慢，也正是「发布包里混进工程数据」的来路。
+include = [
+  "/src",
+  "/tests",
+  "/docs",
+  "/scripts",
+  "/examples",
+  "/README.md",
+  "/REUSE.md",
+  "/pyproject.toml",
+]
+exclude = ["/src/narrative/texts", "**/*.sqlite*", "**/__pycache__/**"]
 
 [project.scripts]
 narrative = "narrative.cli:main"
