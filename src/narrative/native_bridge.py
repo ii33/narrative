@@ -25,7 +25,7 @@ from .native_models import CanvasState, candidate_summary, node_detail, search_r
 from .node_material import MaterialStore, holds_at
 from .order_ids import order_key
 from .property_audit import audit_candidate
-from .provider_store import ProviderStore
+from .provider_store import GLOBAL_SCOPE, ProviderStore
 
 _NODE_TYPES = {"person", "group", "item", "location", "event", "scene", "storyline", "other"}
 
@@ -227,10 +227,34 @@ class NativeBridge(QObject):
         return normalized
 
     def _path_for(self, name_or_path: str) -> Path:
-        supplied = Path(name_or_path.strip())
-        if not name_or_path.strip():
+        """名字按图项目目录解析，绝对路径就地接受。
+
+        绝对路径是「打开工程…」用的：工程可以放在任何地方，没必要为了打开它先把
+        文件搬进 projects 目录。工程包（`.nproj/`）、包里的 `graph.sqlite3`、裸库
+        都收——`layout()` 认得后两者。
+        """
+        text = name_or_path.strip()
+        if not text:
             raise ValueError("请选择项目")
-        path = supplied if supplied.is_absolute() else self._directory / supplied
+        supplied = Path(text)
+        if not supplied.is_absolute():
+            return self._inside(supplied)
+        resolved = supplied.expanduser()
+        if resolved.suffix.lower() == ".nproj":
+            if not resolved.is_dir():
+                raise ValueError("找不到这个工程包")
+            return resolved.resolve()
+        if resolved.suffix.lower() == ".sqlite3":
+            if not resolved.is_file():
+                raise ValueError("找不到这个工程文件")
+            return resolved.resolve()
+        if resolved.is_dir() and (resolved / "graph.sqlite3").is_file():
+            return resolved.resolve()
+        raise ValueError("这个路径不是工程（要 .sqlite3 文件或 .nproj 目录）")
+
+    def _inside(self, supplied: Path) -> Path:
+        """图项目目录里的名字：只认这一层，别处请写绝对路径。"""
+        path = self._directory / supplied
         # 工程包是一个目录：直接用它，不再补 .sqlite3。
         if path.suffix.lower() == ".nproj":
             resolved = path.resolve()
@@ -364,9 +388,76 @@ class NativeBridge(QObject):
             self._canvas.clear()
             # 换了工程就是换了话题：旧的会话不该把上一个工程的内容带进来。
             self._close_assistant()
+            self._remember_project(path)
             return result
 
         self._submit("project", work, apply, epoch=epoch)
+
+    # -- 最近打开 --------------------------------------------------------
+    #
+    # 工程可以放在任何地方，「打开工程…」打开的往往不在 projects 目录里。
+    # 不记住的话，下次启动列表里就没有它了。
+
+    RECENT_LIMIT = 8
+
+    def _recent_paths(self) -> list[str]:
+        try:
+            raw = ProviderStore().get(GLOBAL_SCOPE, "recent_projects")
+        except Exception:  # 存储坏了不该连累启动
+            return []
+        if not raw:
+            return []
+        try:
+            rows = json.loads(raw)
+        except ValueError:
+            return []
+        return [row for row in rows if isinstance(row, str)] if isinstance(rows, list) else []
+
+    def _remember_project(self, path: Path) -> None:
+        text = str(path)
+        rows = [row for row in self._recent_paths() if row != text]
+        rows.insert(0, text)
+        try:
+            ProviderStore().put(
+                GLOBAL_SCOPE,
+                "recent_projects",
+                json.dumps(rows[: self.RECENT_LIMIT], ensure_ascii=False),
+            )
+        except Exception:  # 记不住不影响打开
+            pass
+
+    @Slot(str)
+    def openProjectUrl(self, url: str) -> None:
+        """QML 的 FileDialog 给的是 file:///… URL，转成本地路径再打开。"""
+        from PySide6.QtCore import QUrl
+
+        local = QUrl(url).toLocalFile()
+        self.openProject(local or url)
+
+    @Slot()
+    def loadRecentProjects(self) -> None:
+        """最近打开过的工程，带「还在不在」——搬走或删掉的不该点进去才报错。"""
+
+        def work() -> dict:
+            items = []
+            for text in self._recent_paths():
+                path = Path(text)
+                name = path.parent.name if path.suffix.lower() == ".sqlite3" else path.stem
+                items.append({"path": text, "name": name, "exists": path.exists()})
+            return {"items": items}
+
+        self._submit("recent_projects", work)
+
+    @Slot(str)
+    def forgetRecentProject(self, path: str) -> None:
+        rows = [row for row in self._recent_paths() if row != path]
+        try:
+            ProviderStore().put(
+                GLOBAL_SCOPE, "recent_projects", json.dumps(rows, ensure_ascii=False)
+            )
+        except Exception:
+            pass
+        self.loadRecentProjects()
 
     @Slot()
     def loadGraph(self) -> None:

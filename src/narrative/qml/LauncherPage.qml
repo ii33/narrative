@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Dialogs
 import QtQuick.Layouts
 
 // 启动页：工程列表 + 全局设置（harness 默认配置）。
@@ -17,11 +18,13 @@ Item {
     readonly property var effortOptions: ["不设置", "low", "medium", "high"]
 
     ListModel { id: projectRows }
+    ListModel { id: recentRows }
     // 自检用：界面自己以为列表里有几条。
     readonly property int projectCount: projectRows.count
 
     Component.onCompleted: {
         bridge.refreshProjects()
+        bridge.loadRecentProjects()
         bridge.loadGlobalSettings()
     }
 
@@ -84,7 +87,17 @@ Item {
     Connections {
         target: bridge
         function onResultReady(kind, payload) {
-            if (kind === "projects" || kind === "projects_cleared") {
+            if (kind === "recent_projects") {
+                recentRows.clear()
+                var recent = payload.items || []
+                for (var r = 0; r < recent.length; ++r) {
+                    recentRows.append({
+                        path: recent[r].path || "",
+                        name: recent[r].name || "",
+                        exists: recent[r].exists === true
+                    })
+                }
+            } else if (kind === "projects" || kind === "projects_cleared") {
                 projectRows.clear()
                 var rows = payload.projects || []
                 for (var i = 0; i < rows.length; ++i) {
@@ -184,6 +197,13 @@ Item {
                     }
                     Item { Layout.fillWidth: true }
                     Button {
+                        objectName: "openProjectButton"
+                        text: "打开工程…"
+                        highlighted: true
+                        enabled: !app.busy
+                        onClicked: openDialog.open()
+                    }
+                    Button {
                         text: "刷新"
                         flat: true
                         onClicked: bridge.refreshProjects()
@@ -193,6 +213,57 @@ Item {
                         text: "清除不兼容"
                         flat: true
                         onClicked: bridge.clearIncompatibleProjects()
+                    }
+                }
+
+                // 最近打开：工程可以放在任何地方，不在 projects 目录里的靠这一行回来。
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: 6
+                    visible: recentRows.count > 0
+
+                    Repeater {
+                        model: recentRows
+                        delegate: Rectangle {
+                            required property string path
+                            required property string name
+                            required property bool exists
+
+                            height: 26
+                            width: chipRow.implicitWidth + 22
+                            radius: 13
+                            color: exists ? t.accentSoft : "transparent"
+                            border.color: t.line
+
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: exists
+                                cursorShape: exists ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                onClicked: bridge.openProject(path)
+                            }
+
+                            Row {
+                                id: chipRow
+                                anchors.centerIn: parent
+                                spacing: 8
+                                Label {
+                                    text: name
+                                    font.pixelSize: 11
+                                    color: exists ? t.ink : t.muted
+                                }
+                                Label {
+                                    objectName: "forgetRecent"
+                                    text: "×"
+                                    font.pixelSize: 12
+                                    color: t.muted
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: bridge.forgetRecentProject(path)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -271,7 +342,7 @@ Item {
                         Label {
                             anchors.centerIn: parent
                             visible: projectRows.count === 0
-                            text: "还没有工程。在下方新建一个。"
+                            text: "还没有工程。可以新建一个，或用上面的「打开工程…」选一个 .sqlite3。"
                             color: t.muted
                         }
                     }
@@ -478,5 +549,14 @@ Item {
                 }
             }
         }
+    }
+
+    // 打开工程：工程可以放在任何地方，不要求先搬进 projects 目录。
+    // 工程包（.nproj）选它里面的 graph.sqlite3 即可，layout() 会认出包。
+    FileDialog {
+        id: openDialog
+        title: "打开工程"
+        nameFilters: ["工程 (*.sqlite3)", "所有文件 (*)"]
+        onAccepted: bridge.openProjectUrl(selectedFile)
     }
 }
