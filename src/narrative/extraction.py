@@ -19,6 +19,9 @@ from .order_ids import allocate, prefix_for
 from .property_categories import aspect_of
 from .property_store import record_position
 
+# 提示词改一次，这个号跟着动；缓存的提取结果里会写下来，便于对照。
+PROMPT_VERSION = "extract/3"
+
 NODE_TYPES = ("person", "group", "item", "location", "scene", "event")
 
 PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
@@ -97,6 +100,9 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
   都合并成一条，值照原文写；不要拆成两条记录。
 - **数值和描述共用一个属性名。** `height = 180`、`height = 矮小`、`height = 变高了`
   都是 `height`；带单位直接写进值里（`"180 公分"`），不要另起 `height_cm`。
+- **属性名用中文短语**：`身份`、`持有者`、`修为境界`、`兵力`。不要造 `identity`、`holder`
+  这种英文标识符——界面上会和中文混在一起。**「已有属性名」里出现过的名字照旧沿用**
+  （包括里面的英文名），同一方面写两个名字等于两条线。
 - **矛盾说法各自保留，但必须标来源。** 两个人对同一件事说法不同时，记成两条
   不同 `scope`/`holder` 的记录；不要为了"一致"丢掉其中一条，也不要都写成 `world`。
 - **过时的说法不删。** 后文改口时新记录照常追加，旧记录保留——程序按披露顺序
@@ -112,6 +118,8 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
 
 每条属性再给一个 `category`，从该节点类型的分类表里选一个；**拿不准就写「其他」**，
 照常保存，不影响取值。分类只决定这条记录显示在哪个大类下，不改变属性名，也不要求拆分属性。
+**分类名照抄表里的写法**（简体、一字不改）：原文是繁体也照抄，写成「實力與資源」会认不出来，
+只能落到「其他」。
 
 人物：基本信息 / 外貌 / 身份与经历 / 能力与身体状态 / 持有与使用 / 关系 / 心理与意图 / 其他
 - 基本信息：姓名、别名、性别、年龄、种族、籍贯
@@ -155,16 +163,16 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
     "aliases": [], "participants": ["林舟", "陈默", "水果刀"], "scene": "撞破女友与陈默"}}
 ],
  "properties": [
-  {{"node": "林舟", "property": "age", "value": 29, "value_type": "number",
+  {{"node": "林舟", "property": "年龄", "value": 29, "value_type": "number",
     "category": "基本信息",
     "quotes": ["原文逐字引文"], "scope": "world", "holder": null,
     "source": "narration", "related_nodes": [], "at_event": "沈砚告知林舟陈总来电"}},
-  {{"node": "铜钥匙", "property": "holder", "value": "林舟", "value_type": "node",
+  {{"node": "铜钥匙", "property": "持有者", "value": "林舟", "value_type": "node",
     "category": "归属与持有",
     "quotes": ["原文逐字引文"], "scope": "world", "holder": null,
     "source": "narration", "related_nodes": ["老周"],
     "at_event": "老周赠送铜钥匙，林舟戴上试用"}},
-  {{"node": "老周", "property": "state", "value": "赢了那场交战", "value_type": "string",
+  {{"node": "老周", "property": "状态", "value": "赢了那场交战", "value_type": "string",
     "category": "其他",
     "quotes": ["原文逐字引文"], "scope": "cognition", "holder": "林舟",
     "source": "thought", "related_nodes": ["苏娘"],
@@ -434,6 +442,7 @@ def read_chapter(
     result = parse_nodes(reply.raw, text)
     result.update({
         "chapter": title,
+        "prompt_version": PROMPT_VERSION,
         "characters": len(text),
         "model": settings.model,
         "provider": settings.provider,

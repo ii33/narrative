@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-from . import property_categories, property_core
+from . import property_categories, property_core, property_labels
 from .order_ids import order_key
 
 ERROR = "error"
@@ -324,6 +324,19 @@ def audit_properties(
                 node=node,
                 suggestion="节点撤回时一并撤回它的属性记录，或恢复该节点",
             ))
+
+    # 属性名要在界面上显示中文。英文标识符没有对照时，读者会看到「身份」和
+    # `office` 并排——中英混着，一眼就看出来这行不是给人写的。
+    for property_id, definition in definitions.items():
+        if not property_id.isascii() or property_labels.label_for(property_id) != property_id:
+            continue
+        issues.append(_issue(
+            "label_missing", INFO,
+            f"属性名「{property_id}」没有中文对照，界面上会直接显示英文",
+            property_id=property_id,
+            records=[definition],
+            suggestion="在 property_labels.LABELS 里补一条，或用节点编辑器的「改名」换成中文",
+        ))
 
     # A definition whose records were all taken back is not unused — it is in use
     # and currently empty, which `retracted_no_successor` already says.
