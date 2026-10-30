@@ -16,7 +16,7 @@ from .graph_operations import GraphOperations
 from .harness import HarnessRunner, HarnessSettings
 
 MAX_ROUNDS = 4
-REVIEW_VERSION = "review/3"
+REVIEW_VERSION = "review/4"
 
 REVIEW_PROMPT = """你在为一部小说的属性记录做去重。
 
@@ -55,6 +55,20 @@ REVIEW_PROMPT = """你在为一部小说的属性记录做去重。
 - **不限于本章提议的属性。** 上面「已记录的值」里可能带着本章没有提议、但被本章内容
   推翻的方面（本章用更宽的名字写了同一件事，比如「外貌」里说肤色变白了，而旧记录里
   还有一条「肤色」）。这种也要在 `supersede` 里给出，`property` 用旧记录里的名字。
+- **一时的状态会过去，别让它一直挂着。** 判断依据是每条旧值下面的「原话」：
+  - 情绪（悲伤、紧张、很满意）、一时的姿态（打坐恢复中、目瞪口呆）、当场的效果
+    （刚改造完、浑身是血）——这类**不是长期属性**。本章时间往前走了、场景换了、
+    也没再确认，读者读到这里时它已经不成立，要判失效；`at_event` 填**读者意识到它
+    已经过去的那一处**（他接着去做别的事、或新场景开始）。
+  - 伤势、身份、持有物、修为这类**会一直成立直到被改变**的，本章没明说变化就不要判失效。
+  - 拿不准是长期还是一时的，就不判——宁可留一条旧状态，也不要编一个终止点。
+- **一时的状态会过去，别让它一直挂着。** 判断依据是每条旧值下面的「原话」：
+  - 情绪（悲伤、紧张、很满意）、一时的姿态（打坐恢复中、目瞪口呆）、当场的效果
+    （刚改造完、浑身是血）——这类**不是长期属性**。本章时间往前走了、场景换了、
+    也没再确认，读者读到这里时它已经不成立，要判失效；`at_event` 填**读者意识到它
+    已经过去的那一处**（他接着去做别的事、或新场景开始）。
+  - 伤势、身份、持有物、修为这类**会一直成立直到被改变**的，本章没明说变化就不要判失效。
+  - 拿不准是长期还是一时的，就不判——宁可留一条旧状态，也不要编一个终止点。
 
 ## 本章原文
 
@@ -200,6 +214,9 @@ def _stored_values(ops: GraphOperations, data: dict) -> list[dict]:
             "at_event": events.get(record.get("event_id"), ""),
             "chapter": position(record)[0],
             "start": position(record)[1],
+            # 旧值自己的那句原文：判断「它现在还有没有效」要看它是怎么被说出来的，
+            # 光看「心情 = 悲伤」看不出这是一时的还是长期的。
+            "quote": str((record.get("evidence") or {}).get("quote") or "")[:60],
         }
         for key, (_pos, record) in sorted(latest.items())
     ]
@@ -222,6 +239,7 @@ def _format_stored(rows: list[dict]) -> str:
         f"- {row['node']}.{row['property']} = {row['value']}"
         f"{' [' + row['scope'] + ('/' + row['holder'] if row.get('holder') else '') + ']' if row.get('scope', 'world') != 'world' else ''}"
         f" @ {row['at_event']}（第{row.get('chapter', '?')}章 {row.get('start', '?')}）"
+        + (f"\n    原话：{row['quote']}" if row.get("quote") else "")
         for row in rows
     )
 
