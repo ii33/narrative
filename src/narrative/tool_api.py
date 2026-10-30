@@ -700,34 +700,17 @@ def _extract_build(ops, params: dict) -> dict:
 
 
 def _extract_commit(ops, params: dict) -> dict:
-    """第四步：把落好的对象和记录变成一个待审候选。图要人接受才变。"""
-    from .extraction import build_candidate
+    """第四步：可信的直接进图，拿不准的留成待审候选。
+
+    `review="all"` 是旧行为：全部进候选，等人逐条看。
+    """
+    from .extraction import commit_extraction
 
     _need(params, "source_id")
     source_id = str(params["source_id"])
     data = _read_extraction(ops, source_id)
-    built = build_candidate(ops, data)
-    if built.get("empty"):
-        return {"source_id": source_id, "candidate_id": None, "note": "提取结果为空"}
-    if built["errors"]:
-        return {
-            "source_id": source_id,
-            "candidate_id": None,
-            "diagnostics": built["diagnostics"],
-        }
-    candidate = ops.change_propose(
-        built["objects"], built["property_records"], built["revision"],
-        source="correction" if built.get("requires_correction") else "model",
-        note=f"原文提取：{data.get('chapter', source_id)}",
-    )
-    return {
-        "status": "accepted",
-        "source_id": source_id,
-        "candidate_id": candidate,
-        "node_count": built["node_count"],
-        "scene_links": built["scene_links"],
-        "diagnostics": built["diagnostics"],
-    }
+    result = commit_extraction(ops, data, review=str(params.get("review") or "doubtful"))
+    return {"source_id": source_id, **result}
 
 
 def _extract(ops, params: dict) -> dict:
@@ -1071,8 +1054,14 @@ _register(Tool(
 ))
 _register(Tool(
     "extract_commit",
-    "提取第四步：把落好的结果变成一个待审候选（图要人接受才变）",
-    {"source_id": {"type": "string", "required": True}},
+    "提取第四步：可信的直接进图，拿不准的留成待审候选（review=all 退回全部待审）",
+    {
+        "source_id": {"type": "string", "required": True},
+        "review": {
+            "type": "string",
+            "description": "doubtful（默认，只把拿不准的留给人）或 all（全部留给人）",
+        },
+    },
     _extract_commit,
     writes=True,
 ))

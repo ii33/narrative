@@ -100,9 +100,20 @@ Item {
                 data = payload
                 page.rebuild()
             } else if (kind === "extraction_commit") {
-                app.toast(payload.status === "pending"
-                    ? "已生成待审候选，去「审核」页处理"
-                    : (payload.message || "已提交"), false)
+                // 可信的直接进图，只有拿不准的才留成候选。
+                var took = payload.accepted || null
+                var left = (payload.doubtful || []).length
+                if (took && left === 0)
+                    app.toast("已进图：" + took.node_count + " 个节点 / "
+                        + took.property_count + " 条属性，没有需要确认的", false)
+                else if (took)
+                    app.toast("已进图 " + took.node_count + " 个节点；"
+                        + left + " 处拿不准，去「审核」页确认", true)
+                else if (left > 0)
+                    app.toast(left + " 处拿不准，去「审核」页确认", true)
+                else
+                    app.toast(payload.errors ? "预检有错误，未进图" : "没有可提交的内容",
+                        payload.errors === true)
             }
         }
     }

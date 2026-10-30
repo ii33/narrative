@@ -139,11 +139,11 @@ Item {
                 app.toast("审核完成：" + page.auditErrors + " 个错误 / "
                           + page.auditWarnings + " 个待确认", page.auditErrors > 0)
             } else if (kind === "extraction_commit") {
-                if (payload.audit) page.applyAudit(payload.audit, "本次提取")
-                app.toast(payload.audit
-                    ? "已生成候选；审核发现 " + page.auditErrors + " 个错误 / "
-                      + page.auditWarnings + " 个待确认"
-                    : "已生成候选", false)
+                var took = payload.accepted || null
+                var left = (payload.doubtful || []).length
+                app.toast(took
+                    ? ("已进图 " + took.node_count + " 个节点，留 " + left + " 处待确认")
+                    : ("留 " + left + " 处待确认"), left > 0)
                 page.load()
             } else if (kind === "review") {
                 app.toast("已处理，修订号 " + (payload.revision || ""), false)

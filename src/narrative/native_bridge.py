@@ -18,13 +18,12 @@ from PySide6.QtCore import QObject, Signal, Slot
 
 from . import graph_profile_ops, project_catalog, project_package, providers
 from .browse_view import moment_tree
-from .extraction import build_candidate, extract_chapter
+from .extraction import extract_chapter
 from .graph_operations import GraphOperations
 from .harness import HarnessRunner, HarnessSettings, harness_env
 from .native_models import CanvasState, candidate_summary, node_detail, search_result
 from .node_material import MaterialStore, holds_at
 from .order_ids import order_key
-from .property_audit import audit_candidate
 from .provider_store import GLOBAL_SCOPE, ProviderStore
 
 _NODE_TYPES = {"person", "group", "item", "location", "event", "scene", "storyline", "other"}
@@ -1178,32 +1177,19 @@ class NativeBridge(QObject):
 
     @Slot(str)
     def commitExtraction(self, source_id: str) -> None:
-        """Turn a stored extraction into one pending candidate."""
+        """落进图：可信的直接进，拿不准的留成待审候选。"""
+        from .extraction import commit_extraction
+
         path = self._extraction_dir() / f"{source_id}.json"
 
         def work(ops) -> dict:
             if not path.is_file():
                 raise ValueError("还没有提取结果")
             data = json.loads(path.read_text(encoding="utf-8"))
-            built = build_candidate(ops, data)
-            if built.get("empty"):
-                return {"candidate": None, "empty": True, "diagnostics": []}
-            if built["errors"]:
-                return {"diagnostics": built["diagnostics"], "candidate": None}
-            # Review round: audit the nodes this extraction touches before the
-            # candidate is accepted, so overlaps and contradictions surface now.
-            audit = audit_candidate(ops, built)
-            candidate = ops.change_propose(
-                built["objects"], built["property_records"], built["revision"],
-                source="correction" if built.get("requires_correction") else "model",
-                note=f"原文提取：{data.get('chapter', source_id)}",
-            )
-            return {
-                "candidate": ops.change_candidate(candidate),
-                "diagnostics": built["diagnostics"],
-                "node_count": built["node_count"],
-                "scene_links": built["scene_links"],
-                "audit": audit,
+            result = commit_extraction(ops, data)
+            candidate = result.get("candidate")
+            return result | {
+                "candidate": ops.change_candidate(candidate) if candidate else None,
             }
 
         self._project_task("extraction_commit", work)

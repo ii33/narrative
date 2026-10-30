@@ -279,20 +279,44 @@ def test_extract_build_computes_the_candidate_without_writing(tmp_path: Path) ->
     assert pending["changes"] == []
 
 
-def test_extract_commit_makes_a_pending_candidate_only(tmp_path: Path) -> None:
+def test_extract_commit_lets_the_confident_part_straight_in(tmp_path: Path) -> None:
+    """引文对得上、预检没问题、模型没存疑：不用人点头，直接进图。"""
     project, source_id = _fresh_project(tmp_path / "commit.nproj")
     _seed_extraction(project, source_id, "林舟推门进来。老周笑了。", PROPOSAL)
 
     before = tool_api.call("project_info", {}, project=project)["project"]["revision"]
     committed = tool_api.call("extract_commit", {"source_id": source_id}, project=project)
-    assert committed["candidate_id"]
+
+    accepted = committed["accepted"]
+    assert accepted and accepted["node_count"] == 3
+    assert accepted["revision"] == before + 1
+    # 没有拿不准的，就不留候选。
+    assert committed["candidate"] is None
+    assert committed["doubtful"] == []
+    assert tool_api.call("list_candidates", {}, project=project)["changes"] == []
+
+    nodes = tool_api.call("list_nodes", {}, project=project)["nodes"]
+    assert sorted(node["id"] for node in nodes) == ["E1", "P1", "P2"]
+
+
+def test_extract_commit_can_still_hand_everything_to_review(tmp_path: Path) -> None:
+    """review="all" 是旧行为：一条都不自动接受，全部留成待审候选。"""
+    project, source_id = _fresh_project(tmp_path / "review.nproj")
+    _seed_extraction(project, source_id, "林舟推门进来。老周笑了。", PROPOSAL)
+
+    before = tool_api.call("project_info", {}, project=project)["project"]["revision"]
+    committed = tool_api.call(
+        "extract_commit", {"source_id": source_id, "review": "all"}, project=project
+    )
+    assert committed["accepted"] is None
+    assert committed["candidate"]
     # 候选不是图：接受之前修订号不动。
     assert tool_api.call("project_info", {}, project=project)["project"]["revision"] == before
     pending = tool_api.call("list_candidates", {}, project=project)
-    assert [row["id"] for row in pending["changes"]] == [committed["candidate_id"]]
+    assert [row["id"] for row in pending["changes"]] == [committed["candidate"]]
 
     accepted = tool_api.call(
-        "accept_candidate", {"candidate_id": committed["candidate_id"]}, project=project
+        "accept_candidate", {"candidate_id": committed["candidate"]}, project=project
     )
     assert accepted["revision"] == before + 1
     nodes = tool_api.call("list_nodes", {}, project=project)["nodes"]

@@ -85,10 +85,14 @@ def audit_properties(
         record.get("target_id") for record in records
         if record.get("kind") == "property_retraction"
     }
+    # 找撤回目标要索引**全部**取值：撤回可能指向别的批次（上一章）的记录，
+    # 按本次节点筛过就找不到目标，会误报「撤不掉任何东西」。分组与统计仍只看本次节点。
+    indexed_values = [
+        record for record in records if record.get("kind") == "property_value"
+    ]
     values_all = [
-        record for record in records
-        if record.get("kind") == "property_value"
-        and (node_ids is None or record.get("node_id") in node_ids)
+        record for record in indexed_values
+        if node_ids is None or record.get("node_id") in node_ids
     ]
     values = [record for record in values_all if record.get("id") not in retracted_ids]
     definitions = {
@@ -109,7 +113,7 @@ def audit_properties(
     # What the review round would mark: older values a later disclosure replaced.
     # Computed from the same rule the extraction uses, so the audit cannot ask for
     # a different invalidation than the one already written into a candidate.
-    values_by_id = {record["id"]: record for record in values_all}
+    values_by_id = {record["id"]: record for record in indexed_values}
     issues: list[dict] = []
     groups: dict[tuple, list[dict]] = defaultdict(list)
     per_node_names: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))

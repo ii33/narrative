@@ -994,3 +994,229 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
         ]),
         "scene_links": sum(len(items) for items in scene_children.values()),
     }
+
+
+# -- 只有拿不准的才要人看 ------------------------------------------------
+
+def split_confident(ops, built: dict, data: dict) -> dict:
+    """把一次提取分成「可以直接进图」和「要人看一眼」两份。
+
+    可信的标准是**没有反面证据**：引文逐字对上（build 阶段已经保证）、预检没报它、
+    属性审核没报它、模型没标存疑、同一事件里同一方面没有并列值。剩下的才算存疑——
+    这样人只看那一小撮，而不是逐条点头。
+
+    粒度到**记录**：一个节点的身份没问题、只是某条取值有疑问时，节点照样进图，只把
+    那条取值留下来。节点自己有问题（预检报它、参与者里有存疑节点）才整节点留。
+
+    返回 ``{"confident": {...}, "doubtful": {...}, "reasons": [...]}``。
+    """
+    from .property_audit import audit_candidate
+
+    objects = list(built.get("objects", []))
+    records = list(built.get("property_records", []))
+    nodes = {obj["id"]: obj for obj in objects if obj.get("kind") == "node"}
+    # 记录可能挂在上一章已有的节点上：显示原因时也要查得到名字。
+    names = {node["id"]: node.get("name") for node in ops.graph_snapshot().get("nodes", [])}
+    names |= {node_id: node.get("name") for node_id, node in nodes.items()}
+    by_id = {record["id"]: record for record in records if record.get("id")}
+    values = [record for record in records if record.get("kind") == "property_value"]
+
+    doubtful_nodes: dict[str, str] = {}
+    doubtful_records: dict[str, str] = {}
+
+    def flag_node(node_id: str | None, why: str) -> None:
+        if node_id and node_id in nodes:
+            doubtful_nodes.setdefault(str(node_id), why)
+
+    def flag_record(record_id: str | None, why: str) -> None:
+        if record_id and record_id in by_id:
+            doubtful_records.setdefault(str(record_id), why)
+
+    for row in built.get("diagnostics") or []:
+        if row.get("severity") != "error":
+            continue
+        target = str(row.get("object_id") or "")
+        why = f"预检 {row.get('code')}"
+        if target in nodes:
+            flag_node(target, why)
+        elif target in by_id:
+            flag_record(target, why)
+
+    for item in ((data.get("review") or {}).get("unresolved") or []):
+        name = str(item.get("node") or "")
+        aspect = str(item.get("property") or "")
+        wanted = item.get("value")
+        why = f"模型拿不准：{item.get('why') or item.get('reason') or '未说明'}"
+        matched = [
+            record for record in values
+            if nodes.get(str(record.get("node_id")), {}).get("name") == name
+            and str(record.get("property_id")) == aspect
+            and (wanted is None or str(record.get("value")) == str(wanted))
+        ]
+        for record in matched:
+            flag_record(record["id"], why)
+        if not matched:
+            for node_id, node in nodes.items():
+                if node.get("name") == name:
+                    flag_node(node_id, why)
+
+    # 分类名、缺中文名只是显示上的分组，不影响这条记录成立，不值得拦下来让人看。
+    cosmetic = {"category_unknown", "category_unassigned", "label_missing"}
+    for issue in audit_candidate(ops, built).get("issues") or []:
+        if issue.get("severity") not in {"error", "warning"}:
+            continue
+        if issue.get("code") in cosmetic:
+            continue
+        why = f"审核 {issue.get('code')}"
+        flagged = issue.get("record_ids") or []
+        for record_id in flagged:
+            flag_record(record_id, why)
+        if not flagged:
+            flag_node(issue.get("node_id"), why)
+
+    # 同一事件、同一方面、同一作用域里出现两个不同值：并列，整组留给人看。
+    groups: dict[tuple, list[dict]] = {}
+    for record in values:
+        key = (
+            record.get("node_id"), record.get("property_id"),
+            record.get("event_id"), record.get("scope"),
+        )
+        groups.setdefault(key, []).append(record)
+    for rows in groups.values():
+        if len({str(row.get("value")) for row in rows}) > 1:
+            for row in rows:
+                flag_record(row["id"], "同一事件里同一方面有多个不同值")
+
+    # 闭合：存疑节点带着自己的记录一起留；引用了它的节点也留（否则参与者悬空）。
+    doubtful_names = {nodes[node_id].get("name") for node_id in doubtful_nodes}
+    for record in records:
+        if record.get("kind") != "property_definition" and str(
+            record.get("node_id")
+        ) in doubtful_nodes:
+            flag_record(record.get("id"), "所属节点待确认")
+    for node_id, node in nodes.items():
+        if node_id in doubtful_nodes:
+            continue
+        references = set(node.get("participants") or [])
+        if node.get("scene"):
+            references.add(str(node["scene"]))
+        if references & doubtful_names:
+            flag_node(node_id, "参与者里有待确认的节点")
+
+    # 取代是自动的（`basis="audit"`，撤的是本批里被后一条披露顶掉的旧值），跟着走；
+    # 模型自己判出来的失效才留给人看。
+    for record in records:
+        if record.get("kind") != "property_retraction":
+            continue
+        if str(record.get("basis") or "") != "audit":
+            flag_record(record.get("id"), "模型判断的失效，要人确认")
+
+    confident_objects = [
+        obj for obj in objects
+        if not (obj.get("kind") == "node" and obj["id"] in doubtful_nodes)
+    ]
+    doubtful_objects = [
+        obj for obj in objects
+        if obj.get("kind") == "node" and obj["id"] in doubtful_nodes
+    ]
+    confident_records = [r for r in records if r.get("id") not in doubtful_records]
+    doubtful = [r for r in records if r.get("id") in doubtful_records]
+
+    reasons = [
+        {"node_id": node_id, "name": nodes[node_id].get("name"), "why": why}
+        for node_id, why in doubtful_nodes.items()
+    ]
+    reasons += [
+        {
+            "record_id": record_id,
+            "node_id": by_id[record_id].get("node_id"),
+            "name": names.get(str(by_id[record_id].get("node_id"))),
+            "property_id": by_id[record_id].get("property_id"),
+            "value": by_id[record_id].get("value"),
+            "why": why,
+        }
+        for record_id, why in doubtful_records.items()
+    ]
+    return {
+        "confident": {"objects": confident_objects, "records": confident_records},
+        "doubtful": {"objects": doubtful_objects, "records": doubtful},
+        "reasons": reasons,
+    }
+
+
+def commit_extraction(ops, data: dict, *, review: str = "doubtful") -> dict:
+    """把一份提取落进图：可信的直接进，存疑的留成候选。
+
+    ``review="all"`` 退回老做法：全部进候选，等人一条条看。
+    """
+    built = build_candidate(ops, data)
+    note = f"原文提取：{data.get('chapter') or data.get('source_id') or ''}"
+    source = "correction" if built.get("requires_correction") else "model"
+
+    if built.get("empty"):
+        return {
+            "empty": True, "candidate": None, "accepted": None,
+            "diagnostics": [], "doubtful": [], "review": review,
+        }
+    if built["errors"]:
+        return {
+            "errors": True, "candidate": None, "accepted": None,
+            "diagnostics": built["diagnostics"], "doubtful": [], "review": review,
+        }
+
+    if review == "all":
+        candidate = ops.change_propose(
+            built["objects"], built["property_records"], built["revision"],
+            source=source, note=note,
+        )
+        return {
+            "candidate": candidate, "accepted": None, "empty": False, "errors": False,
+            "diagnostics": built["diagnostics"], "doubtful": [], "review": "all",
+            "node_count": built["node_count"],
+        }
+
+    split = split_confident(ops, built, data)
+    accepted = None
+    confident = split["confident"]
+    if confident["objects"] or confident["records"]:
+        revision = ops.graph_project_info()["revision"]
+        try:
+            batch = ops.change_propose(
+                confident["objects"], confident["records"], revision,
+                source=source, note=f"{note}（可信部分）",
+            )
+            ops.change_accept(batch, 1)
+        except ValueError as exc:
+            # 拆开之后过不了预检：宁可全部交给人，也不要吞掉一条。
+            candidate = ops.change_propose(
+                built["objects"], built["property_records"], built["revision"],
+                source=source, note=note,
+            )
+            return {
+                "candidate": candidate, "accepted": None, "empty": False, "errors": False,
+                "diagnostics": built["diagnostics"], "doubtful": split["reasons"],
+                "review": review, "fallback": str(exc), "node_count": built["node_count"],
+            }
+        accepted = {
+            "candidate": batch,
+            "revision": ops.graph_project_info()["revision"],
+            "node_count": len([
+                obj for obj in confident["objects"] if obj.get("kind") == "node"
+            ]),
+            "property_count": len([
+                rec for rec in confident["records"] if rec.get("kind") == "property_value"
+            ]),
+        }
+
+    candidate = None
+    doubtful = split["doubtful"]
+    if doubtful["objects"] or doubtful["records"]:
+        candidate = ops.change_propose(
+            doubtful["objects"], doubtful["records"],
+            ops.graph_project_info()["revision"], source=source, note=f"{note}（待确认）",
+        )
+    return {
+        "candidate": candidate, "accepted": accepted, "empty": False, "errors": False,
+        "diagnostics": built["diagnostics"], "doubtful": split["reasons"],
+        "review": review, "node_count": built["node_count"],
+    }
