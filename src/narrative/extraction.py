@@ -504,18 +504,45 @@ def read_chapter(
     """
     runner = HarnessRunner(settings, api_key, workdir)
     known = known_properties(ops) if ops is not None else None
+    session = f"extract-{uuid4().hex}"
+    raws: list[str] = []
+
+    def _check(reply: HarnessReply) -> None:
+        """空回复 + 服务端报错时，把真正的原因说出来，别只说「没有 JSON」。"""
+        if reply.raw.strip():
+            return
+        problem = str(reply.metadata.get("service_error") or "").strip()
+        raise ValueError(f"模型没有返回内容：{problem or '空回复'}")
+
     try:
-        reply: HarnessReply = runner.agent_turn(
-            build_prompt(title, text, known), f"extract-{uuid4().hex}"
-        )
+        reply: HarnessReply = runner.agent_turn(build_prompt(title, text, known), session)
+        raws.append(reply.raw)
+        _check(reply)
+        # 先落盘再解析：解析失败时，磁盘上留着的必须是**这次**的回复。
+        (workdir / "raw.txt").write_text(reply.raw, encoding="utf-8")
+        try:
+            result = parse_nodes(reply.raw, text)
+        except ValueError:
+            # 一次重试：让它把完整的 JSON 再输出一遍，别把整章丢掉。
+            reply = runner.agent_turn(
+                "上一条回复不是完整的 JSON（可能被截断或混了说明）。"
+                "请重新输出那个 JSON 对象：只输出 JSON，不要解释，不要代码块。",
+                session,
+            )
+            raws.append(reply.raw)
+            _check(reply)
+            result = parse_nodes(reply.raw, text)
     finally:
         runner.close()
     workdir.mkdir(parents=True, exist_ok=True)
     (workdir / "raw.txt").write_text(reply.raw, encoding="utf-8")
+    if len(raws) > 1:
+        (workdir / "raw-attempts.json").write_text(
+            json.dumps(raws, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
     (workdir / "metadata.json").write_text(
         json.dumps(reply.metadata, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    result = parse_nodes(reply.raw, text)
     result.update({
         "chapter": title,
         "prompt_version": PROMPT_VERSION,
@@ -546,9 +573,19 @@ def review_chapter(
         return data
     from .extraction_review import review_properties
 
-    reviewed = review_properties(
-        ops, data, settings=settings, api_key=api_key, workdir=workdir
-    )
+    try:
+        reviewed = review_properties(
+            ops, data, settings=settings, api_key=api_key, workdir=workdir
+        )
+    except ValueError as exc:
+        # 复核没跑通（模型回了段话、或反复不给 JSON）：本章照常落图，把失败记下来。
+        # 宁可少一道对照，也不要整章作废。
+        result = dict(data)
+        result["review"] = {
+            "dropped": [], "unresolved": [], "rounds": 0,
+            "version": "review/6", "error": str(exc),
+        }
+        return result
     result = dict(data)
     result["properties"] = reviewed["properties"]
     # 旧值是不是真的失效，要等 `build_candidate` 把它们解析成记录和事件；
