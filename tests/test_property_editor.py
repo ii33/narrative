@@ -29,7 +29,7 @@ def _project(path: Path):
         ops.property_propose(
             [
                 {"kind": "property_definition", "id": "age", "value_type": "string",
-                 "cardinality": "one", "persistence": "until_changed"},
+                 "cardinality": "one"},
                 {"kind": "property_value", "id": "v1", "node_id": "1", "property_id": "age",
                  "value": "二十九岁", "event_id": "2",
                  "disclosure": {"source_id": source, "start": 2}},
@@ -151,7 +151,7 @@ def test_a_superseded_record_can_be_taken_back_at_an_earlier_cut(tmp_path: Path)
         ops.property_propose(
             [
                 {"kind": "property_definition", "id": "age", "value_type": "string",
-                 "cardinality": "one", "persistence": "until_changed"},
+                 "cardinality": "one"},
                 {"kind": "property_value", "id": "v1", "node_id": "1",
                  "property_id": "age", "value": "二十九岁", "event_id": "2"},
                 {"kind": "property_value", "id": "v2", "node_id": "1",
@@ -199,7 +199,7 @@ def _three_events(path: Path):
         ops.property_propose(
             [
                 {"kind": "property_definition", "id": "age", "value_type": "string",
-                 "cardinality": "one", "persistence": "until_changed"},
+                 "cardinality": "one"},
                 {"kind": "property_value", "id": "v1", "node_id": "1",
                  "property_id": "age", "value": "二十九岁", "event_id": "2"},
             ],
@@ -236,7 +236,7 @@ def _three_events(path: Path):
         ops.property_propose(
             [
                 {"kind": "property_definition", "id": "age", "value_type": "string",
-                 "cardinality": "one", "persistence": "until_changed"},
+                 "cardinality": "one"},
                 {"kind": "property_value", "id": "v1", "node_id": "1",
                  "property_id": "age", "value": "二十九岁", "event_id": "2"},
             ],

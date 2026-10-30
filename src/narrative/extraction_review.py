@@ -16,7 +16,7 @@ from .graph_operations import GraphOperations
 from .harness import HarnessRunner, HarnessSettings
 
 MAX_ROUNDS = 4
-REVIEW_VERSION = "review/2"
+REVIEW_VERSION = "review/3"
 
 REVIEW_PROMPT = """你在为一部小说的属性记录做去重。
 
@@ -55,6 +55,14 @@ REVIEW_PROMPT = """你在为一部小说的属性记录做去重。
 - **不限于本章提议的属性。** 上面「已记录的值」里可能带着本章没有提议、但被本章内容
   推翻的方面（本章用更宽的名字写了同一件事，比如「外貌」里说肤色变白了，而旧记录里
   还有一条「肤色」）。这种也要在 `supersede` 里给出，`property` 用旧记录里的名字。
+
+## 本章原文
+
+判断「提议是否忠于原文」「旧值是否被这一章推翻」都以下面这段原文为准。原文与提议
+冲突时，**以原文为准**：提议漏了、写歪了、把两件事并成一件，都在 `unsure` 里指出来
+（`question` 写清哪里对不上），不要默默放过。
+
+{text}
 
 如果连信息都不够，返回 `{{"need": ["<你还想查什么>"]}}`，我会补给你。
 
@@ -250,8 +258,10 @@ def review_properties(
     unsure ones with their full history and surrounding text and forces a verdict.
     """
     stored = _stored_values(ops, data)
+    source = ops.source(str(data.get("source_id") or "")) if data.get("source_id") else {}
     instruction = REVIEW_PROMPT.format(
-        proposed=_format_proposed(data), stored=_format_stored(stored)
+        proposed=_format_proposed(data), stored=_format_stored(stored),
+        text=source.get("text") or "（拿不到本章原文）",
     )
     runner = HarnessRunner(settings, api_key, workdir)
     session = f"review-{uuid4().hex}"

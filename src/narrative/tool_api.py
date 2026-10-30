@@ -434,7 +434,6 @@ def _add_property(ops, params: dict) -> dict:
             "id": params["property_id"],
             "value_type": "any",
             "cardinality": "one",
-            "persistence": "until_changed",
         })
     record: dict[str, Any] = {
         "kind": "property_value",

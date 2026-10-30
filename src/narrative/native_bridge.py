@@ -860,7 +860,6 @@ class NativeBridge(QObject):
                 records.append({
                     "kind": "property_definition", "id": record["property_id"],
                     "value_type": "any", "cardinality": "one",
-                    "persistence": "until_changed",
                 })
             records.append(record)
             # 更早的那条由 accept 统一按取代规则标失效，这里不再重复算一遍。

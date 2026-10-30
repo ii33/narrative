@@ -27,7 +27,7 @@ def _mixed():
     records = [
         {
             "kind": "property_definition", "id": "holder", "value_type": "node",
-            "cardinality": "one", "persistence": "until_changed",
+            "cardinality": "one",
             "target_node_types": ["person"],
         },
         {
@@ -149,7 +149,7 @@ def test_graph_only_and_property_only_candidates(tmp_path):
         [
             {
                 "kind": "property_definition", "id": "location", "value_type": "string",
-                "cardinality": "one", "persistence": "until_changed",
+                "cardinality": "one",
             },
             {
                 "kind": "property_value", "id": "p1-location", "node_id": "p1",

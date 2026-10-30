@@ -354,6 +354,26 @@ def audit_properties(
                 suggestion="若无用就撤回定义，否则说明有属性被漏提",
             ))
 
+    # 同一个节点上，两个**名字不同**的方面拿着同一个值：多半是同一个方面被叫了两个名字
+    # （中文同义词程序认不出来），一条线被拆成了两条。只报不改，合并是人的决定。
+    by_node_value: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for record in values:
+        node_id = record.get("node_id")
+        name = record.get("property_id")
+        value = record.get("value")
+        if isinstance(node_id, str) and isinstance(name, str) and isinstance(value, str):
+            by_node_value[(node_id, value)].add(name)
+    for (node_id, value), aspects in by_node_value.items():
+        if len(aspects) < 2:
+            continue
+        issues.append(_issue(
+            "aspect_overlap", WARNING,
+            f"同一节点上「{'」「'.join(sorted(aspects))}」记着同一个值「{value[:20]}」"
+            f"，可能是同一个方面用了两个名字",
+            node=names.get(node_id),
+            suggestion="确认是不是同一个方面；是的话用「合并」把两个名字并成一条线",
+        ))
+
     issues.sort(key=lambda item: (
         {"error": 0, "warning": 1, "info": 2}.get(item["severity"], 3),
         str(item.get("node_id") or ""),

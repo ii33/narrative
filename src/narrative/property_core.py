@@ -9,8 +9,6 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from . import dependency_core
-
 _KINDS = {
     "property_definition",
     "property_value",
@@ -23,17 +21,15 @@ _KINDS = {
 # description and a relative phrase over time.
 _VALUE_TYPES = {"string", "number", "boolean", "node", "any", "either"}
 _CARDINALITIES = {"one", "many"}
-_PERSISTENCE = {"until_changed", "instant"}
 _CELL_KINDS = {"known", "unknown", "absent"}
 _EFFECT_OPS = {"set", "add", "remove", "unknown", "absent"}
 _SCOPES = {"world", "cognition", "claim"}
 _COMMON = {"id", "kind", "evidence"}
 _SCOPED_FIELDS = {"scope", "holder_id", "disclosure"}
-_DEPENDENCY_FIELDS = {"derived_from", "support_groups"}
 _FIELDS = {
     "property_definition": _COMMON
-    | {"value_type", "cardinality", "persistence", "owner_node_types", "target_node_types"},
-    "property_value": _COMMON | _SCOPED_FIELDS | _DEPENDENCY_FIELDS
+    | {"value_type", "cardinality", "target_node_types"},
+    "property_value": _COMMON | _SCOPED_FIELDS
     | {"node_id", "property_id", "value", "event_id", "anchor_basis", "applies_to",
        "source", "related_nodes", "category"},
     # A category move is editorial, not a disclosure: it points at one value
@@ -140,7 +136,7 @@ def alias_map(records: list[dict]) -> dict[str, str]:
 def canonical_definitions(records: list[dict]) -> dict[str, dict]:
     """Definitions under the name they are read by.
 
-    A renamed aspect keeps its shape (value type, cardinality, persistence) under
+    A renamed aspect keeps its shape (value type, cardinality) under
     the new name. A merged alias lends its shape to the target only when the
     target has no definition of its own; either way it stops being a definition
     of its own, because it is no longer a separate aspect.
@@ -382,7 +378,7 @@ def validate_records(
             seen.add(rid)
         extra = set(record) - _FIELDS[kind]
         missing = {
-            "property_definition": {"value_type", "cardinality", "persistence"},
+            "property_definition": {"value_type", "cardinality"},
             "property_value": {"node_id", "property_id", "value", "event_id"},
             "property_categorization": {"target_id", "category"},
             "property_merge": {"alias_id", "target_id"},
@@ -438,9 +434,7 @@ def validate_records(
                 issues.append(_issue("DEFINITION", "invalid property value_type", rid))
             if record.get("cardinality") not in _CARDINALITIES:
                 issues.append(_issue("DEFINITION", "invalid property cardinality", rid))
-            if record.get("persistence") not in _PERSISTENCE:
-                issues.append(_issue("DEFINITION", "invalid property persistence", rid))
-            for field in ("owner_node_types", "target_node_types"):
+            for field in ("target_node_types",):
                 values = record.get(field, [])
                 if not isinstance(values, list) or any(
                     not isinstance(v, str) or not v for v in values
@@ -684,7 +678,6 @@ def validate_records(
             continue
         if kind == "property_value":
             continue
-    issues.extend(dependency_core.validate_support(graph_snapshot, combined))
     return issues
 
 
@@ -703,12 +696,6 @@ def _validate_target(
     if not definition:
         issues.append(_issue("PROPERTY_REF", "property definition does not exist", rid))
         return
-    if (
-        node
-        and definition.get("owner_node_types")
-        and node.get("node_type") not in definition["owner_node_types"]
-    ):
-        issues.append(_issue("OWNER_TYPE", "property is not defined for this node type", rid))
 
 
 def _validate_effect(

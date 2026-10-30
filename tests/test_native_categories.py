@@ -107,13 +107,13 @@ def _seed(path: Path) -> Path:
         ops.property_propose(
             [
                 {"kind": "property_definition", "id": "state", "value_type": "string",
-                 "cardinality": "one", "persistence": "until_changed"},
+                 "cardinality": "one"},
                 {"kind": "property_definition", "id": "holder", "value_type": "node",
-                 "cardinality": "one", "persistence": "until_changed"},
+                 "cardinality": "one"},
                 {"kind": "property_definition", "id": "cultivation", "value_type": "string",
-                 "cardinality": "one", "persistence": "until_changed"},
+                 "cardinality": "one"},
                 {"kind": "property_definition", "id": "cultivation_stage",
-                 "value_type": "string", "cardinality": "one", "persistence": "until_changed"},
+                 "value_type": "string", "cardinality": "one"},
                 {"kind": "property_value", "id": "v1", "node_id": "1",
                  "property_id": "state", "value": "脸色铁青", "event_id": "4"},
                 {"kind": "property_value", "id": "v2", "node_id": "1",

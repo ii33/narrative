@@ -15,7 +15,7 @@ def _node(node_id: str, name: str, node_type: str = "person") -> dict:
 def _definition(property_id: str, value_type: str = "string") -> dict:
     return {
         "kind": "property_definition", "id": property_id, "value_type": value_type,
-        "cardinality": "one", "persistence": "until_changed",
+        "cardinality": "one",
     }
 
 
@@ -291,3 +291,27 @@ def test_a_changing_value_is_a_progression_not_a_conflict() -> None:
     assert "superseded_values" not in codes
     assert report["counts"]["error"] == 0
 
+
+
+def test_two_names_with_one_value_are_reported() -> None:
+    """同一个节点上两个名字记着同一个值：多半是同一个方面被叫了两个名字。"""
+    nodes = [_node("1", "铜钥匙", "item")]
+    records = [
+        _definition("功能"), _definition("用途"),
+        _value("v1", "1", "功能", "开门"),
+        _value("v2", "1", "用途", "开门"),
+    ]
+    codes = {item["code"] for item in audit_properties(records, nodes)["issues"]}
+    assert "aspect_overlap" in codes
+
+
+def test_two_names_with_different_values_are_not_reported() -> None:
+    """值不同就是两件事，别报。"""
+    nodes = [_node("1", "铜钥匙", "item")]
+    records = [
+        _definition("功能"), _definition("用途"),
+        _value("v1", "1", "功能", "开门"),
+        _value("v2", "1", "用途", "开门之后能锁上"),
+    ]
+    codes = {item["code"] for item in audit_properties(records, nodes)["issues"]}
+    assert "aspect_overlap" not in codes

@@ -47,7 +47,7 @@ def _value(
 def _definition(property_id: str = "state", cardinality: str = "one") -> dict:
     return {
         "kind": "property_definition", "id": property_id, "value_type": "string",
-        "cardinality": cardinality, "persistence": "until_changed",
+        "cardinality": cardinality,
     }
 
 

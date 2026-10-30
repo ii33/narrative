@@ -49,7 +49,7 @@ def test_native_property_candidate_and_state_history(tmp_path) -> None:
 
         records = [
             {"id": "key-color", "kind": "property_definition", "value_type": "string",
-             "cardinality": "one", "persistence": "until_changed", "owner_node_types": ["item"]},
+             "cardinality": "one"},
             {"id": "key-color-initial", "kind": "property_value", "node_id": "key",
              "property_id": "key-color", "value": "red", "event_id": "e1"},
         ]
@@ -93,7 +93,7 @@ def test_a_retracted_holder_stops_appearing_on_the_old_owner(tmp_path: Path) -> 
         ],
         [
             {"kind": "property_definition", "id": "持有者", "value_type": "either",
-             "cardinality": "one", "persistence": "until_changed"},
+             "cardinality": "one"},
             {"kind": "property_value", "id": "v1", "node_id": "I1", "property_id": "持有者",
              "value": "P1", "event_id": "E1",
              "disclosure": {"source_id": source_id, "start": 0}, "evidence": quote},

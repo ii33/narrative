@@ -326,9 +326,6 @@ def _parse_properties(rows, text: str, names: set[str], rejected: list[dict]) ->
     return properties
 
 
-NODE_ID = re.compile(r"^[A-Z][0-9]")
-
-
 WRAPPING_QUOTES = "\"'\u2018\u2019\u201c\u201d\u300c\u300d\u300e\u300f"
 
 
@@ -925,7 +922,6 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
             records.append({
                 "kind": "property_definition", "id": property_id,
                 "value_type": known_type, "cardinality": "one",
-                "persistence": "until_changed",
             })
         elif known_type != proposed_type and {known_type, proposed_type} != {"node", "either"}:
             continue
@@ -1015,13 +1011,12 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
             record["holder_id"] = holder
         records.append(record)
 
-    # The review round's deterministic half: whatever this batch replaces stops
-    # being the state from the disclosure that replaced it. The marks ride along
-    # in the same candidate, so a value and its invalidation can never land apart.
+    # 失效有两个来源，顺序不能反：
+    #   ① 复核轮判的「这一章说它不成立了」——语义判断，锚在读者得知的那一刻；
+    #   ② 程序判的「同一个方面出现了新值」——结构判断，锚在新值出现的事件。
+    # 先落 ①，② 会把已经被 ① 标掉的目标跳过（`supersede_plan` 里看 `marked`），
+    # 于是同一个事实只有一个锚点，而且是更懂语义的那个。
     accepted_records = ops.property_records(include_retracted=True)
-    records.extend(_supersede_retractions(ops, records, accepted_records))
-    # Its judgment half: an old value this chapter says is over, even when nothing
-    # replaced it. Anchored at the event that ended it, or dropped.
     known_names: dict[str, str] = {}
     for node in snapshot["nodes"]:
         known_names.setdefault(node["name"], node["id"])
@@ -1030,6 +1025,7 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
     records.extend(
         _review_supersede(data, records, accepted_records, known_names, event_by_name)
     )
+    records.extend(_supersede_retractions(ops, records, accepted_records))
 
     revision = ops.graph_project_info()["revision"]
     if not objects and not records:
@@ -1136,24 +1132,21 @@ def split_confident(ops, built: dict, data: dict) -> dict:
         if not flagged:
             flag_node(issue.get("node_id"), why)
 
-    # 同一事件、同一方面、同一作用域里出现两个不同值：并列，整组留给人看。
+    # 同一方面、同一作用域、**同一个位置**出现两个不同值才是并列（一句话说了两件事）。
+    # 位置不同的由取代机制处理（后者接手），不在这里拦——两套判定不能各说一套。
     groups: dict[tuple, list[dict]] = {}
     for record in values:
-        key = (
+        disclosure = record.get("disclosure") or {}
+        groups.setdefault((
             record.get("node_id"), record.get("property_id"),
             record.get("event_id"), record.get("scope"),
-        )
-        groups.setdefault(key, []).append(record)
+            disclosure.get("source_id"), disclosure.get("start"),
+        ), []).append(record)
     for rows in groups.values():
-        values = {str(row.get("value")) for row in rows}
-        if len(values) <= 1:
-            continue
-        # 全是节点编号 = 一件东西在同一场里换手（先给出、再接过），位置更后的那条接手，
-        # 不算并列。普通值在同一事件里出现两个说法才是真的拿不准。
-        if all(NODE_ID.match(value) for value in values):
+        if len({str(row.get("value")) for row in rows}) <= 1:
             continue
         for row in rows:
-            flag_record(row["id"], "同一事件里同一方面有多个不同值")
+            flag_record(row["id"], "同一位置同一方面有两个不同值")
 
     # 闭合：存疑节点带着自己的记录一起留；引用了它的节点也留（否则参与者悬空）。
     doubtful_names = {nodes[node_id].get("name") for node_id in doubtful_nodes}

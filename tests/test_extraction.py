@@ -585,7 +585,7 @@ def test_value_shape_mismatch_is_a_warning_not_a_block(tmp_path: Path) -> None:
 
     # Declare height as string, then record a number: the type is a hint.
     definition = {"kind": "property_definition", "id": "height", "value_type": "string",
-                  "cardinality": "one", "persistence": "until_changed"}
+                  "cardinality": "one"}
     revision = ops.graph_project_info()["revision"]
     ops.change_accept(
         ops.change_propose([], [definition], revision, source="correction"), 1
@@ -786,7 +786,7 @@ def test_the_later_sentence_wins_even_when_it_was_written_first(tmp_path: Path) 
 
     definition = {
         "kind": "property_definition", "id": "age", "value_type": "string",
-        "cardinality": "one", "persistence": "until_changed",
+        "cardinality": "one",
     }
     # The later sentence is written first; the earlier one is added afterwards.
     later = record("age-late", "三十三岁", 9)
@@ -833,7 +833,7 @@ def test_node_properties_keeps_one_line_per_aspect(tmp_path: Path) -> None:
     revision = ops.graph_project_info()["revision"]
     records = [
         {"kind": "property_definition", "id": "realm", "value_type": "string",
-         "cardinality": "one", "persistence": "until_changed"},
+         "cardinality": "one"},
         {"kind": "property_value", "id": "v-world", "node_id": "1", "property_id": "realm",
          "value": "灵寂期", "event_id": "3", "scope": "world"},
         {"kind": "property_value", "id": "v-claim", "node_id": "1", "property_id": "realm",

@@ -37,7 +37,7 @@ def _project(path: Path):
 def _definitions(*property_ids: str) -> list[dict]:
     return [
         {"kind": "property_definition", "id": property_id, "value_type": "string",
-         "cardinality": "one", "persistence": "until_changed"}
+         "cardinality": "one"}
         for property_id in property_ids
     ]
 
@@ -274,7 +274,7 @@ def test_the_inbound_side_reads_the_new_name(tmp_path: Path) -> None:
     ops = _project(tmp_path / "inbound.nproj")
     _accept(ops, [
         {"kind": "property_definition", "id": "leader", "value_type": "node",
-         "cardinality": "one", "persistence": "until_changed"},
+         "cardinality": "one"},
         _value("v1", "2", "leader", "1"),
     ])
     ops.property_rename(["leader"], "师父")

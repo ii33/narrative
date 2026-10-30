@@ -60,7 +60,7 @@ def workspace(tmp_path: Path):
     property_candidate = ops.property_propose(
         [
             {"kind": "property_definition", "id": "identity", "value_type": "string",
-             "cardinality": "one", "persistence": "until_changed"},
+             "cardinality": "one"},
             {"kind": "property_value", "id": "v1", "node_id": "1",
              "property_id": "identity", "value": "总经理", "event_id": "2",
              "evidence": {"source_id": source, "quote": "林舟是总经理"}},

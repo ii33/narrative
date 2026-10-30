@@ -49,7 +49,7 @@ def test_workspace_opens_on_the_browse_page_with_categories(tmp_path: Path) -> N
     property_candidate = ops.property_propose(
         [
             {"kind": "property_definition", "id": "identity", "value_type": "string",
-             "cardinality": "one", "persistence": "until_changed"},
+             "cardinality": "one"},
             {"kind": "property_value", "id": "p1", "node_id": "1",
              "property_id": "identity", "value": "总经理", "event_id": "3"},
             {"kind": "property_value", "id": "p2", "node_id": "1",

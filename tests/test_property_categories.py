@@ -34,7 +34,7 @@ def _project(path: Path):
 def _definitions(*property_ids: str) -> list[dict]:
     return [
         {"kind": "property_definition", "id": property_id, "value_type": "string",
-         "cardinality": "one", "persistence": "until_changed"}
+         "cardinality": "one"}
         for property_id in property_ids
     ]
 
@@ -259,7 +259,7 @@ def test_a_holder_record_is_readable_from_the_holder_too(tmp_path: Path) -> None
     revision = ops.graph_project_info()["revision"]
     definition = {
         "kind": "property_definition", "id": "holder", "value_type": "node",
-        "cardinality": "one", "persistence": "until_changed",
+        "cardinality": "one",
     }
     ops.property_accept(
         ops.property_propose(

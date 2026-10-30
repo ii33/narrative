@@ -33,7 +33,7 @@ def _project(path: Path) -> Path:
         ops.property_propose(
             [
                 {"kind": "property_definition", "id": "age", "value_type": "string",
-                 "cardinality": "one", "persistence": "until_changed"},
+                 "cardinality": "one"},
                 {"kind": "property_value", "id": "v1", "node_id": "1", "property_id": "age",
                  "value": "二十九岁", "event_id": "2",
                  "disclosure": {"source_id": source, "start": 2}},

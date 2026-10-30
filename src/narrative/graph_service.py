@@ -118,8 +118,8 @@ class GraphService:
     def schema(self) -> dict:
         property_fields = {
             "property_definition": {
-                "required": ["id", "value_type", "cardinality", "persistence"],
-                "optional": ["owner_node_types", "target_node_types", "evidence"],
+                "required": ["id", "value_type", "cardinality"],
+                "optional": ["target_node_types", "evidence"],
             },
             "property_value": {
                 "required": ["id", "node_id", "property_id", "value", "event_id"],
@@ -143,7 +143,6 @@ class GraphService:
             "property_state_cells": list(PROPERTY_STATE_CELL_KINDS),
             "property_value_types": ["string", "number", "boolean", "node", "either"],
             "property_cardinalities": ["one", "many"],
-            "property_persistence": ["until_changed", "instant"],
             "property_candidate_staging": {
                 "precheck": "Operations.property_precheck(records, expected_revision)",
                 "propose": "Operations.property_propose(records, expected_revision, source, note)",
@@ -200,7 +199,7 @@ class GraphService:
                 "node": {"kind": "node", "id": "p1", "node_type": "person", "name": "甲"},
                 "property_definition": {
                     "kind": "property_definition", "id": "holder", "value_type": "node",
-                    "cardinality": "one", "persistence": "until_changed",
+                    "cardinality": "one",
                     "target_node_types": ["person"],
                 },
                 "property_value": {

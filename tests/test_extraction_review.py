@@ -36,9 +36,9 @@ def _project(tmp_path: Path):
         ],
         [
             {"kind": "property_definition", "id": "skin", "value_type": "string",
-             "cardinality": "one", "persistence": "until_changed"},
+             "cardinality": "one"},
             {"kind": "property_definition", "id": "height", "value_type": "any",
-             "cardinality": "one", "persistence": "until_changed"},
+             "cardinality": "one"},
             {"kind": "property_value", "id": "v1", "node_id": "p1", "property_id": "skin",
              "value": "黝黑", "event_id": "e1",
              "evidence": {"source_id": source_id, "quote": "林舟脸色黝黑"}},

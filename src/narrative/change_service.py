@@ -20,7 +20,6 @@ from __future__ import annotations
 import json
 from uuid import uuid4
 
-from . import dependency_core
 from .graph_service import GraphService
 from .property_store import PropertyStore
 
@@ -117,14 +116,6 @@ class ChangeService:
                 property_records, expected_revision, snapshot
             )
             diagnostics.extend(dict(item, family="property") for item in property_diagnostics)
-        elif merged is not None:
-            accepted_properties = self.properties.accepted_records(expected_revision)
-            dependency_diagnostics = dependency_core.validate_support(
-                merged, accepted_properties
-            )
-            diagnostics.extend(
-                dict(item, family="dependency") for item in dependency_diagnostics
-            )
         return diagnostics
 
     # -- pending candidates --------------------------------------------

@@ -54,7 +54,7 @@ def test_a_clean_extraction_goes_straight_in(tmp_path: Path) -> None:
 
 
 def test_parallel_values_stay_for_review_but_the_node_goes_in(tmp_path: Path) -> None:
-    """同一事件里同一方面有两个不同值：节点照样进图，两条取值留给人看。"""
+    """同一位置同一方面有两个不同值：节点照样进图，两条取值留给人看。"""
     ops, data = _project(tmp_path, {
         "nodes": NODES,
         "properties": [
@@ -70,7 +70,7 @@ def test_parallel_values_stay_for_review_but_the_node_goes_in(tmp_path: Path) ->
     assert result["accepted"]["node_count"] == 3
     assert result["accepted"]["property_count"] == 0
     assert len(result["doubtful"]) == 2
-    assert {row["why"] for row in result["doubtful"]} == {"同一事件里同一方面有多个不同值"}
+    assert {row["why"] for row in result["doubtful"]} == {"同一位置同一方面有两个不同值"}
     assert result["candidate"]
 
     pending = ops.change_candidate(result["candidate"])
