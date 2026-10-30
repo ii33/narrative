@@ -409,7 +409,12 @@ def _relation_round(runner, session, data, keep, events, ops, rounds, *, text: s
         if key in seen:
             continue
         seen.add(key)
+        # 这一轮加的行没有经过第一轮的解析，位置要自己算：引文在原文里的起点。
+        start = text.find(quotes[0])
+        if start < 0:
+            continue
         out.append({
+            "start": start,
             "node": left, "property": kind, "value": right, "value_type": "node",
             "category": "关系", "quotes": quotes[:2], "scope": "world", "holder": None,
             "source": "narration", "related_nodes": [right],
@@ -513,9 +518,14 @@ def _apply(data: dict, keep: list, drop: list, rounds: int,
             continue
         key = (item.get("node"), item.get("property"), str(item.get("value")))
         original = proposed.get(key)
-        # 复核轮回的条目对应第一轮的提议，用原提议（引文更全）；
-        # 后面几轮自己加的行（人物关系）没有对应提议，原样收下。
-        merged = dict(original) if original is not None else dict(item)
+        if original is None:
+            # 后面几轮自己加的行（人物关系）没有对应提议，原样收下；
+            # 其余对不上提议的条目（值写法有出入）照旧丢掉——它们没有引文和位置。
+            if item.get("category") != "关系" or "start" not in item:
+                continue
+            merged = dict(item)
+        else:
+            merged = dict(original)
         if item.get("at_event"):
             merged["at_event"] = str(item["at_event"])
         kept.append(merged)
