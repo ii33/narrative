@@ -80,13 +80,13 @@ def test_invalid_property_blocks_propose_and_writes_nothing(tmp_path):
     assert ops.property_history("letter", "holder") == []
 
 
-def test_stale_candidate_is_rejected_without_partial_write(tmp_path):
+def test_a_stale_candidate_is_rechecked_against_the_current_revision(tmp_path):
+    """中间又接受过别的东西，不该逼人重建候选：按当前版本重检，过得去就应用。"""
     ops = _project(tmp_path)
     revision = ops.graph_project_info()["revision"]
     nodes, records = _mixed()
     stale = ops.change_propose(nodes, records, revision, source="manual")
 
-    # Another accepted change bumps the global revision before the stale one.
     other = ops.change_propose(
         [{"kind": "node", "id": "x", "node_type": "person", "name": "丙"}],
         [],
@@ -95,10 +95,38 @@ def test_stale_candidate_is_rejected_without_partial_write(tmp_path):
     )
     ops.change_accept(other, 1)
 
-    with pytest.raises(ValueError, match="版本已变化"):
+    # 旧版本上建的候选照样能接受：预检是在当前版本上跑的。
+    assert ops.change_accept(stale, 1) == revision + 2
+    ids = {node["id"] for node in ops.graph_snapshot()["nodes"]}
+    assert {"x", "letter", "p1", "p2"} <= ids
+
+
+def test_a_stale_candidate_that_no_longer_fits_is_refused(tmp_path):
+    """重检过不去就拒绝，并且什么都不写。"""
+    ops = _project(tmp_path)
+    revision = ops.graph_project_info()["revision"]
+    stale = ops.change_propose(
+        [
+            {"kind": "node", "id": "x", "node_type": "person", "name": "另一个人"},
+            {"kind": "node", "id": "y", "node_type": "person", "name": "丁"},
+        ],
+        [],
+        revision,
+        source="manual",
+    )
+
+    other = ops.change_propose(
+        [{"kind": "node", "id": "x", "node_type": "person", "name": "丙"}],
+        [],
+        revision,
+        source="manual",
+    )
+    ops.change_accept(other, 1)
+
+    with pytest.raises(ValueError):
         ops.change_accept(stale, 1)
-    assert "letter" not in {node["id"] for node in ops.graph_snapshot()["nodes"]}
-    assert ops.property_history("letter", "holder") == []
+    ids = {node["id"] for node in ops.graph_snapshot()["nodes"]}
+    assert "y" not in ids  # 一条都没写进去
 
 
 def test_graph_only_and_property_only_candidates(tmp_path):

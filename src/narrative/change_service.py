@@ -240,21 +240,26 @@ class ChangeService:
             revision = int(
                 db.execute("SELECT value FROM meta WHERE key='revision'").fetchone()[0]
             )
-        if change["expected_revision"] != revision:
-            raise ValueError("正式资料版本已变化，请重新建立统一候选")
+        # 候选可能是在旧版本上建的（中间又接受过别的东西）。不要求重新建候选：
+        # 预检仍在**当前**版本上跑一遍，过得去就应用，过不去就带着诊断拒绝。
         diagnostics = self.precheck(
             change.get("graph_objects"), change.get("property_records"), revision
         )
         errors = [item["message"] for item in diagnostics if item["severity"] == "error"]
         if errors:
-            raise ValueError("；".join(errors))
+            prefix = (
+                "正式资料版本已变化，且"
+                if change["expected_revision"] != revision
+                else ""
+            )
+            raise ValueError(prefix + "；".join(errors))
         graph_objects = change.get("graph_objects") or []
         property_records = change.get("property_records") or []
         with self.store.connect(write=True) as db:
             current = int(
                 db.execute("SELECT value FROM meta WHERE key='revision'").fetchone()[0]
             )
-            if current != change["expected_revision"]:
+            if current != revision:
                 raise ValueError("正式资料版本已变化，请重新建立统一候选")
             next_revision = current + 1
             audit = []
