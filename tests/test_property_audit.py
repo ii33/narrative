@@ -315,3 +315,24 @@ def test_two_names_with_different_values_are_not_reported() -> None:
     ]
     codes = {item["code"] for item in audit_properties(records, nodes)["issues"]}
     assert "aspect_overlap" not in codes
+
+
+def test_a_value_that_points_at_its_own_node_is_reported() -> None:
+    """「林舟的室友 · 关系 = 林舟的室友」说的是身份，不是关系：画到关系网上是个自环。"""
+    nodes = [_node("1", "林舟的室友")]
+    records = [
+        _definition("关系"),
+        _value("v1", "1", "关系", "林舟的室友"),
+    ]
+    report = audit_properties(records, nodes)
+    assert "self_reference" in _codes(report)
+    assert report["issues"][0]["node_name"] == "林舟的室友"
+
+
+def test_a_value_pointing_at_somebody_else_is_not_reported() -> None:
+    nodes = [_node("1", "林舟"), _node("2", "老周")]
+    records = [
+        _definition("师父"),
+        _value("v1", "1", "师父", "2"),
+    ]
+    assert "self_reference" not in _codes(audit_properties(records, nodes))

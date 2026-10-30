@@ -374,6 +374,23 @@ def audit_properties(
             suggestion="确认是不是同一个方面；是的话用「合并」把两个名字并成一条线",
         ))
 
+    # 值就是它自己：「某人的女友 · 关系 = 某人的女友」这种，说的是身份不是关系，
+    # 画到关系网上就是一条自己指向自己的边。只报不改——可能是方面名写错了。
+    for record in values:
+        node = names.get(str(record.get("node_id") or "")) or {}
+        if not node:
+            continue
+        value = _text(record.get("value"))
+        if value and value in {str(node.get("id")), _text(node.get("name"))}:
+            issues.append(_issue(
+                "self_reference", WARNING,
+                f"「{node.get('name')}」的「{record.get('property_id')}」值是它自己",
+                node=node,
+                property_id=str(record.get("property_id") or ""),
+                records=[record],
+                suggestion="确认这条说的是什么；说的是身份就换个方面名，说的是关系就该指向别人",
+            ))
+
     issues.sort(key=lambda item: (
         {"error": 0, "warning": 1, "info": 2}.get(item["severity"], 3),
         str(item.get("node_id") or ""),

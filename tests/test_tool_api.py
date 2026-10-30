@@ -425,3 +425,27 @@ def test_relation_map_reads_both_directions_and_states(tmp_path: Path) -> None:
     assert not [key for key in edges if key[0] == "苏娘"]
     # 状态单独给出。
     assert edges[("老周", "恋人", "苏娘")] == "冷战中"
+
+
+def test_relation_map_leaves_out_a_person_pointing_at_themselves(tmp_path: Path) -> None:
+    """自己指向自己不是关系：那种记录说的是身份，画出来是个自环。"""
+    project, source_id = _fresh_project(tmp_path / "self.nproj")
+    ops = Operations.open_graph_project(project)
+    revision = ops.graph_project_info()["revision"]
+    quote = {"source_id": source_id, "quote": "林舟推门进来。老周笑了。"}
+    ops.change_accept(ops.change_propose([
+        {"kind": "node", "id": "P1", "node_type": "person", "name": "林舟",
+         "disclosure": {"source_id": source_id, "start": 0}, "evidence": quote},
+        {"kind": "node", "id": "E1", "node_type": "event", "name": "林舟进门",
+         "disclosure": {"source_id": source_id, "start": 0}, "evidence": quote},
+    ], [], revision, source="manual"), 1)
+    revision = ops.graph_project_info()["revision"]
+    ops.property_accept(ops.property_propose([
+        {"kind": "property_definition", "id": "关系", "value_type": "either",
+         "cardinality": "one"},
+        {"kind": "property_value", "id": "v1", "event_id": "E1", "node_id": "P1",
+         "property_id": "关系", "value": "林舟", "evidence": quote},
+    ], revision, source="manual"), 1)
+
+    graph = tool_api.call("relation_map", {}, project=project)
+    assert graph["persons"] and graph["edges"] == []

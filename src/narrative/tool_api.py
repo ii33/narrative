@@ -565,6 +565,8 @@ def _relation_map(ops, params: dict) -> dict:
         if record.get("kind") != "property_value":
             continue
         left, right = str(record.get("node_id") or ""), str(record.get("value") or "")
+        if left == right:
+            continue  # 自己指向自己不是关系（审核会报 self_reference）
         if nodes.get(left, {}).get("node_type") != "person":
             continue
         if nodes.get(right, {}).get("node_type") != "person":
