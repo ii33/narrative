@@ -226,12 +226,23 @@ def _format_stored(rows: list[dict]) -> str:
     )
 
 
+NO_JSON_PROMPT = "上一条回复里没有 JSON。请只输出那个 JSON 对象，不要任何解释或代码块。"
+
+
 def _turn(runner, session: str, instruction: str, ops, rounds: list[int]) -> dict:
     """One review turn, plus any follow-ups the model asks for."""
     while rounds[0] < MAX_ROUNDS:
         rounds[0] += 1
         reply = runner.agent_turn(instruction, session)
-        payload = _payload(reply.raw)
+        try:
+            payload = _payload(reply.raw)
+        except ValueError:
+            # 偶尔它会把 JSON 写成一段说明。追问一次；再不行就当这一轮没答。
+            rounds[0] += 1
+            if rounds[0] >= MAX_ROUNDS:
+                raise
+            reply = runner.agent_turn(NO_JSON_PROMPT, session)
+            payload = _payload(reply.raw)
         need = payload.get("need")
         if not need:
             return payload
@@ -274,13 +285,17 @@ def review_properties(
         supersede = list(payload.get("supersede") or [])
         if unsure:
             context = _context_for(ops, data, unsure)
-            payload = _turn(
-                runner, session, UNSURE_PROMPT.format(context=context), ops, rounds
-            )
+            try:
+                payload = _turn(
+                    runner, session, UNSURE_PROMPT.format(context=context), ops, rounds
+                )
+            except ValueError:
+                # 终判没拿到：那几条按「拿不准」留着，不连累本章其他内容。
+                payload = {}
             keep += list(payload.get("keep") or [])
             drop += list(payload.get("drop") or [])
             supersede += list(payload.get("supersede") or [])
-            unsure = list(payload.get("unsure") or [])
+            unsure = list(payload.get("unsure") or []) if payload else unsure
         return _apply(
             data, keep, drop, rounds[0], unresolved=unsure, supersede=supersede
         )

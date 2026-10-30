@@ -237,14 +237,20 @@ def _strip_fence(raw: str) -> str:
 
 def _payload(raw: str) -> dict:
     body = _strip_fence(raw)
-    try:
-        return json.loads(body)
-    except json.JSONDecodeError:
-        start = body.find("{")
-        end = body.rfind("}")
-        if start < 0 or end <= start:
-            raise ValueError("模型回复里没有 JSON 对象") from None
-        return json.loads(body[start:end + 1])
+    # strict=False 允许字符串里出现裸换行/制表符：中文原文里偶尔会带，严格模式会整段拒收。
+    for candidate in (body, body[body.find("{"):body.rfind("}") + 1] if "{" in body else ""):
+        if not candidate:
+            continue
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            try:
+                return json.loads(candidate, strict=False)
+            except json.JSONDecodeError:
+                continue
+    if "{" not in body:
+        raise ValueError("模型回复里没有 JSON 对象")
+    raise ValueError("模型回复里的 JSON 解析不了")
 
 
 VALUE_TYPES = ("string", "number", "boolean", "node", "any", "either")
