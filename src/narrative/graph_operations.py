@@ -290,7 +290,7 @@ class GraphOperations:
             if item["kind"] == "property_value"
             and item.get("node_id") == node_id
             and item.get("property_id") == property_id
-            and item.get("scope", "world") == scope
+            and (item.get("scope") or "world") == scope
             and (scope == "world" or item.get("holder_id") == holder_id)
         ]
         if not records:

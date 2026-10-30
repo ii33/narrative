@@ -131,7 +131,7 @@ def audit_properties(
             ))
             continue
         node = names.get(node_id, {"id": node_id, "name": node_id})
-        scope = record.get("scope", "world")
+        scope = (record.get("scope") or "world")
         # Two names for one aspect (`cultivation`, `cultivation_stage`) are the
         # same subject; the reader sees them on one line, so the check has to
         # happen at that level too.
@@ -234,7 +234,7 @@ def audit_properties(
             continue
         retract_groups[(
             target.get("node_id"), target.get("property_id"),
-            target.get("scope", "world"), target.get("holder_id"),
+            (target.get("scope") or "world"), target.get("holder_id"),
         )].append(record)
 
     # Groups come from every value, retracted or not: a group whose values were
@@ -244,7 +244,7 @@ def audit_properties(
         node_id, property_id = record.get("node_id"), record.get("property_id")
         if isinstance(node_id, str) and isinstance(property_id, str):
             groups[(
-                node_id, property_id, record.get("scope", "world"),
+                node_id, property_id, (record.get("scope") or "world"),
                 record.get("holder_id"),
             )].append(record)
 

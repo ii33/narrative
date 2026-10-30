@@ -155,7 +155,7 @@ def supersede_plan(
         key = (
             record.get("node_id"),
             aspect_of(canonical),
-            record.get("scope", "world"),
+            (record.get("scope") or "world"),
             record.get("holder_id"),
         )
         groups.setdefault(key, []).append(record)
@@ -733,7 +733,7 @@ class PropertyStore:
             if record.get("kind") == "property_value"
             and record.get("node_id") == node_id
             and name_of(record) == wanted
-            and record.get("scope", "world") == scope
+            and (record.get("scope") or "world") == scope
             and (scope == "world" or record.get("holder_id") == holder_id)
         ]
 
@@ -1341,7 +1341,7 @@ class PropertyStore:
                     ),
                     "source": row.get("source"),
                     "anchor_basis": row.get("anchor_basis"),
-                    "scope": row.get("scope", "world"),
+                    "scope": (row.get("scope") or "world"),
                     "holder_id": row.get("holder_id"),
                     "holder_name": names.get(row.get("holder_id") or ""),
                     "related": [
@@ -1356,7 +1356,11 @@ class PropertyStore:
                     # 唯一的有效性字段。走到这里的记录都还算数。
                     "valid": True,
                 })
+            # 一条线只有一个「最新披露」：更早的仍然算数（他确实这么说过、这么想过），
+            # 只是不再是当下状态。界面上据此把旧的压暗，而不是当成另一个当前值。
             latest = decorated[-1]
+            for record in decorated:
+                record["is_latest"] = record["id"] == latest["id"]
             current = latest
             headline = latest
             # Only the slice holding the aspect's state is current; the other one is
@@ -1446,7 +1450,7 @@ class PropertyStore:
                 "event_id": record.get("event_id"),
                 "event_name": names.get(record.get("event_id") or ""),
                 "start": (record.get("disclosure") or {}).get("start"),
-                "scope": record.get("scope", "world"),
+                "scope": (record.get("scope") or "world"),
                 "holder_id": record.get("holder_id"),
                 "holder_name": names.get(record.get("holder_id") or ""),
                 "source": record.get("source"),
@@ -1511,7 +1515,7 @@ class PropertyStore:
         world_records = [
             record for record in records
             if record.get("kind") in {"property_definition", "property_retraction"}
-            or record.get("scope", "world") == "world"
+            or (record.get("scope") or "world") == "world"
         ]
         cut = self._cut_position(at)
         nodes: dict[str, dict[str, dict]] = {}

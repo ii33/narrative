@@ -20,7 +20,7 @@ from .property_categories import aspect_of
 from .property_store import record_position
 
 # 提示词改一次，这个号跟着动；缓存的提取结果里会写下来，便于对照。
-PROMPT_VERSION = "extract/4"
+PROMPT_VERSION = "extract/5"
 
 NODE_TYPES = ("person", "group", "item", "location", "scene", "event")
 
@@ -73,6 +73,9 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
     原文的确定程度照抄进 value（"知道老周赢了"就记 `value: "老周赢了"`，不要改成"确定"）；
   - `claim`：某个人对外说出的内容（口头、信件、公告），holder 填说的人。
   三种之间**不自动转换**：说了不等于相信，相信不等于世界成立。
+  **叙述者讲的就是 `world`，哪怕句子里带「发现」「知道」「感觉」**：发现是叙述，值写的是
+  被发现的那个状态（「他发现自己变高了」→ `身高 = 变高了`、`world`）。只有原文明确转述
+  某人的想法、猜测、记忆或说法时，才用 `cognition` / `claim` 并填 holder。
 - `source` 记信息是怎么表达出来的：`narration`（叙述）、`speech`（人物发言）、
   `thought`（人物想法）、`observation`（人物观察）、`document`（书信碑文等载体）。拿不准就留空。
 - `related_nodes` 填原文明示涉及的其他节点（观察者、被归因的人、信息载体），

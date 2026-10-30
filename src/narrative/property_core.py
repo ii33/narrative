@@ -60,7 +60,7 @@ _FIELDS = {
 
 
 def _record_scope(record: dict) -> str:
-    scope = record.get("scope", "world")
+    scope = (record.get("scope") or "world")
     return scope if isinstance(scope, str) else "world"
 
 
@@ -394,7 +394,7 @@ def validate_records(
         if ev_error:
             issues.append(_issue("EVIDENCE", ev_error, rid))
         if kind == "property_value":
-            scope = record.get("scope", "world")
+            scope = (record.get("scope") or "world")
             holder_id = record.get("holder_id")
             if scope not in _SCOPES:
                 issues.append(_issue("SCOPE", "scope must be world, belief, claim, or knowledge", rid))

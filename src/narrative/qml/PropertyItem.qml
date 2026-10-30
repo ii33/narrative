@@ -178,7 +178,10 @@ Column {
                         : modelData.value_node ? modelData.value_node.name
                         : String(modelData.value === null
                             || modelData.value === undefined ? "（空）" : modelData.value)
-                    color: modelData.value_node ? item.t.accent : item.t.body
+                    // 更早的披露仍然算数，但不再是当下状态：压暗，别当第二个当前值看。
+                    color: modelData.value_node
+                        ? item.t.accent
+                        : (modelData.is_latest === false ? item.t.muted : item.t.body)
                     font.pixelSize: 11
                     font.underline: !!modelData.value_node
 
@@ -222,6 +225,19 @@ Column {
                     text: "事件"
                     color: item.t.muted
                     font.pixelSize: 10
+                }
+                Label {
+                    visible: modelData.is_latest === false || modelData.scope !== "world"
+                    text: modelData.is_latest === false ? "较早" : ""
+                    color: item.t.muted
+                    font.pixelSize: 9
+                }
+                Label {
+                    visible: modelData.scope !== "world"
+                    text: (modelData.scope === "claim" ? "声称" : "认知")
+                        + (modelData.holder_name ? "·" + modelData.holder_name : "")
+                    color: item.t.muted
+                    font.pixelSize: 9
                 }
                 Label {
                     Layout.fillWidth: true
