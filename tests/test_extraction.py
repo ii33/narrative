@@ -47,6 +47,34 @@ def test_parse_drops_quotes_that_are_not_in_the_source() -> None:
     assert result["rejected"][0]["reason"] == "引文不在原文中"
 
 
+def test_parse_tolerates_a_wrapping_quote_the_model_added() -> None:
+    """模型常把整句再套一层引号：多出来的是排版，不是内容。"""
+    raw = """
+    {"nodes": [
+      {"name": "老周", "type": "person",
+       "quotes": ["“老周后来告诉他，火纹石已经改过他的外形。”"]}
+    ], "properties": []}
+    """
+    result = parse_nodes(raw, TEXT)
+    assert [node["name"] for node in result["nodes"]] == ["老周"]
+    # 存下来的引文是去掉外层引号之后的那段，仍然是原文的子串。
+    assert result["nodes"][0]["quotes"] == ["老周后来告诉他，火纹石已经改过他的外形。"]
+    assert result["nodes"][0]["quotes"][0] in TEXT
+    assert result["rejected"] == []
+
+
+def test_parse_still_drops_a_quote_that_only_rhymes() -> None:
+    """去掉首尾引号之后还是对不上，就还是拒收。"""
+    raw = """
+    {"nodes": [
+      {"name": "陈默", "type": "person", "quotes": ["“陈默和女友一起离开了”"]}
+    ], "properties": []}
+    """
+    result = parse_nodes(raw, TEXT)
+    assert result["nodes"] == []
+    assert result["rejected"][0]["reason"] in {"引文不在原文中", "没有可用的原文引文"}
+
+
 def test_parse_rejects_unknown_types() -> None:
     raw = '{"nodes": [{"name": "火纹石", "type": "artifact", "quotes": ["火纹石已经改过他的外形"]}]}'
     result = parse_nodes(raw, TEXT)

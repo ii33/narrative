@@ -257,12 +257,12 @@ def _parse_properties(rows, text: str, names: set[str], rejected: list[dict]) ->
         quotes = [str(item) for item in (row.get("quotes") or []) if str(item).strip()]
         good = []
         for quote in quotes:
-            index = text.find(quote)
+            index, found = _locate(text, quote)
             if index < 0:
                 rejected.append({"name": f"{node_name}.{property_id}", "reason": "引文不在原文中",
                                  "quote": quote[:60]})
                 continue
-            good.append({"quote": quote, "start": index})
+            good.append({"quote": found, "start": index})
         if not good:
             rejected.append({"name": f"{node_name}.{property_id}", "reason": "没有可用的原文引文"})
             continue
@@ -310,6 +310,27 @@ def _parse_properties(rows, text: str, names: set[str], rejected: list[dict]) ->
     return properties
 
 
+WRAPPING_QUOTES = "\"'\u2018\u2019\u201c\u201d\u300c\u300d\u300e\u300f"
+
+
+def _locate(text: str, quote: str) -> tuple[int, str]:
+    """找到引文在原文里的位置，返回 (下标, 实际用的引文)。
+
+    先按原样找；找不到就只去掉**首尾的引号**再试一次——模型经常把整句再套一层
+    引号（`“他说‘火纹石改过外形’”` 多套了一层），多出来的是排版不是内容。只剥首尾、
+    不动中间，所以「逐字对上」这条并没有松。
+    """
+    index = text.find(quote)
+    if index >= 0:
+        return index, quote
+    trimmed = quote.strip().strip(WRAPPING_QUOTES).strip()
+    if trimmed and trimmed != quote:
+        index = text.find(trimmed)
+        if index >= 0:
+            return index, trimmed
+    return -1, quote
+
+
 def parse_nodes(raw: str, text: str) -> dict:
     """Verify every quote and pin each node to its first appearance.
 
@@ -335,11 +356,11 @@ def parse_nodes(raw: str, text: str) -> dict:
         quotes = [str(item) for item in (row.get("quotes") or []) if str(item).strip()]
         good: list[dict] = []
         for quote in quotes:
-            index = text.find(quote)
+            index, found = _locate(text, quote)
             if index < 0:
                 rejected.append({"name": name, "reason": "引文不在原文中", "quote": quote[:60]})
                 continue
-            good.append({"quote": quote, "start": index})
+            good.append({"quote": found, "start": index})
         if not name or not good:
             if name:
                 rejected.append({"name": name, "reason": "没有可用的原文引文"})
