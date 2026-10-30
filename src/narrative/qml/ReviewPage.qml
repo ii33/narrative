@@ -41,7 +41,7 @@ Item {
                 note: c.note || c.id || "",
                 status: c.status || "",
                 source: c.source || "",
-                counts: (c.graph_count || 0) + " 图 · " + (c.property_count || 0) + " 属性",
+                counts: (c.graph_count || 0) + " 节点 · " + (c.property_count || 0) + " 属性",
                 created: c.created_at || ""
             })
         }
@@ -90,6 +90,19 @@ Item {
 
     function rebuildObjects() {
         objectRows.clear()
+        // 后端已经把候选翻成人能读的行（节点、属性取值、失效）；只有老式图候选才在这里拼。
+        var rows = current.rows || []
+        if (rows.length > 0) {
+            for (var r = 0; r < rows.length; ++r) {
+                objectRows.append({
+                    id: rows[r].id || "",
+                    kind: rows[r].kind || "",
+                    label: rows[r].label || "",
+                    extra: rows[r].extra || ""
+                })
+            }
+            return
+        }
         var objects = current.objects || []
         for (var i = 0; i < objects.length; ++i) {
             var obj = objects[i]
@@ -127,6 +140,7 @@ Item {
                 current = {
                     candidate: detail,
                     objects: detail.graph_objects || [],
+                    rows: payload.rows || [],
                     kind: "change"
                 }
                 page.rebuildObjects()
@@ -305,23 +319,18 @@ Item {
                             anchors.rightMargin: 10
                             spacing: 10
                             Label {
-                                text: id
-                                color: t.muted
-                                font.pixelSize: 11
-                                Layout.preferredWidth: 60
-                            }
-                            Label {
                                 text: kind
                                 color: t.accent
                                 font.pixelSize: 11
-                                Layout.preferredWidth: 100
+                                Layout.preferredWidth: 40
                             }
                             Label {
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 0
                                 text: label
                                 color: t.ink
                                 font.pixelSize: 12
                                 elide: Text.ElideRight
-                                Layout.fillWidth: true
                             }
                             Label {
                                 text: extra

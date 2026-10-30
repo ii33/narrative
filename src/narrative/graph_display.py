@@ -103,3 +103,51 @@ def candidate_preview(snapshot: dict, candidate: dict) -> dict:
         "diagnostics": candidate.get("diagnostics", []),
         "display_map": labels,
     }
+
+
+_SCOPES = {"world": "世界", "cognition": "认知", "claim": "声称"}
+
+
+def candidate_rows(snapshot: dict, detail: dict) -> list[dict]:
+    """一条候选里到底有什么，按人能读的方式列出来。
+
+    候选可以只带几条属性（节点已经在图里了），所以不能只列节点——审核页要看到
+    「林舟 · 身份 = 主角」这样一行，而不是一个空面板。
+    """
+    from .property_labels import label_for
+
+    names = {node["id"]: node.get("name") for node in snapshot.get("nodes", [])}
+    for obj in detail.get("graph_objects") or []:
+        if obj.get("kind") == "node":
+            names[obj["id"]] = obj.get("name")
+
+    rows: list[dict] = []
+    for obj in detail.get("graph_objects") or []:
+        if obj.get("kind") != "node":
+            continue
+        rows.append({
+            "id": obj["id"],
+            "kind": _NODES.get(obj.get("node_type") or "", "节点"),
+            "label": obj.get("name") or obj["id"],
+            "extra": obj.get("node_type") or "",
+        })
+    for record in detail.get("property_records") or []:
+        kind = record.get("kind")
+        if kind == "property_value":
+            node_id = str(record.get("node_id") or "")
+            aspect = label_for(str(record.get("property_id") or ""))
+            rows.append({
+                "id": record.get("id") or "",
+                "kind": "属性",
+                "label": f"{names.get(node_id) or node_id} · {aspect} = "
+                         f"{record.get('value')}",
+                "extra": _SCOPES.get(record.get("scope") or "world", "世界"),
+            })
+        elif kind == "property_retraction":
+            rows.append({
+                "id": record.get("id") or "",
+                "kind": "失效",
+                "label": f"撤掉 {record.get('target_id') or '（空）'}",
+                "extra": str(record.get("reason") or ""),
+            })
+    return rows

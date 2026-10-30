@@ -1394,10 +1394,14 @@ class NativeBridge(QObject):
 
     @Slot(str)
     def changeCandidateDetail(self, candidate_id: str) -> None:
-        self._project_task(
-            "change_candidate",
-            lambda ops: {"candidate": ops.change_candidate(candidate_id)},
-        )
+        """候选详情，附一份人能读的行（可能只有几条属性，节点已经在图里了）。"""
+        from .graph_display import candidate_rows
+
+        def work(ops) -> dict:
+            detail = ops.change_candidate(candidate_id)
+            return {"candidate": detail, "rows": candidate_rows(ops.graph_snapshot(), detail)}
+
+        self._project_task("change_candidate", work)
 
     @Slot(str, int)
     def acceptChangeCandidate(self, candidate_id: str, version: int) -> None:
