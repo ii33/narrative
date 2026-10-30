@@ -9,6 +9,7 @@ but the default is two.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from uuid import uuid4
 
 from .extraction import _payload
@@ -356,6 +357,8 @@ def _repair_anchors(runner, session, items, events, ops, rounds) -> list[dict]:
 def _relation_round(runner, session, data, keep, events, ops, rounds, *, text: str) -> list[dict]:
     """人物关系：每个人物与别人的关系，写成一条**值指向对方节点**的属性。
 
+    单独开一个会话：接着复核那轮聊，模型会顺着「保留/丢弃」的格式答，答不出关系。
+
     关系性质放在属性名上（「仇敌」「师父」），值指向对方——这样对方的页面能在反向引用里
     看到这条，两个人就连起来了。这一轮只提案，落不落地由 build 判断。
     """
@@ -371,8 +374,19 @@ def _relation_round(runner, session, data, keep, events, ops, rounds, *, text: s
         events="\n".join(f"- {name}" for name in events) or "（本章没有事件）",
         text=text or "（拿不到本章原文）",
     )
+    # 这一轮只问一次，不走 _turn 的「补充信息」循环：关系不需要查库，问多了反而跑题。
+    rounds[0] += 1
+    if rounds[0] > MAX_ROUNDS:
+        return []
     try:
-        payload = _turn(runner, session, instruction, ops, rounds)
+        reply = runner.agent_turn(instruction, session)
+        try:
+            workdir = Path(getattr(runner, "workdir", ""))
+            if workdir.is_dir():
+                (workdir / "relations-raw.txt").write_text(reply.raw, encoding="utf-8")
+        except OSError:
+            pass
+        payload = _payload(reply.raw)
     except ValueError:
         return []
     rows = payload.get("relations")
@@ -453,7 +467,7 @@ def review_properties(
             unsure = list(payload.get("unsure") or []) if payload else unsure
         supersede = _repair_anchors(runner, session, supersede, events, ops, rounds)
         keep += _relation_round(
-            runner, session, data, keep, events, ops, rounds,
+            runner, f"relation-{uuid4().hex}", data, keep, events, ops, rounds,
             text=source.get("text") or "",
         )
         return _apply(
@@ -499,9 +513,9 @@ def _apply(data: dict, keep: list, drop: list, rounds: int,
             continue
         key = (item.get("node"), item.get("property"), str(item.get("value")))
         original = proposed.get(key)
-        if original is None:
-            continue
-        merged = dict(original)
+        # 复核轮回的条目对应第一轮的提议，用原提议（引文更全）；
+        # 后面几轮自己加的行（人物关系）没有对应提议，原样收下。
+        merged = dict(original) if original is not None else dict(item)
         if item.get("at_event"):
             merged["at_event"] = str(item["at_event"])
         kept.append(merged)
