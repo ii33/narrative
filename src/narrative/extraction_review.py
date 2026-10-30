@@ -9,7 +9,6 @@ but the default is two.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from uuid import uuid4
 
 from .extraction import _payload
@@ -264,8 +263,8 @@ RELATION_PROMPT = """再看一遍这一章的**人物关系**：谁和谁是什�
 - `to`：关系的另一方
 - `kind`：关系性质，用原文的词——师徒 / 父子 / 夫妻 / 恋人 / 仇敌 / 上下级 / 同伙 / 主仆。
   **不要写称呼**（「大哥」「老弟」「老板」是叫法，不是关系）
-- `quotes`：**逐字**引用原文那句话，一个字都不要改；要引用**完整的一句**，
-  不要只截「他」「你」这种几个字——短句在原文里出现好几次，落不到唯一位置，这条就会被丢掉
+- `quotes`：可以给，也可以不给。给的话要**逐字**引用、引用**完整的一句**（只出现一次）；
+  给不出来就留空，程序会用落点事件自己的引文——关系常常是从整段里读出来的，一句话说不清
 - `at_event`：读者在哪一步知道这件事，从下面的「本章事件」里照抄一个
 
 只输出 JSON：{{"relations": [ … ]}}。没有就返回空数组。
@@ -355,68 +354,115 @@ def _repair_anchors(runner, session, items, events, ops, rounds) -> list[dict]:
     return list(by_key.values())
 
 
-def _relation_round(runner, session, data, keep, events, ops, rounds, *, text: str) -> list[dict]:
-    """人物关系：每个人物与别人的关系，写成一条**值指向对方节点**的属性。
+def _relation_round(
+    runner, session, data, keep, events, ops, rounds, *, text: str
+) -> tuple[list[dict], list[dict]]:
+    """人物关系：看这一章，对照**现有的关系**，只写变了的部分。
 
-    单独开一个会话：接着复核那轮聊，模型会顺着「保留/丢弃」的格式答，答不出关系。
+    关系性质放在属性名上（「仇敌」「师父」），值指向对方节点——对方的页面在反向引用里
+    能看到这条，两个人就通过一条记录连起来了。
 
-    关系性质放在属性名上（「仇敌」「师父」），值指向对方——这样对方的页面能在反向引用里
-    看到这条，两个人就连起来了。这一轮只提案，落不落地由 build 判断。
+    一个人和另一个人的关系变了（「恋人」变「仇敌」），旧那条要撤掉；没变的不动。
+    判断是模型的，撤哪一条由它点名（`record_id`），程序只负责落地。
     """
+    snapshot = ops.graph_snapshot() if ops is not None else {"nodes": []}
+    nodes = {str(node["id"]): node for node in snapshot.get("nodes", [])}
     people = {
         str(node.get("name"))
         for node in (data.get("nodes") or [])
         if str(node.get("type") or "") == "person" and node.get("name")
     }
+    people |= {
+        str(node.get("name"))
+        for node in nodes.values()
+        if node.get("node_type") == "person" and node.get("name")
+    }
     if len(people) < 2:
-        return []
+        return [], []
+
+    # 现有的关系记录：值指向人物节点的那些，就是「谁和谁现在是什么关系」。
+    current: list[dict] = []
+    if ops is not None:
+        for record in ops.property_records():
+            if record.get("kind") != "property_value":
+                continue
+            subject, target = str(record.get("node_id") or ""), str(record.get("value") or "")
+            if nodes.get(subject, {}).get("node_type") != "person":
+                continue
+            if nodes.get(target, {}).get("node_type") != "person":
+                continue
+            current.append({
+                "record_id": record.get("id"),
+                "from": nodes[subject].get("name"),
+                "kind": record.get("property_id"),
+                "to": nodes[target].get("name"),
+            })
     instruction = RELATION_PROMPT.format(
         people="\n".join(f"- {name}" for name in sorted(people)),
+        current="\n".join(
+            f"- {row['from']} —{row['kind']}→ {row['to']}（记录 {row['record_id']}）"
+            for row in current
+        ) or "（还没有记录任何关系）",
         events="\n".join(f"- {name}" for name in events) or "（本章没有事件）",
         text=text or "（拿不到本章原文）",
     )
-    # 这一轮只问一次，不走 _turn 的「补充信息」循环：关系不需要查库，问多了反而跑题。
     rounds[0] += 1
     if rounds[0] > MAX_ROUNDS:
-        return []
+        return [], []
     try:
         reply = runner.agent_turn(instruction, session)
-        try:
-            workdir = Path(getattr(runner, "workdir", ""))
-            if workdir.is_dir():
-                (workdir / "relations-raw.txt").write_text(reply.raw, encoding="utf-8")
-        except OSError:
-            pass
         payload = _payload(reply.raw)
     except ValueError:
-        return []
+        return [], []
     rows = payload.get("relations")
     if not isinstance(rows, list):
-        return []
+        return [], []
+
     seen = {
         (str(item.get("node")), str(item.get("property")), str(item.get("value")))
         for item in keep if isinstance(item, dict)
     }
+    existing = {(row["from"], row["to"]): row for row in current}
+    event_quote = {
+        str(node.get("name")): str((node.get("quotes") or [""])[0])
+        for node in (data.get("nodes") or [])
+        if str(node.get("type") or "") == "event"
+    }
     out: list[dict] = []
+    retire: list[dict] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
         left, right = str(row.get("from") or ""), str(row.get("to") or "")
         kind = str(row.get("kind") or "").strip()
-        quotes = [str(item) for item in row.get("quotes") or [] if str(item).strip()]
-        if left not in people or right not in people or not kind or not quotes:
+        if left not in people or right not in people or not kind:
             continue
+        anchor = str(row.get("at_event") or "")
+        # 关系没变就维持原样，不重复记一条。
+        old = existing.get((left, right)) or existing.get((right, left))
+        if old and str(old["kind"]) == kind:
+            continue
+        if old and str(old["kind"]) != kind:
+            retire.append({
+                "target_id": old["record_id"],
+                "at_event": anchor,
+                "reason": f"关系由「{old['kind']}」变为「{kind}」",
+            })
         key = (left, kind, right)
         if key in seen:
             continue
         seen.add(key)
-        # 这一轮加的行没有经过第一轮的解析，位置要自己算：引文在原文里的起点。
-        # 引文必须**只出现一次**，否则落不到唯一位置（和第一轮同样的要求）。
+        # 引文优先用模型给的、且在原文里只出现一次的整句；
+        # 关系常常是从整段里读出来的，一句话说不清——那就用落点事件自己的引文。
         start, quote = -1, ""
-        for candidate in quotes:
+        for candidate in [str(item) for item in row.get("quotes") or [] if str(item).strip()]:
             if text.count(candidate) == 1:
                 start, quote = text.find(candidate), candidate
                 break
+        if start < 0:
+            quote = event_quote.get(anchor, "")
+            if quote and text.count(quote) == 1:
+                start = text.find(quote)
         if start < 0:
             continue
         out.append({
@@ -424,9 +470,9 @@ def _relation_round(runner, session, data, keep, events, ops, rounds, *, text: s
             "node": left, "property": kind, "value": right, "value_type": "node",
             "category": "关系", "quotes": [quote], "scope": "world", "holder": None,
             "source": "narration", "related_nodes": [right],
-            "at_event": str(row.get("at_event") or ""),
+            "at_event": anchor,
         })
-    return out
+    return out, retire
 
 
 def review_properties(
@@ -477,13 +523,17 @@ def review_properties(
             supersede += list(payload.get("supersede") or [])
             unsure = list(payload.get("unsure") or []) if payload else unsure
         supersede = _repair_anchors(runner, session, supersede, events, ops, rounds)
-        keep += _relation_round(
+        related, retire = _relation_round(
             runner, f"relation-{uuid4().hex}", data, keep, events, ops, rounds,
             text=source.get("text") or "",
         )
-        return _apply(
+        keep += related
+        result = _apply(
             data, keep, drop, rounds[0], unresolved=unsure, supersede=supersede
         )
+        # 关系变了：模型点名了要撤哪条记录，跟着这一批一起落。
+        result["retire"] = retire
+        return result
     finally:
         runner.close()
 

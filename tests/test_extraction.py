@@ -966,3 +966,53 @@ def test_a_storyline_holds_its_scenes(tmp_path: Path) -> None:
     # 大事件挂的是场景，场景挂的是事件。
     assert story["events"] == [scene["id"]]
     assert scene["events"] == [nodes["老周交出钥匙"]["id"]]
+
+
+def test_a_named_record_can_be_retired_by_id() -> None:
+    """关系变了：模型点名撤哪一条，程序按编号撤，不用再按名字去猜。"""
+    from narrative.extraction import _retire_by_id
+
+    skipped: list[dict] = []
+    records = _retire_by_id(
+        {"retire": [{"target_id": "val_1", "at_event": "老周翻脸", "reason": "关系由恋人变为仇敌"}]},
+        {"老周翻脸": "E7"},
+        skipped,
+    )
+    assert len(records) == 1
+    assert records[0]["kind"] == "property_retraction"
+    assert records[0]["target_id"] == "val_1"
+    assert records[0]["event_id"] == "E7"
+    assert records[0]["basis"] == "review"
+    assert skipped == []
+
+    # 锚点对不上的不硬编位置，报出来。
+    skipped.clear()
+    assert _retire_by_id(
+        {"retire": [{"target_id": "val_2", "at_event": "查无此事"}]}, {"老周翻脸": "E7"}, skipped
+    ) == []
+    assert "锚点对不上" in skipped[0]["reason"]
+
+
+def test_a_named_record_can_be_retired_by_id() -> None:
+    """关系变了：模型点名撤哪一条，程序按编号撤，不用再按名字去猜。"""
+    from narrative.extraction import _retire_by_id
+
+    skipped: list[dict] = []
+    records = _retire_by_id(
+        {"retire": [{"target_id": "val_1", "at_event": "老周翻脸", "reason": "关系由恋人变为仇敌"}]},
+        {"老周翻脸": "E7"},
+        skipped,
+    )
+    assert len(records) == 1
+    assert records[0]["kind"] == "property_retraction"
+    assert records[0]["target_id"] == "val_1"
+    assert records[0]["event_id"] == "E7"
+    assert records[0]["basis"] == "review"
+    assert skipped == []
+
+    # 锚点对不上的不硬编位置，报出来。
+    skipped.clear()
+    assert _retire_by_id(
+        {"retire": [{"target_id": "val_2", "at_event": "查无此事"}]}, {"老周翻脸": "E7"}, skipped
+    ) == []
+    assert "锚点对不上" in skipped[0]["reason"]

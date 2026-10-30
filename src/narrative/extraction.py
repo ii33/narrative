@@ -598,6 +598,10 @@ def review_chapter(
     # 旧值是不是真的失效，要等 `build_candidate` 把它们解析成记录和事件；
     # 解析不出来的会被丢掉。
     result["supersede"] = reviewed.get("supersede") or []
+    # 关系变了：模型点名要撤的记录，跟着这一批一起落（按记录编号撤）。
+    result["retire"] = reviewed.get("retire") or []
+    # 关系变了：模型点名要撤的记录，跟着这一批一起落（按记录编号撤）。
+    result["retire"] = reviewed.get("retire") or []
     from .extraction_review import REVIEW_VERSION
 
     result["review"] = {
@@ -692,6 +696,34 @@ def _supersede_retractions(
     from .property_store import supersede_records
 
     return supersede_records(accepted, batch)
+
+
+def _retire_by_id(
+    data: dict, event_by_name: dict[str, str], skipped: list[dict]
+) -> list[dict]:
+    """按记录编号撤回：关系变化这类判断，模型能直接指出是哪一条变了。"""
+    out: list[dict] = []
+    for item in data.get("retire") or []:
+        if not isinstance(item, dict):
+            continue
+        target = str(item.get("target_id") or "")
+        anchor, _how = _anchor_for(str(item.get("at_event") or ""), event_by_name)
+        if not target or not anchor:
+            skipped.append({
+                "name": target or "（未指名）",
+                "reason": f"关系变更锚点对不上本章事件：{item.get('at_event') or '（空）'}",
+            })
+            continue
+        digest = hashlib.sha1(f"{target}:{anchor}".encode()).hexdigest()[:12]
+        out.append({
+            "kind": "property_retraction",
+            "id": f"retract_{digest}",
+            "target_id": target,
+            "reason": str(item.get("reason") or "").strip() or "关系有变化",
+            "event_id": anchor,
+            "basis": "review",
+        })
+    return out
 
 
 def _review_supersede(
@@ -1187,6 +1219,8 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
         )
     )
     records.extend(_supersede_retractions(ops, records, accepted_records))
+    # 关系轮直接点名要撤的记录（「这两个人的关系变了」），不需要再按名字去猜。
+    records.extend(_retire_by_id(data, event_by_name, skipped))
 
     revision = ops.graph_project_info()["revision"]
     if not objects and not records:
