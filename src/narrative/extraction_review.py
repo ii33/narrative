@@ -16,7 +16,7 @@ from .graph_operations import GraphOperations
 from .harness import HarnessRunner, HarnessSettings
 
 MAX_ROUNDS = 4
-REVIEW_VERSION = "review/5"
+REVIEW_VERSION = "review/6"
 
 REVIEW_PROMPT = """你在为一部小说的属性记录做去重。
 
@@ -251,6 +251,17 @@ def _format_stored(rows: list[dict]) -> str:
 
 NO_JSON_PROMPT = "上一条回复里没有 JSON。请只输出那个 JSON 对象，不要任何解释或代码块。"
 
+ANCHOR_REPAIR_PROMPT = """下面这些「旧值失效」写的事件名，在本章事件里找不到。请只从「本章事件」
+里挑一个最贴近的，把 `at_event` 改成**原文照抄**的那个名字；确实没有对应事件的，把这一条删掉。
+
+本章事件：
+{events}
+
+要修正的条目：
+{items}
+
+只输出 JSON：{{"supersede": [ … ]}}，其余字段照抄。"""
+
 
 def _turn(runner, session: str, instruction: str, ops, rounds: list[int]) -> dict:
     """One review turn, plus any follow-ups the model asks for."""
@@ -276,6 +287,42 @@ def _turn(runner, session: str, instruction: str, ops, rounds: list[int]) -> dic
             + "\n请继续，按同样的 JSON 格式给出结果。"
         )
     raise ValueError(f"对比超过 {MAX_ROUNDS} 轮仍未给出结果")
+
+
+def _repair_anchors(runner, session, items, events, ops, rounds) -> list[dict]:
+    """事件名对不上时问模型要准确的名字——判断「哪个事件」是它的事，不是程序的。"""
+    from .extraction import _squash
+
+    known = {_squash(name) for name in events}
+    broken = [
+        item for item in items
+        if isinstance(item, dict) and _squash(str(item.get("at_event") or "")) not in known
+    ]
+    if not broken or not events:
+        return items
+    instruction = ANCHOR_REPAIR_PROMPT.format(
+        events="\n".join(f"- {name}" for name in events),
+        items=json.dumps(broken, ensure_ascii=False, indent=2),
+    )
+    try:
+        payload = _turn(runner, session, instruction, ops, rounds)
+    except ValueError:
+        return items
+    fixed = payload.get("supersede")
+    if not isinstance(fixed, list):
+        return items
+    # 修好的条目按 (node, property, value) 换回去；模型删掉的就不修了。
+    by_key = {
+        (str(item.get("node")), str(item.get("property")), str(item.get("value"))): item
+        for item in items if isinstance(item, dict)
+    }
+    for item in fixed:
+        if not isinstance(item, dict):
+            continue
+        key = (str(item.get("node")), str(item.get("property")), str(item.get("value")))
+        if key in by_key:
+            by_key[key]["at_event"] = item.get("at_event")
+    return list(by_key.values())
 
 
 def review_properties(
@@ -325,6 +372,7 @@ def review_properties(
             drop += list(payload.get("drop") or [])
             supersede += list(payload.get("supersede") or [])
             unsure = list(payload.get("unsure") or []) if payload else unsure
+        supersede = _repair_anchors(runner, session, supersede, events, ops, rounds)
         return _apply(
             data, keep, drop, rounds[0], unresolved=unsure, supersede=supersede
         )

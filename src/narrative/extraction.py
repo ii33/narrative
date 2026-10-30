@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections import Counter
 from pathlib import Path
 from uuid import uuid4
 
@@ -592,34 +591,19 @@ def _squash(text: str) -> str:
 def _anchor_for(name: str, event_by_name: dict[str, str]) -> tuple[str | None, str]:
     """把模型写的 at_event 对到本章真实的事件上，返回 (事件编号, 对上的方式)。
 
-    模型经常把事件名写成同义说法（「老周推门进来，与林舟说话」对「老周推门进来，与林舟
-    说了几句」）。对不上就返回 None——宁可不标失效，也不要锚到一个错的位置。
+    **只认原样和「去掉标点后原样」两种**：判断两个名字像不像同一件事是语义判断，
+    归模型；这里只做结构上的查表。对不上就返回 None，由复核轮去问模型要准确的名字，
+    问不到就报出来——宁可不标失效，也不要锚到一个错的位置。
     """
     if name in event_by_name:
         return event_by_name[name], "exact"
     key = _squash(name)
     if not key:
         return None, ""
-    squashed = {_squash(event): event for event in event_by_name}
-    if key in squashed:
-        return event_by_name[squashed[key]], "exact"
-    for event_key, event in squashed.items():
-        if len(event_key) >= 4 and (key in event_key or event_key in key):
-            return event_by_name[event], "fuzzy"
-    scored = sorted(
-        ((_overlap(key, other), other) for other in squashed), reverse=True
-    )
-    if scored and scored[0][0] >= 0.5 and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 0.1):
-        return event_by_name[squashed[scored[0][1]]], "fuzzy"
+    for event, event_id in event_by_name.items():
+        if _squash(event) == key:
+            return event_id, "normalized"
     return None, ""
-
-
-def _overlap(left: str, right: str) -> float:
-    """两个名字的字符重合度（0–1）：不看顺序，看用了哪些字。"""
-    if not left or not right:
-        return 0.0
-    common = sum((Counter(left) & Counter(right)).values())
-    return 2 * common / (len(left) + len(right))
 
 
 def _supersede_retractions(
