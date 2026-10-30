@@ -20,9 +20,9 @@ from .property_categories import aspect_of
 from .property_store import record_position
 
 # 提示词改一次，这个号跟着动；缓存的提取结果里会写下来，便于对照。
-PROMPT_VERSION = "extract/10"
+PROMPT_VERSION = "extract/11"
 
-NODE_TYPES = ("person", "group", "item", "location", "scene", "event")
+NODE_TYPES = ("person", "group", "item", "location", "scene", "event", "storyline")
 
 PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
 
@@ -36,6 +36,8 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
 - item：物品。法宝、武器、服饰、日常物件。
 - location：地点。城市、星球、房间、湖、战场等可指认的空间。
 - scene：场景。一段在同一地点、连续时间内发生的叙事片段，通常由地点变化或时间跳跃分隔。
+  场景可以用 `storyline` 字段挂到一个大事件下面（见下一节）。
+- storyline：大事件。跨多个场景、**甚至跨章**的一段完整过程，有起因有结果。
 - event：事件。**改变了什么的一次发生**——状态、关系、地点、目标或认知发生了变化。
   层级见下面的「四个层级」：动作是事件里的细节，不单独建节点。
 
@@ -43,8 +45,9 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
 
 原文是一层套一层的。判断某个东西该放哪一层，看它「改变了什么」的范围有多大：
 
-- **大事件**：跨多个场景的一段完整过程，有起因有结果（「老周把林舟带进另一个世界」）。
-  这一层**不建节点**，只用来判断：这一章属于哪一段过程、场景该在哪里切开。
+- **大事件**（storyline 节点，可选）：跨多个场景、甚至跨章的一段完整过程，有起因有结果
+  （「老周把林舟带进另一个世界」）。它下面挂的是**场景**。一章里这段过程还没走完、或者
+  看不出边界，就**先不建**——不要为了凑一个节点把半截故事硬切出来；后面的章节会把它补上。
 - **场景**（scene 节点）：同一地点、连续时间的一小段。地点变了、时间跳了，就是新场景。
 - **事件**（event 节点）：场景里**改变了什么**的一次发生——状态、关系、地点、目标或认知变了。
 - **动作**（不建节点）：「接起电话」「转身离开」「喝彩」「破口大骂」「一拳砸碎石块」。
@@ -55,7 +58,7 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
 - 一个场景里通常只有**几个**事件，其余都是动作；同一段连续动作（取出→戴上→试用）是**一个**事件。
 - 事件名写「谁做了什么、结果如何」——比单个动作大，比「发生冲突」小。
 - 战斗、争吵：整场属于同一个大事件，场景按地点/回合切，事件按「结果变了」切。
-- 一章通常一个（或半个）大事件、几个场景、十几个事件。**这些数字只是参照，不要为了凑数拆。**
+- 一章通常属于一个（或半个）大事件、几个场景、十几个事件。**这些数字只是参照，不要为了凑数拆。**
 - 同一件事不要输出两条措辞不同的记录（例如「沈砚告知来电」和「沈砚转告来电」是同一条）。
 
   ✗「老周取出新衣」「林舟换上新衣」「林舟照镜子」→ ✓「老周为林舟换上新衣，林舟在镜中看到新形象」
@@ -190,7 +193,8 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
 {{"nodes": [
   {{"name": "林舟", "type": "person", "quotes": ["原文逐字引文"], "aliases": ["林总"]}},
   {{"name": "站前旅社", "type": "location", "quotes": ["原文逐字引文"], "aliases": []}},
-  {{"name": "撞破女友与陈默", "type": "scene", "quotes": ["原文逐字引文"], "aliases": []}},
+  {{"name": "撞破女友与陈默", "type": "scene", "quotes": ["原文逐字引文"], "aliases": [],
+    "storyline": "林舟发现自己被背叛"}},
   {{"name": "林舟推开房门撞见女友与陈默", "type": "event", "quotes": ["原文逐字引文"],
     "aliases": [], "participants": ["林舟", "陈默", "女友"], "scene": "撞破女友与陈默"}},
   {{"name": "林舟用水果刀刺伤陈默", "type": "event", "quotes": ["原文逐字引文"],
@@ -421,6 +425,8 @@ def parse_nodes(raw: str, text: str) -> dict:
             "participants": participants,
             "participants_not_in_text": [item for item in participants if item not in text],
             "scene": str(row.get("scene") or "").strip(),
+            # 场景归属的大事件（可选）：大事件跨场景、甚至跨章。
+            "storyline": str(row.get("storyline") or "").strip(),
         })
 
     # Reading order inside each type, then grouped for display.
@@ -434,6 +440,10 @@ def parse_nodes(raw: str, text: str) -> dict:
     for event in grouped["event"]:
         if event["scene"] and event["scene"] not in scenes:
             event["scene_not_found"] = True
+    storylines = {item["name"] for item in grouped["storyline"]}
+    for scene in grouped["scene"]:
+        if scene["storyline"] and scene["storyline"] not in storylines:
+            scene["storyline_not_found"] = True
     return {
         "nodes": nodes,
         "properties": properties,
@@ -862,6 +872,30 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
                 mention_ids[("event", event["name"], quote)]
             )
 
+    # 场景说自己属于哪个大事件：反过来给大事件填上它的场景。
+    storyline_children: dict[str, list[str]] = {}
+    for scene in nodes:
+        if scene["type"] != "scene":
+            continue
+        parent = str(scene.get("storyline") or "")
+        if parent and ("storyline", parent) in ids:
+            quote = scene["quotes"][0] if scene["quotes"] else ""
+            storyline_children.setdefault(parent, []).append(
+                mention_ids[("scene", scene["name"], quote)]
+            )
+
+    # 场景说自己属于哪个大事件：反过来给大事件填上它的场景。
+    storyline_children: dict[str, list[str]] = {}
+    for scene in nodes:
+        if scene["type"] != "scene":
+            continue
+        parent = str(scene.get("storyline") or "")
+        if parent and ("storyline", parent) in ids:
+            quote = scene["quotes"][0] if scene["quotes"] else ""
+            storyline_children.setdefault(parent, []).append(
+                mention_ids[("scene", scene["name"], quote)]
+            )
+
     existing_ids = {item["id"] for item in snapshot["nodes"]}
     for item in nodes:
         key = (item["type"], item["name"])
@@ -882,6 +916,12 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
         }
         if item["type"] == "scene":
             payload["events"] = scene_children.get(item["name"], [])
+        if item["type"] == "storyline":
+            # 大事件下面挂的是场景：跨场景、甚至跨章都正常。
+            payload["events"] = storyline_children.get(item["name"], [])
+        if item["type"] == "storyline":
+            # 大事件下面挂的是场景：跨场景、甚至跨章都正常。
+            payload["events"] = storyline_children.get(item["name"], [])
         if item["type"] == "event":
             resolved: list[str] = []
             for name in item.get("participants") or []:

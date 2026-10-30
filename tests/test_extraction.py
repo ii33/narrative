@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,7 @@ def test_parse_keeps_verified_quotes_and_orders_by_position() -> None:
     result = parse_nodes(RAW, TEXT)
     assert result["counts"] == {
         "person": 2, "group": 0, "item": 1, "location": 1, "scene": 1, "event": 2,
+        "storyline": 0,
     }
     assert [item["name"] for item in result["grouped"]["event"]] == ["林舟刺伤陈默", "火纹石改造外形"]
     assert all(item["quotes"] for item in result["nodes"])
@@ -925,3 +927,42 @@ def test_the_prompt_lists_categories_and_the_names_already_in_use(tmp_path: Path
     assert "拿不准就写「其他」" in prompt
     assert "`age`（人物 · 基本信息）" in prompt
     assert "`skin`（人物 · 外貌）" in prompt
+
+
+def test_a_storyline_holds_its_scenes(tmp_path: Path) -> None:
+    """大事件是节点，下面挂场景：场景说自己属于哪个大事件，程序反过来给它填子节点。"""
+    ops = create_graph_project(tmp_path / "story.nproj")
+    text = "林舟推门进来。老周把钥匙交给他。"
+    data = parse_nodes(json.dumps({
+        "nodes": [
+            {"name": "林舟接手杂货铺", "type": "storyline",
+             "quotes": ["老周把钥匙交给他"], "aliases": []},
+            {"name": "杂货铺交接", "type": "scene",
+             "quotes": ["老周把钥匙交给他"], "aliases": [],
+             "storyline": "林舟接手杂货铺"},
+            {"name": "老周交出钥匙", "type": "event",
+             "quotes": ["老周把钥匙交给他"], "aliases": [],
+             "participants": ["老周", "林舟"], "scene": "杂货铺交接"},
+        ],
+        "properties": [],
+    }, ensure_ascii=False), text) | {
+        "source_id": (sid := ops.import_source("第一章", text)),
+        "source_hash": ops.source(sid)["hash"],
+        "chapter": "第一章",
+    }
+    built = build_candidate(ops, data)
+    ops.change_accept(
+        ops.change_propose(
+            built["objects"], built["property_records"], built["revision"], source="model"
+        ),
+        1,
+    )
+
+    nodes = {node["name"]: node for node in ops.graph_snapshot()["nodes"]}
+    scene = nodes["杂货铺交接"]
+    story = nodes["林舟接手杂货铺"]
+    assert scene["node_type"] == "scene"
+    assert story["node_type"] == "storyline"
+    # 大事件挂的是场景，场景挂的是事件。
+    assert story["events"] == [scene["id"]]
+    assert scene["events"] == [nodes["老周交出钥匙"]["id"]]
