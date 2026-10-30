@@ -141,7 +141,7 @@ class GraphService:
             "property_records": property_fields,
             "property_effect_ops": list(PROPERTY_EFFECT_OPS),
             "property_state_cells": list(PROPERTY_STATE_CELL_KINDS),
-            "property_value_types": ["string", "number", "boolean", "node"],
+            "property_value_types": ["string", "number", "boolean", "node", "either"],
             "property_cardinalities": ["one", "many"],
             "property_persistence": ["until_changed", "instant"],
             "property_candidate_staging": {

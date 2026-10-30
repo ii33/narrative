@@ -20,7 +20,7 @@ from .property_categories import aspect_of
 from .property_store import record_position
 
 # 提示词改一次，这个号跟着动；缓存的提取结果里会写下来，便于对照。
-PROMPT_VERSION = "extract/6"
+PROMPT_VERSION = "extract/7"
 
 NODE_TYPES = ("person", "group", "item", "location", "scene", "event")
 
@@ -67,11 +67,14 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
 
 - 人物的明确属性：年龄、身材、外貌、身份、状态、伤情。
 - 物品/地点的状态：持有者、位置、是否损坏、外形。
-- **物品一定要写持有者。** 一件物品第一次出现时，只要原文能看出在谁手上——拿着、戴着、
-  穿着、收进怀里、被谁给出、被谁抢走——就记一条 `持有者`，值填**人物名**（`value_type: "node"`）。
-  换手时再记一条，位置照常是那次披露。原文确实没交代在谁手里才不记，不要猜。
+- **物品必须有一条 `持有者`**，`value_type` 一律写 `either`（可以指向人物，也可以是普通字符串）：
+  - 原文能看出在谁手上（拿着、戴着、穿着、收进怀里、被谁给出、被谁抢走）→ 值填**人物名**；
+  - 明确没有主人（被遗弃、无主之物）→ 值写 `无`；
+  - 原文没说清在谁手里 → 值写 `未知`。
+  换手时再记一条，位置照常是那次披露。**不要因为不确定就不写这一条。**
   例：「老周从怀里掏出一把铜钥匙」→ `铜钥匙.持有者 = 老周`；
-      「林舟接过钥匙揣进兜里」→ 再记一条 `铜钥匙.持有者 = 林舟`。
+      「林舟接过钥匙揣进兜里」→ 再记一条 `铜钥匙.持有者 = 林舟`；
+      「废墟里散落着几件无主法器」→ `法器.持有者 = 无`。
 - 信息来自某个人的视角时，用 `scope` 标明归属，`holder` 填那个人：
   - `world`：原文直接叙述的内容（默认，不填 holder）；
   - `cognition`：某个人怎样理解、相信、知道、记得或怀疑。**"知道"也归这一类**，
@@ -90,7 +93,7 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
   statement、plan），不要用中文。
   **不要用"变化"命名**：不写 `height_change`、`appearance_change`、`skin_change`。
   原文说"变高了"，就记 `height = 变高了`；说"白了许多"，就记 `skin = 白了许多`。
-- value_type 取 string、number、boolean、node、any；holder 这类指向节点的属性用 node，
+- value_type 取 string、number、boolean、node、either、any；holder 这类指向节点的属性用 node，
   value 填节点名称。
   **同一个属性在不同时候可以是数值、描述或相对说法，不要因为形态不同就换个名字。**
   比如身高：`height = 180`、`height = 矮小`、`height = 变高了` 都是 `height`，
@@ -239,7 +242,7 @@ def _payload(raw: str) -> dict:
         return json.loads(body[start:end + 1])
 
 
-VALUE_TYPES = ("string", "number", "boolean", "node", "any")
+VALUE_TYPES = ("string", "number", "boolean", "node", "any", "either")
 ALLOWED_PARTICIPANTS = ("person", "group", "item", "location")
 
 
@@ -882,6 +885,14 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
         for item in ops.property_records()
         if item["kind"] == "property_definition"
     }
+    # 同一批里同一个方面可能既有 node 又有 either：either 只是允许「无 / 未知」这类普通值，
+    # 两者是同一类。整批先定下类型，免得先出现的 node 把后面的 either 顶掉。
+    batch_types: dict[str, str] = {}
+    for prop in data.get("properties", []):
+        name = aliases.get(prop["property"], prop["property"])
+        if batch_types.get(name) != "either":
+            batch_types[name] = prop["value_type"]
+
     for prop in data.get("properties", []):
         node_id = ids.get((prop["node_type"], prop["node"])) if "node_type" in prop else None
         if node_id is None:
@@ -896,20 +907,23 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
                     break
         if node_id is None:
             continue
-        property_id = prop["property"]
-        property_id = aliases.get(property_id, property_id)
+        property_id = str(prop["property"])
+        property_id = aliases.get(property_id) or property_id
+        proposed_type = prop["value_type"]
         known_type = definitions.get(property_id)
         if known_type is None:
-            definitions[property_id] = prop["value_type"]
+            known_type = str(batch_types.get(property_id) or proposed_type)
+            definitions[property_id] = known_type
             records.append({
                 "kind": "property_definition", "id": property_id,
-                "value_type": prop["value_type"], "cardinality": "one",
+                "value_type": known_type, "cardinality": "one",
                 "persistence": "until_changed",
             })
-        elif known_type != prop["value_type"]:
+        elif known_type != proposed_type and {known_type, proposed_type} != {"node", "either"}:
             continue
+        value_type = known_type
         value = prop["value"]
-        if prop["value_type"] == "node":
+        if value_type in {"node", "either"}:
             target = None
             for kind in ALLOWED_PARTICIPANTS:
                 target = ids.get((kind, value))
@@ -921,8 +935,11 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
                     if target:
                         break
             if target is None:
-                continue
-            value = target
+                # either 允许写「无」「未知」这类非节点值；node 类型解析不到就跳过。
+                if value_type == "node":
+                    continue
+            else:
+                value = target
         quote = prop["quotes"][0]
         anchor = event_by_name.get(prop.get("at_event") or "")
         if not anchor:

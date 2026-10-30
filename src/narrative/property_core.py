@@ -21,7 +21,7 @@ _KINDS = {
 }
 # "any" means the shape is not fixed: one property may hold a number, a
 # description and a relative phrase over time.
-_VALUE_TYPES = {"string", "number", "boolean", "node", "any"}
+_VALUE_TYPES = {"string", "number", "boolean", "node", "any", "either"}
 _CARDINALITIES = {"one", "many"}
 _PERSISTENCE = {"until_changed", "instant"}
 _CELL_KINDS = {"known", "unknown", "absent"}
@@ -248,6 +248,9 @@ def _valid_value(value: Any, definition: dict, graph_nodes: dict[str, dict]) -> 
         )
     if value_type == "boolean":
         return isinstance(value, bool)
+    if value_type == "either":
+        # 节点名或普通字符串都行：持有者写「无」「未知」时不是节点。
+        return isinstance(value, str)
     if value_type == "node":
         target = graph_nodes.get(value) if isinstance(value, str) else None
         if not target or target.get("kind") not in {None, "node"}:
