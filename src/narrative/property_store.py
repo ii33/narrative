@@ -152,19 +152,19 @@ def supersede_plan(
         definition = definitions.get(canonical)
         if definition is not None and definition.get("cardinality") == "many":
             continue
+        scope = record.get("scope") or "world"
+        # 同一个人「说的」和「以为的」是同一条线：他后来改口，先前那条就不再算数。
+        # 世界事实仍按 world 单独成线，不与人物的说法互相取代。
         key = (
             record.get("node_id"),
             aspect_of(canonical),
-            (record.get("scope") or "world"),
-            record.get("holder_id"),
+            "world" if scope == "world" else "holder",
+            record.get("holder_id") if scope != "world" else None,
         )
         groups.setdefault(key, []).append(record)
 
     plan: list[dict] = []
     for group in groups.values():
-        name = str(group[0].get("property_id") or "")
-        definition = definitions.get(aliases.get(name, name))
-        node_valued = bool(definition) and definition.get("value_type") in {"node", "either"}
         ordered = sorted(group, key=record_position)
         still_valid: list[dict] = []
         for record in ordered:
@@ -173,11 +173,8 @@ def supersede_plan(
                     continue
                 if record_position(record) <= record_position(older):
                     continue
-                # 同一个事件里说了两件事（值不同）不互相取代：那是并列或矛盾，不是推进。
-                # 例外是**换手**：一件东西在同一场里先给出去再被接过，位置更后的那条接手。
-                same_event = _statement_event(record) == _statement_event(older)
-                if same_event and not node_valued:
-                    continue
+                # 同一事件里两句话落在**同一个位置**才是并列（一句话说了两件事）；
+                # 位置更后的那条是「后来又说了一句」——换手、改口都属于这种，它接手。
                 item = {
                     "target_id": older.get("id"),
                     "event_id": record.get("event_id"),
@@ -1503,6 +1500,9 @@ class PropertyStore:
         for record in records:
             if record.get("kind") != "property_value" or record.get("id") in invalid:
                 continue
+            # 读者还没读到这一步，就不该知道他说过什么。
+            if cut_position is not None and position(record) > cut_position:
+                continue
             if str(record.get("holder_id") or "") != node_id:
                 continue
             subject = str(record.get("node_id") or "")
@@ -1528,6 +1528,36 @@ class PropertyStore:
             })
         claims.sort(key=lambda item: (item["node_name"], item["property_id"]))
 
+        # 别人说的关于本节点的话：不进「属性」（那不是它自己的状态），但要在这一页
+        # 看得见——否则「纳芥手镯 · 功能 = 储物」会凭空消失。谁说的写在行上。
+        heard: list[dict] = []
+        for record in records:
+            if record.get("kind") != "property_value" or record.get("id") in invalid:
+                continue
+            if str(record.get("node_id") or "") != node_id:
+                continue
+            scope = record.get("scope") or "world"
+            holder = str(record.get("holder_id") or "")
+            if scope == "world" or not holder or holder == node_id:
+                continue
+            if cut_position is not None and position(record) > cut_position:
+                continue
+            raw_name = record.get("property_id")
+            name = aliases.get(raw_name, raw_name) if isinstance(raw_name, str) else ""
+            heard.append({
+                "record_id": record.get("id"),
+                "holder_id": holder,
+                "holder_name": names.get(holder) or holder,
+                "property_id": name,
+                "property_label": property_labels.label_for(name),
+                "value": record.get("value"),
+                "scope": scope,
+                "scope_label": "声称" if scope == "claim" else "认知",
+                "event_id": record.get("event_id"),
+                "event_name": names.get(record.get("event_id") or ""),
+            })
+        heard.sort(key=lambda item: (item["holder_name"], item["property_id"]))
+
         return {
             "node_id": node_id,
             "node_type": node_type,
@@ -1547,6 +1577,7 @@ class PropertyStore:
             "properties": items,
             "inbound": inbound,
             "claims": claims,
+            "heard": heard,
             "cut": cut,
             "later_count": hidden_total,
         }

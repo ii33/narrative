@@ -33,9 +33,11 @@ def _project(path: Path):
                 {"kind": "property_value", "id": "v1", "node_id": "1", "property_id": "age",
                  "value": "二十九岁", "event_id": "2",
                  "disclosure": {"source_id": source, "start": 2}},
+                # 同一位置的两条 = 一句话里的两个说法，并列，谁也不会自动顶掉谁；
+                # 这里要测的是「手工撤回其中一条」。
                 {"kind": "property_value", "id": "v2", "node_id": "1", "property_id": "age",
                  "value": "三十岁", "event_id": "2",
-                 "disclosure": {"source_id": source, "start": 6}},
+                 "disclosure": {"source_id": source, "start": 2}},
             ],
             ops.graph_project_info()["revision"],
             source="manual",
