@@ -107,19 +107,40 @@ Item {
                 }
                 var cx = width / 2
                 var cy = height / 2
-                var radius = Math.max(90, Math.min(width, height) * 0.33)
+                var radius = Math.max(90, Math.min(width, height) * 0.34)
+
+                // 谁的关系最多谁站中间：主角在圆心，边从中心发散，不会挤成一团。
+                var degree = ({})
+                for (var d = 0; d < links.length; ++d) {
+                    degree[links[d].from] = (degree[links[d].from] || 0) + 1
+                    degree[links[d].to] = (degree[links[d].to] || 0) + 1
+                }
+                var hub = null
+                for (var h = 0; h < people.length; ++h) {
+                    if (hub === null || (degree[people[h].id] || 0) > (degree[hub.id] || 0))
+                        hub = people[h]
+                }
+                var ring = people
+                if (hub !== null && (degree[hub.id] || 0) >= 3) {
+                    ring = []
+                    for (var k = 0; k < people.length; ++k)
+                        if (people[k].id !== hub.id) ring.push(people[k])
+                } else {
+                    hub = null
+                }
+
                 var pos = ({})
                 // 圆圈按名字长度定大小：五个字的名字塞进二十像素的圈里是看不清的。
-                for (var i = 0; i < people.length; ++i) {
+                function place(person, x, y) {
                     ctx.font = "12px sans-serif"
-                    var tw = ctx.measureText(people[i].name).width
-                    var r = Math.max(22, tw / 2 + 9)
-                    var angle = -Math.PI / 2 + i * 2 * Math.PI / people.length
-                    pos[people[i].id] = {
-                        x: cx + radius * Math.cos(angle),
-                        y: cy + radius * Math.sin(angle),
-                        r: r
-                    }
+                    var tw = ctx.measureText(person.name).width
+                    pos[person.id] = { x: x, y: y, r: Math.max(22, tw / 2 + 9) }
+                }
+                if (hub !== null) place(hub, cx, cy)
+                for (var i = 0; i < ring.length; ++i) {
+                    var angle = -Math.PI / 2 + i * 2 * Math.PI / ring.length
+                    place(ring[i], cx + radius * Math.cos(angle),
+                          cy + radius * Math.sin(angle))
                 }
 
                 // 先画线，再把标签压在线上面：标签带白底，压在线上也读得清。
