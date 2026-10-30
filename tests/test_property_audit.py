@@ -336,3 +336,23 @@ def test_a_value_pointing_at_somebody_else_is_not_reported() -> None:
         _value("v1", "1", "师父", "2"),
     ]
     assert "self_reference" not in _codes(audit_properties(records, nodes))
+
+
+def test_a_relation_written_as_a_sentence_is_reported() -> None:
+    """「恋人 = 与沈砚是多年的恋人」是句子，不是指向人的关系。"""
+    nodes = [_node("1", "林舟"), _node("2", "沈砚")]
+    records = [
+        _definition("恋人", "either"),
+        _value("v1", "1", "恋人", "与沈砚是多年的恋人", category="关系"),
+    ]
+    report = audit_properties(records, nodes)
+    assert "relation_not_a_person" in _codes(report)
+
+
+def test_a_relation_pointing_at_a_person_is_not_reported() -> None:
+    nodes = [_node("1", "林舟"), _node("2", "沈砚")]
+    records = [
+        _definition("恋人", "node"),
+        _value("v1", "1", "恋人", "2", category="关系"),
+    ]
+    assert "relation_not_a_person" not in _codes(audit_properties(records, nodes))

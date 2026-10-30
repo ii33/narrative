@@ -991,3 +991,37 @@ def test_a_named_record_can_be_retired_by_id() -> None:
         {"retire": [{"target_id": "val_2", "at_event": "查无此事"}]}, {"老周翻脸": "E7"}, skipped
     ) == []
     assert "锚点对不上" in skipped[0]["reason"]
+
+
+def test_one_record_is_retracted_once() -> None:
+    """复核说「不成立了」、结构说「有新值了」，同一个目标只能撤一次。"""
+    from narrative.extraction import _dedupe_retractions
+
+    records = [
+        {"kind": "property_retraction", "id": "r1", "target_id": "v1",
+         "event_id": "E1", "basis": "audit"},
+        {"kind": "property_retraction", "id": "r1", "target_id": "v1",
+         "event_id": "E1", "basis": "review"},
+        {"kind": "property_value", "id": "v2", "node_id": "1", "property_id": "age",
+         "value": "三十岁"},
+    ]
+    out = _dedupe_retractions(records, [])
+    kept = [row for row in out if row["kind"] == "property_retraction"]
+    assert len(kept) == 1
+    # 复核判的理由更清楚，留它。
+    assert kept[0]["basis"] == "review"
+    assert [row["kind"] for row in out].count("property_value") == 1
+
+
+def test_a_target_already_retracted_is_left_alone() -> None:
+    from narrative.extraction import _dedupe_retractions
+
+    records = [
+        {"kind": "property_retraction", "id": "r1", "target_id": "v1",
+         "event_id": "E1", "basis": "audit"},
+    ]
+    accepted = [
+        {"kind": "property_retraction", "id": "r0", "target_id": "v1",
+         "event_id": "E0", "basis": "review"},
+    ]
+    assert _dedupe_retractions(records, accepted) == []

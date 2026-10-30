@@ -20,7 +20,7 @@ from .property_categories import aspect_of
 from .property_store import record_position
 
 # 提示词改一次，这个号跟着动；缓存的提取结果里会写下来，便于对照。
-PROMPT_VERSION = "extract/12"
+PROMPT_VERSION = "extract/13"
 
 NODE_TYPES = ("person", "group", "item", "location", "scene", "event", "storyline")
 
@@ -168,7 +168,9 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
 - 身份与经历：职业、职务、称号、组织身份、出身、教育经历
 - 能力与身体状态：修为、技能、天赋、体质、伤势、健康
 - 持有与使用：财物、装备、携带物、佩戴物
-- 关系：亲属、师徒、朋友、敌对、隶属
+- 关系：亲属、师徒、朋友、敌对、隶属。**属性名写具体的关系**（师徒 / 父子 / 恋人 / 仇敌 /
+  上司 / 下属），值指向对方那个人；不要把「关系」本身当属性名，也不要把关系的描述写成
+  一句话（「与沈砚是多年的恋人」）——那是句子，不是属性
 - 心理与意图：情绪、愿望、计划、打算、态度
 
 物品：基本信息 / 外观与构造 / 功能与特性 / 状态 / 归属与持有 / 关联 / 其他
@@ -600,8 +602,6 @@ def review_chapter(
     result["supersede"] = reviewed.get("supersede") or []
     # 关系变了：模型点名要撤的记录，跟着这一批一起落（按记录编号撤）。
     result["retire"] = reviewed.get("retire") or []
-    # 关系变了：模型点名要撤的记录，跟着这一批一起落（按记录编号撤）。
-    result["retire"] = reviewed.get("retire") or []
     from .extraction_review import REVIEW_VERSION
 
     result["review"] = {
@@ -681,6 +681,37 @@ def _anchor_for(name: str, event_by_name: dict[str, str]) -> tuple[str | None, s
         if _squash(event) == key:
             return event_id, "normalized"
     return None, ""
+
+
+def _dedupe_retractions(records: list[dict], accepted: list[dict]) -> list[dict]:
+    """一条记录只能撤一次。
+
+    三个来源（复核判的、结构推的、模型点名的）都用「目标 + 事件」算编号，同一个目标
+    被两个来源同时撤就会撞出同一个 id，预检直接判重复。这里按目标收成一条——复核判的
+    留着（它说得清理由），其余丢掉；已经撤过的目标也不再重复撤。
+    """
+    already = {
+        str(record.get("target_id")) for record in accepted
+        if record.get("kind") == "property_retraction"
+    }
+    rank = {"review": 0, "audit": 1, "human": 2}
+    best: dict[str, dict] = {}
+    for record in records:
+        if record.get("kind") != "property_retraction":
+            continue
+        target = str(record.get("target_id") or "")
+        if not target or target in already:
+            continue
+        current = best.get(target)
+        if current is None or rank.get(str(record.get("basis")), 3) < rank.get(
+            str(current.get("basis")), 3
+        ):
+            best[target] = record
+    keep = {id(record) for record in best.values()}
+    return [
+        record for record in records
+        if record.get("kind") != "property_retraction" or id(record) in keep
+    ]
 
 
 def _supersede_retractions(
@@ -1221,6 +1252,9 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
     records.extend(_supersede_retractions(ops, records, accepted_records))
     # 关系轮直接点名要撤的记录（「这两个人的关系变了」），不需要再按名字去猜。
     records.extend(_retire_by_id(data, event_by_name, skipped))
+    # 同一个目标可能被两个来源同时撤（复核说「不成立了」，结构说「有新值了」）：
+    # 收成一条，否则两条撤回编号相同，预检会判重复、整章落不下去。
+    records = _dedupe_retractions(records, accepted_records)
 
     revision = ops.graph_project_info()["revision"]
     if not objects and not records:

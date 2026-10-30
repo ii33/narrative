@@ -374,6 +374,26 @@ def audit_properties(
             suggestion="确认是不是同一个方面；是的话用「合并」把两个名字并成一条线",
         ))
 
+    # 关系得指向人：值既不是节点编号也不是任何节点的名字，说明写成了句子
+    # （「恋人 = 与沈砚是多年的恋人」）。这种在关系网上画不出来。
+    by_name = {_text(node.get("name")): node for node in nodes if node.get("name")}
+    for record in values:
+        if str(record.get("category") or "") != "关系":
+            continue
+        node = names.get(str(record.get("node_id") or "")) or {}
+        value = _text(record.get("value"))
+        if not node or not value or value in names or value in by_name:
+            continue
+        issues.append(_issue(
+            "relation_not_a_person", WARNING,
+            f"「{node.get('name')}」的「{record.get('property_id')}」值是「{value[:24]}」，"
+            f"指向的不是人物节点",
+            node=node,
+            property_id=str(record.get("property_id") or ""),
+            records=[record],
+            suggestion="关系要指向具体的人；说的是关系本身，就把值换成对方的名字",
+        ))
+
     # 值就是它自己：「某人的女友 · 关系 = 某人的女友」这种，说的是身份不是关系，
     # 画到关系网上就是一条自己指向自己的边。只报不改——可能是方面名写错了。
     for record in values:
