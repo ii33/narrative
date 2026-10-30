@@ -20,7 +20,7 @@ from .property_categories import aspect_of
 from .property_store import record_position
 
 # 提示词改一次，这个号跟着动；缓存的提取结果里会写下来，便于对照。
-PROMPT_VERSION = "extract/5"
+PROMPT_VERSION = "extract/6"
 
 NODE_TYPES = ("person", "group", "item", "location", "scene", "event")
 
@@ -67,6 +67,11 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
 
 - 人物的明确属性：年龄、身材、外貌、身份、状态、伤情。
 - 物品/地点的状态：持有者、位置、是否损坏、外形。
+- **物品一定要写持有者。** 一件物品第一次出现时，只要原文能看出在谁手上——拿着、戴着、
+  穿着、收进怀里、被谁给出、被谁抢走——就记一条 `持有者`，值填**人物名**（`value_type: "node"`）。
+  换手时再记一条，位置照常是那次披露。原文确实没交代在谁手里才不记，不要猜。
+  例：「老周从怀里掏出一把铜钥匙」→ `铜钥匙.持有者 = 老周`；
+      「林舟接过钥匙揣进兜里」→ 再记一条 `铜钥匙.持有者 = 林舟`。
 - 信息来自某个人的视角时，用 `scope` 标明归属，`holder` 填那个人：
   - `world`：原文直接叙述的内容（默认，不填 holder）；
   - `cognition`：某个人怎样理解、相信、知道、记得或怀疑。**"知道"也归这一类**，
