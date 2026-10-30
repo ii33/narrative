@@ -29,6 +29,17 @@ from .provider_store import GLOBAL_SCOPE, ProviderStore
 _NODE_TYPES = {"person", "group", "item", "location", "event", "scene", "storyline", "other"}
 
 
+def _read_before(node: dict, cut: dict | None, orders: list[dict]) -> bool:
+    """这个节点是否在阅读位置之前（同一份原文比 start，不同原文比顺序）。"""
+    if not cut or not node:
+        return False
+    ordinal = {row["source_id"]: row["ordinal"] for row in orders}
+    disclosure = node.get("disclosure") or {}
+    mine = (ordinal.get(disclosure.get("source_id"), 0), disclosure.get("start") or 0)
+    here = (ordinal.get(cut.get("source_id"), 0), cut.get("start") or 0)
+    return mine < here
+
+
 class NativeBridge(QObject):
     """QML context object named ``bridge``; all Operations I/O runs off the GUI thread."""
 
@@ -1125,10 +1136,20 @@ class NativeBridge(QObject):
                 ops.graph_display_map()["items"], ops.sources(),
             )
             # 大事件是一段：把它的起止事件附上，页面上才看得出它串了哪几场。
+            snapshot = ops.graph_snapshot()
             spans = {row["id"]: row for row in _storyline_spans(
-                ops.graph_snapshot(), "canon", cut or None
+                snapshot, "canon", cut or None
             )}
-            detail["span"] = spans.get(node_id)
+            span = spans.get(node_id)
+            detail["span"] = span
+            # 还没读到它收尾那一步，就只知道个暂称；读到了才用正式名。
+            provisional = str((detail.get("node") or {}).get("provisional_name") or "")
+            if provisional and span:
+                nodes = {row["id"]: row for row in snapshot["nodes"]}
+                last = nodes.get(span["last"]) or {}
+                if _read_before(last, cut, snapshot.get("source_orders") or []):
+                    detail["display_name"] = provisional
+                    detail["name_provisional"] = True
             return detail
 
         self._project_task("detail", work)

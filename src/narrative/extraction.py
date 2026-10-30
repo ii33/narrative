@@ -20,7 +20,7 @@ from .property_categories import aspect_of
 from .property_store import record_position
 
 # 提示词改一次，这个号跟着动；缓存的提取结果里会写下来，便于对照。
-PROMPT_VERSION = "extract/11"
+PROMPT_VERSION = "extract/12"
 
 NODE_TYPES = ("person", "group", "item", "location", "scene", "event", "storyline")
 
@@ -38,6 +38,10 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
 - scene：场景。一段在同一地点、连续时间内发生的叙事片段，通常由地点变化或时间跳跃分隔。
   场景可以用 `storyline` 字段挂到一个大事件下面（见下一节）。
 - storyline：大事件。跨多个场景、**甚至跨章**的一段完整过程，有起因有结果。
+  大事件常常到结尾才有名字：过程里先给一个**暂称**（`provisional_name`），收尾那一步再定正式名
+  （`name`）。读者读到跨度中间时看到的是暂称，读完之后才看到正式名。没把握就只写 name。
+  大事件常常到结尾才有名字：过程里先给一个**暂称**（`provisional_name`），收尾那一步再定正式名
+  （`name`）。读者读到跨度中间时看到的是暂称，读完之后才看到正式名。没把握就只写 name。
 - event：事件。**改变了什么的一次发生**——状态、关系、地点、目标或认知发生了变化。
   层级见下面的「四个层级」：动作是事件里的细节，不单独建节点。
 
@@ -427,6 +431,9 @@ def parse_nodes(raw: str, text: str) -> dict:
             "scene": str(row.get("scene") or "").strip(),
             # 场景归属的大事件（可选）：大事件跨场景、甚至跨章。
             "storyline": str(row.get("storyline") or "").strip(),
+            # 大事件在过程中还没定名时的叫法。
+            # 大事件在过程中还没定名时的叫法。
+            "provisional_name": str(row.get("provisional_name") or "").strip(),
         })
 
     # Reading order inside each type, then grouped for display.
@@ -948,6 +955,16 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
             "aliases": item.get("aliases") or [],
             "context_id": "canon",
             "identity_note": "原文提取",
+            **(
+                {"provisional_name": str(item.get("provisional_name") or "").strip()}
+                if item["type"] == "storyline" and item.get("provisional_name")
+                else {}
+            ),
+            **(
+                {"provisional_name": str(item.get("provisional_name") or "").strip()}
+                if item["type"] == "storyline" and item.get("provisional_name")
+                else {}
+            ),
             "disclosure": {"source_id": data["source_id"], "start": item["start"]},
             "evidence": {"source_id": data["source_id"], "quote": item["quotes"][0]},
         }

@@ -101,6 +101,12 @@ class Node(GraphModel):
     subtype: str | None = None
     context_id: str = "canon"
     identity_note: str = ""
+    # 大事件常常到结尾才有名字：过程里叫「暂称」，收尾时定下正式名。
+    # 阅读位置还在跨度之内时显示暂称，读到跨度末尾之后显示正式名。
+    provisional_name: str = ""
+    # 大事件常常到结尾才有名字：过程里叫「暂称」，收尾时定下正式名。
+    # 阅读位置还在跨度之内时显示暂称，读到跨度末尾之后显示正式名。
+    provisional_name: str = ""
     occurrence: TimeExtent | None = None
     # Where the reader first meets this node in the source. Story time and
     # reading position are different axes; this one needs no inference.

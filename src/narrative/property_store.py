@@ -1558,6 +1558,26 @@ class PropertyStore:
             })
         heard.sort(key=lambda item: (item["holder_name"], item["property_id"]))
 
+        # 时间点可以往下钻：大事件下面是场景，场景下面是事件。都按阅读位置排，
+        # 而且只列读者已经读到的那部分。
+        children: list[dict] = []
+        owner = nodes.get(node_id) or {}
+        for child_id in owner.get("events") or []:
+            child = nodes.get(child_id)
+            if not child:
+                continue
+            if cut_position is not None and position(child) > cut_position:
+                continue
+            children.append({
+                "id": child_id,
+                "name": child.get("name", child_id),
+                "label_id": child.get("label_id", child_id),
+                "node_type": child.get("node_type"),
+                "type_label": "场景" if child.get("node_type") == "scene" else "事件",
+                "start": (child.get("disclosure") or {}).get("start"),
+            })
+        children.sort(key=lambda item: (item["start"] or 0, item["id"]))
+
         return {
             "node_id": node_id,
             "node_type": node_type,
@@ -1578,6 +1598,7 @@ class PropertyStore:
             "inbound": inbound,
             "claims": claims,
             "heard": heard,
+            "children": children,
             "cut": cut,
             "later_count": hidden_total,
         }

@@ -64,6 +64,7 @@ Item {
     property var inboundRows: []       // 别的节点指向本节点的记录
     property var claimRows: []         // 本节点说过的、关于别人的说法
     property var heardRows: []         // 别人说的、关于本节点的话
+    property var childRows: []         // 下一级时间点：大事件→场景→事件
     // 节点资料：一张张资料卡，各有生效/失效时间。它和属性是同一类东西——
     // 「从这一步起成立，到那一步起不成立」——只是没有引文，所以不进属性记录。
     property var material: ({ node_id: "", cut: "", cards: [], hidden_count: 0,
@@ -206,6 +207,7 @@ Item {
         inboundRows = []
         claimRows = []
         heardRows = []
+        childRows = []
         expandedProps = ({})
         material = ({ node_id: "", cut: "", cards: [], hidden_count: 0,
             moments: { levels: [], nodes: [] } })
@@ -277,6 +279,7 @@ Item {
         inboundRows = []
         claimRows = []
         heardRows = []
+        childRows = []
         expandedProps = ({})
         appliedCut = page.cutEventId
         material = ({ node_id: "", cut: "", cards: [], hidden_count: 0,
@@ -545,6 +548,7 @@ Item {
         inboundRows = payload.inbound || []
         claimRows = payload.claims || []
         heardRows = payload.heard || []
+        childRows = payload.children || []
         cutLater = payload.later_count || 0
         categoryGroups = built
         propertyRows = all
@@ -694,6 +698,7 @@ Item {
                 inboundRows = []
         claimRows = []
         heardRows = []
+        childRows = []
                 expandedProps = ({})
                 page.cutId = ""
                 page.cutEventId = ""
@@ -1078,7 +1083,10 @@ Item {
                     spacing: 8
 
                     Label {
-                        text: detail.node ? detail.node.name : "未选择节点"
+                        text: detail.node
+                            ? (detail.display_name || detail.node.name)
+                              + (detail.name_provisional ? "（暂称）" : "")
+                            : "未选择节点"
                         font.pixelSize: 16
                         font.weight: Font.DemiBold
                         color: t.ink
@@ -1216,6 +1224,71 @@ Item {
                                     font.pixelSize: 10
                                     enabled: page.selectedId.length > 0 && page.events.length > 0
                                     onClicked: page.openAddProperty()
+                                }
+                            }
+
+                            // 下一级时间点：大事件下面是场景，场景下面是事件。
+                            // 点一行就跳到那个时间点，可以一层层钻下去。
+                            Column {
+                                Layout.fillWidth: true
+                                Layout.topMargin: 4
+                                spacing: 2
+                                visible: childRows.length > 0
+
+                                RowLayout {
+                                    width: parent.width
+                                    spacing: 6
+                                    Label {
+                                        text: "包含"
+                                        color: t.muted
+                                        font.pixelSize: 11
+                                        font.weight: Font.DemiBold
+                                    }
+                                    Label {
+                                        text: childRows.length
+                                        color: t.muted
+                                        font.pixelSize: 10
+                                    }
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: 1
+                                        color: t.line
+                                    }
+                                }
+                                Repeater {
+                                    objectName: "browseChildRows"
+                                    model: childRows
+
+                                    delegate: RowLayout {
+                                        required property var modelData
+                                        width: parent.width
+                                        spacing: 6
+
+                                        Label {
+                                            text: modelData.label_id
+                                            color: t.muted
+                                            font.pixelSize: 10
+                                            Layout.preferredWidth: 30
+                                        }
+                                        Label {
+                                            text: modelData.name
+                                            color: t.accent
+                                            font.pixelSize: 11
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                            font.underline: true
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: page.jumpTo(modelData.id)
+                                            }
+                                        }
+                                        Label {
+                                            text: modelData.type_label
+                                            color: t.muted
+                                            font.pixelSize: 10
+                                        }
+                                    }
                                 }
                             }
 
