@@ -482,10 +482,14 @@ def review_chapter(
     # 旧值是不是真的失效，要等 `build_candidate` 把它们解析成记录和事件；
     # 解析不出来的会被丢掉。
     result["supersede"] = reviewed.get("supersede") or []
+    from .extraction_review import REVIEW_VERSION
+
     result["review"] = {
         "dropped": reviewed["dropped"],
         "unresolved": reviewed.get("unresolved") or [],
         "rounds": reviewed["rounds"],
+        # 复核提示词也带版本：两次提取的差别要能分辨是「读」还是「对」变了。
+        "version": REVIEW_VERSION,
     }
     return result
 

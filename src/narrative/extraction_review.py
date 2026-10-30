@@ -16,6 +16,7 @@ from .graph_operations import GraphOperations
 from .harness import HarnessRunner, HarnessSettings
 
 MAX_ROUNDS = 4
+REVIEW_VERSION = "review/2"
 
 REVIEW_PROMPT = """你在为一部小说的属性记录做去重。
 
@@ -51,6 +52,9 @@ REVIEW_PROMPT = """你在为一部小说的属性记录做去重。
 - 不要因为「和旧值不一样」就给：同一方面在不同时点有不同值是正常的推进，
   取代关系由程序按披露顺序自动标记，不需要你重复。
 - 给出旧值时要照抄它原来的写法，便于对上记录。
+- **不限于本章提议的属性。** 上面「已记录的值」里可能带着本章没有提议、但被本章内容
+  推翻的方面（本章用更宽的名字写了同一件事，比如「外貌」里说肤色变白了，而旧记录里
+  还有一条「肤色」）。这种也要在 `supersede` 里给出，`property` 用旧记录里的名字。
 
 如果连信息都不够，返回 `{{"need": ["<你还想查什么>"]}}`，我会补给你。
 
@@ -156,6 +160,10 @@ def _stored_values(ops: GraphOperations, data: dict) -> list[dict]:
             return (99, 0)
         return (int(orders.get(disclosure.get("source_id"), 99)), disclosure["start"])
 
+    # 本章提到的人/物，它们**已有的其它方面**也要一并比较：一句话可能让某个旧方面
+    # 不再成立，而那个方面本章根本没提议（「外貌」里写了肤色，旧的「肤色」就该失效）。
+    mentioned = {str(prop["node"]) for prop in data.get("properties", [])}
+
     latest: dict[tuple[str, str, str, str], tuple[tuple[int, int], dict]] = {}
     for record in ops.property_records():
         if record["kind"] != "property_value":
@@ -168,7 +176,7 @@ def _stored_values(ops: GraphOperations, data: dict) -> list[dict]:
             str(node["name"]), str(record.get("property_id")),
             str(record.get("scope") or "world"), str(holder.get("name") or ""),
         )
-        if key not in wanted:
+        if key not in wanted and str(node["name"]) not in mentioned:
             continue
         current = (position(record), record)
         if key not in latest or current[0] > latest[key][0]:

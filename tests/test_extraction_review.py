@@ -31,12 +31,22 @@ def _project(tmp_path: Path):
             {"kind": "source_order", "id": "o1", "source_id": source_id,
              "ordinal": 1, "context_id": "canon"},
             *nodes,
+            {"kind": "node", "id": "p2", "node_type": "person", "name": "老周",
+             "disclosure": {"source_id": source_id, "start": 0}},
         ],
         [
             {"kind": "property_definition", "id": "skin", "value_type": "string",
              "cardinality": "one", "persistence": "until_changed"},
+            {"kind": "property_definition", "id": "height", "value_type": "any",
+             "cardinality": "one", "persistence": "until_changed"},
             {"kind": "property_value", "id": "v1", "node_id": "p1", "property_id": "skin",
              "value": "黝黑", "event_id": "e1",
+             "evidence": {"source_id": source_id, "quote": "林舟脸色黝黑"}},
+            {"kind": "property_value", "id": "v2", "node_id": "p1", "property_id": "height",
+             "value": "矮小", "event_id": "e1",
+             "evidence": {"source_id": source_id, "quote": "林舟脸色黝黑"}},
+            {"kind": "property_value", "id": "v3", "node_id": "p2", "property_id": "skin",
+             "value": "白净", "event_id": "e1",
              "evidence": {"source_id": source_id, "quote": "林舟脸色黝黑"}},
         ],
         ops.graph_project_info()["revision"], source="manual",
@@ -44,7 +54,8 @@ def _project(tmp_path: Path):
     return ops, source_id
 
 
-def test_stored_values_only_cover_proposed_properties(tmp_path: Path) -> None:
+def test_stored_values_cover_the_nodes_the_chapter_mentions(tmp_path: Path) -> None:
+    """本章提到的人，他**其它方面**的旧值也要给：一句话可能让某个没被提议的方面失效。"""
     ops, _ = _project(tmp_path)
     data = {"properties": [
         {"node": "林舟", "property": "skin", "value": "白净", "quotes": ["x"]},
@@ -52,8 +63,11 @@ def test_stored_values_only_cover_proposed_properties(tmp_path: Path) -> None:
     ]}
     rows = _stored_values(ops, data)
     assert [(row["node"], row["property"], row["value"]) for row in rows] == [
-        ("林舟", "skin", "黝黑")
+        ("林舟", "height", "矮小"),
+        ("林舟", "skin", "黝黑"),
     ]
+    # 本章没提到的节点不给：比较范围跟着这一章走。
+    assert all(row["node"] != "老周" for row in rows)
 
 
 def test_apply_keeps_only_approved_values(tmp_path: Path) -> None:
