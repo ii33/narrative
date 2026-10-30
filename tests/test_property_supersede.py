@@ -179,7 +179,7 @@ def test_the_review_round_can_end_a_value_nothing_replaced(tmp_path: Path) -> No
     assert len(records) == 1
     assert records[0]["target_id"] == "v1"
     assert records[0]["event_id"] == "3"
-    assert records[0]["basis"] == "audit"
+    assert records[0]["basis"] == "review"
     assert records[0]["reason"] == "进了房间之后没再提"
 
 

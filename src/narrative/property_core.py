@@ -48,7 +48,8 @@ _FIELDS = {
     #   without it — the record was wrong, it never counted (a correction);
     #   with it    — the record was true, but from this reading position it is no
     #                longer part of the state (superseded by a later disclosure).
-    # `basis` says who decided: the audit round or a human.
+    # `basis` says who decided: the structural pass (audit), the review round (review),
+    # or a human.
     "property_retraction": _COMMON | {
         "target_id", "reason", "event_id", "disclosure", "basis",
     },
@@ -566,9 +567,9 @@ def validate_records(
                         "RETRACTION_ANCHOR", "retraction event must be an existing event", rid
                     ))
             basis = record.get("basis")
-            if basis is not None and basis not in {"audit", "human"}:
+            if basis is not None and basis not in {"audit", "review", "human"}:
                 issues.append(_issue(
-                    "RETRACTION_BASIS", "retraction basis must be audit or human", rid
+                    "RETRACTION_BASIS", "retraction basis must be audit, review or human", rid
                 ))
             continue
         node_id = (

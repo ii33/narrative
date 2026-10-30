@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from uuid import uuid4
 
@@ -583,6 +584,44 @@ def _checkpoint_at(start: int, checkpoints: list[tuple[int, int, str]]) -> str |
     return min(checkpoints, key=lambda item: item[0])[2]
 
 
+def _squash(text: str) -> str:
+    """只留汉字、字母和数字：标点不同不该影响「说的是不是同一个事件」。"""
+    return "".join(ch for ch in text if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
+
+
+def _anchor_for(name: str, event_by_name: dict[str, str]) -> tuple[str | None, str]:
+    """把模型写的 at_event 对到本章真实的事件上，返回 (事件编号, 对上的方式)。
+
+    模型经常把事件名写成同义说法（「老周推门进来，与林舟说话」对「老周推门进来，与林舟
+    说了几句」）。对不上就返回 None——宁可不标失效，也不要锚到一个错的位置。
+    """
+    if name in event_by_name:
+        return event_by_name[name], "exact"
+    key = _squash(name)
+    if not key:
+        return None, ""
+    squashed = {_squash(event): event for event in event_by_name}
+    if key in squashed:
+        return event_by_name[squashed[key]], "exact"
+    for event_key, event in squashed.items():
+        if len(event_key) >= 4 and (key in event_key or event_key in key):
+            return event_by_name[event], "fuzzy"
+    scored = sorted(
+        ((_overlap(key, other), other) for other in squashed), reverse=True
+    )
+    if scored and scored[0][0] >= 0.5 and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 0.1):
+        return event_by_name[squashed[scored[0][1]]], "fuzzy"
+    return None, ""
+
+
+def _overlap(left: str, right: str) -> float:
+    """两个名字的字符重合度（0–1）：不看顺序，看用了哪些字。"""
+    if not left or not right:
+        return 0.0
+    common = sum((Counter(left) & Counter(right)).values())
+    return 2 * common / (len(left) + len(right))
+
+
 def _supersede_retractions(
     ops, batch: list[dict], accepted: list[dict]
 ) -> list[dict]:
@@ -604,6 +643,7 @@ def _review_supersede(
     accepted: list[dict],
     node_ids: dict[str, str],
     event_by_name: dict[str, str],
+    skipped: list[dict] | None = None,
 ) -> list[dict]:
     """Turn the review round's "this old value is over" into retraction records.
 
@@ -613,6 +653,7 @@ def _review_supersede(
     would invent a reading position the text does not have.
     """
     items = data.get("supersede") or []
+    skipped = skipped if skipped is not None else []
     if not items:
         return []
     marked = {
@@ -635,8 +676,12 @@ def _review_supersede(
         if not isinstance(item, dict):
             continue
         node_id = node_ids.get(str(item.get("node") or ""))
-        anchor = event_by_name.get(str(item.get("at_event") or ""))
+        anchor, how = _anchor_for(str(item.get("at_event") or ""), event_by_name)
         if not node_id or not anchor:
+            skipped.append({
+                "name": f"{item.get('node')}.{item.get('property')}",
+                "reason": f"失效锚点对不上本章事件：{item.get('at_event') or '（空）'}",
+            })
             continue
         key = (node_id, aspect_of(str(item.get("property") or "")), str(item.get("value")))
         found = candidates.get(key) or []
@@ -653,7 +698,8 @@ def _review_supersede(
             "target_id": target.get("id"),
             "reason": str(item.get("reason") or "").strip() or "本章之后不再成立",
             "event_id": anchor,
-            "basis": "audit",
+            # 这是模型判的，不是结构推的：basis 分开记，才看得出失效是谁发现的。
+            "basis": "review",
         })
         marked.add(target.get("id"))
     return out
@@ -1029,7 +1075,9 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
     for (_kind, name), node_id in ids.items():
         known_names.setdefault(name, node_id)
     records.extend(
-        _review_supersede(data, records, accepted_records, known_names, event_by_name)
+        _review_supersede(
+            data, records, accepted_records, known_names, event_by_name, skipped
+        )
     )
     records.extend(_supersede_retractions(ops, records, accepted_records))
 
@@ -1170,13 +1218,8 @@ def split_confident(ops, built: dict, data: dict) -> dict:
         if references & doubtful_names:
             flag_node(node_id, "参与者里有待确认的节点")
 
-    # 取代是自动的（`basis="audit"`，撤的是本批里被后一条披露顶掉的旧值），跟着走；
-    # 模型自己判出来的失效才留给人看。
-    for record in records:
-        if record.get("kind") != "property_retraction":
-            continue
-        if str(record.get("basis") or "") != "audit":
-            flag_record(record.get("id"), "模型判断的失效，要人确认")
+    # 撤回不分来源：结构推的（有新值顶掉）和模型判的（这一章说它不成立了）都跟着批次走。
+    # 它们不是「值」，没有并列可言；判错了在历史里看得见，重录一条就回来了。
 
     confident_objects = [
         obj for obj in objects

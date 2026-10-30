@@ -16,7 +16,7 @@ from .graph_operations import GraphOperations
 from .harness import HarnessRunner, HarnessSettings
 
 MAX_ROUNDS = 4
-REVIEW_VERSION = "review/4"
+REVIEW_VERSION = "review/5"
 
 REVIEW_PROMPT = """你在为一部小说的属性记录做去重。
 
@@ -47,7 +47,8 @@ REVIEW_PROMPT = """你在为一部小说的属性记录做去重。
 除了「新值取代旧值」，还有一种情况：旧值**没有被新值取代**，但本章的叙述说明它
 已经不成立了（情绪过去了、伤好了、身份变了、人走了）。这种要在 `supersede` 里给出：
 
-- `at_event` 必填：读者在本章哪个事件读到「它不再成立」（必须是本章事件）。
+- `at_event` 必填：读者在本章哪个事件读到「它不再成立」。**必须从下面「本章事件」里
+  照抄一个名字**，一个字都不要改——写错名字这条失效就落不下去。
 - 只给**明确终止**的：原文没有交代，就不要猜。拿不准的一律不给。
 - 不要因为「和旧值不一样」就给：同一方面在不同时点有不同值是正常的推进，
   取代关系由程序按披露顺序自动标记，不需要你重复。
@@ -69,6 +70,10 @@ REVIEW_PROMPT = """你在为一部小说的属性记录做去重。
     已经过去的那一处**（他接着去做别的事、或新场景开始）。
   - 伤势、身份、持有物、修为这类**会一直成立直到被改变**的，本章没明说变化就不要判失效。
   - 拿不准是长期还是一时的，就不判——宁可留一条旧状态，也不要编一个终止点。
+
+## 本章事件（`at_event` 只能从这里照抄）
+
+{events}
 
 ## 本章原文
 
@@ -288,8 +293,14 @@ def review_properties(
     """
     stored = _stored_values(ops, data)
     source = ops.source(str(data.get("source_id") or "")) if data.get("source_id") else {}
+    events = [
+        str(node.get("name"))
+        for node in (data.get("nodes") or [])
+        if str(node.get("type") or "") == "event" and node.get("name")
+    ]
     instruction = REVIEW_PROMPT.format(
         proposed=_format_proposed(data), stored=_format_stored(stored),
+        events="\n".join(f"- {name}" for name in events) or "（本章没有事件）",
         text=source.get("text") or "（拿不到本章原文）",
     )
     runner = HarnessRunner(settings, api_key, workdir)
