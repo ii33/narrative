@@ -42,6 +42,8 @@
 | `add_material_image` / `delete_material_image` | 给资料卡加图（拷进工程，可带说明）；删掉某张图 | 写 |
 | `revise_node` | 修订节点的名称、类型、别名或说明（立刻生效） | 写 |
 | `attach_scenes` | 把一个或多个场景挂到大事件下面（立刻生效；场景原有归属会被替换） | 写 |
+| `relation_map` | 人物关系网：人是点，关系是有方向的边（含状态） | 读 |
+| `relation_map` | 人物关系网：人是点，关系是有方向的边（含状态） | 读 |
 | `attach_scenes` | 把一个或多个场景挂到大事件下面（立刻生效；场景原有归属会被替换） | 写 |
 | `merge_properties` / `rename_property` | 两个名字合成一个方面；一个方面改名 | 写 |
 | `categorize_records` | 把记录移到某个显示大类 | 写 |

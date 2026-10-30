@@ -374,3 +374,105 @@ def test_attach_scenes_puts_an_earlier_scene_under_a_later_storyline(tmp_path: P
         "attach_scenes", {"storyline_id": "T1", "scene_ids": ["S1"]}, project=project
     )
     assert again["events"] == ["S1", "S2"]
+
+
+def test_relation_map_reads_both_directions_and_states(tmp_path: Path) -> None:
+    """关系网：人是点，关系是有方向的边；括号里的是状态。"""
+    project, source_id = _fresh_project(tmp_path / "relations.nproj")
+    ops = Operations.open_graph_project(project)
+    revision = ops.graph_project_info()["revision"]
+    quote = {"source_id": source_id, "quote": "林舟推门进来。老周笑了。"}
+    ops.change_accept(ops.change_propose([
+        {"kind": "node", "id": "P1", "node_type": "person", "name": "林舟",
+         "disclosure": {"source_id": source_id, "start": 0}, "evidence": quote},
+        {"kind": "node", "id": "P2", "node_type": "person", "name": "老周",
+         "disclosure": {"source_id": source_id, "start": 0}, "evidence": quote},
+        {"kind": "node", "id": "P3", "node_type": "person", "name": "苏娘",
+         "disclosure": {"source_id": source_id, "start": 0}, "evidence": quote},
+        {"kind": "node", "id": "E1", "node_type": "event", "name": "老周收徒",
+         "disclosure": {"source_id": source_id, "start": 0}, "evidence": quote},
+    ], [], revision, source="manual"), 1)
+
+    revision = ops.graph_project_info()["revision"]
+    ops.property_accept(ops.property_propose([
+        {"kind": "property_definition", "id": "师父", "value_type": "node",
+         "cardinality": "one"},
+        {"kind": "property_definition", "id": "徒弟", "value_type": "node",
+         "cardinality": "one"},
+        {"kind": "property_definition", "id": "崇拜", "value_type": "node",
+         "cardinality": "one"},
+        {"kind": "property_definition", "id": "恋人（冷战中）", "value_type": "node",
+         "cardinality": "one"},
+        {"kind": "property_value", "id": "r1", "event_id": "E1", "node_id": "P2", "property_id": "师父",
+         "value": "P1", "evidence": quote},
+        {"kind": "property_value", "id": "r2", "event_id": "E1", "node_id": "P1", "property_id": "徒弟",
+         "value": "P2", "evidence": quote},
+        # 单向：只有林舟崇拜苏娘，苏娘那边没有对应的边。
+        {"kind": "property_value", "id": "r3", "event_id": "E1", "node_id": "P1", "property_id": "崇拜",
+         "value": "P3", "evidence": quote},
+        {"kind": "property_value", "id": "r4", "event_id": "E1", "node_id": "P2", "property_id": "恋人（冷战中）",
+         "value": "P3", "evidence": quote},
+    ], revision, source="manual"), 1)
+
+    graph = tool_api.call("relation_map", {}, project=project)
+    assert {row["name"] for row in graph["persons"]} == {"林舟", "老周", "苏娘"}
+    edges = {(row["from_name"], row["kind"], row["to_name"]): row["state"] for row in graph["edges"]}
+    # 对等关系两支箭头，词不一样。
+    assert ("老周", "师父", "林舟") in edges
+    assert ("林舟", "徒弟", "老周") in edges
+    # 单向关系只有一支。
+    assert ("林舟", "崇拜", "苏娘") in edges
+    assert not [key for key in edges if key[0] == "苏娘"]
+    # 状态单独给出。
+    assert edges[("老周", "恋人", "苏娘")] == "冷战中"
+
+
+def test_relation_map_reads_both_directions_and_states(tmp_path: Path) -> None:
+    """关系网：人是点，关系是有方向的边；括号里的是状态。"""
+    project, source_id = _fresh_project(tmp_path / "relations.nproj")
+    ops = Operations.open_graph_project(project)
+    revision = ops.graph_project_info()["revision"]
+    quote = {"source_id": source_id, "quote": "林舟推门进来。老周笑了。"}
+    ops.change_accept(ops.change_propose([
+        {"kind": "node", "id": "P1", "node_type": "person", "name": "林舟",
+         "disclosure": {"source_id": source_id, "start": 0}, "evidence": quote},
+        {"kind": "node", "id": "P2", "node_type": "person", "name": "老周",
+         "disclosure": {"source_id": source_id, "start": 0}, "evidence": quote},
+        {"kind": "node", "id": "P3", "node_type": "person", "name": "苏娘",
+         "disclosure": {"source_id": source_id, "start": 0}, "evidence": quote},
+        {"kind": "node", "id": "E1", "node_type": "event", "name": "老周收徒",
+         "disclosure": {"source_id": source_id, "start": 0}, "evidence": quote},
+    ], [], revision, source="manual"), 1)
+
+    revision = ops.graph_project_info()["revision"]
+    ops.property_accept(ops.property_propose([
+        {"kind": "property_definition", "id": "师父", "value_type": "node",
+         "cardinality": "one"},
+        {"kind": "property_definition", "id": "徒弟", "value_type": "node",
+         "cardinality": "one"},
+        {"kind": "property_definition", "id": "崇拜", "value_type": "node",
+         "cardinality": "one"},
+        {"kind": "property_definition", "id": "恋人（冷战中）", "value_type": "node",
+         "cardinality": "one"},
+        {"kind": "property_value", "id": "r1", "event_id": "E1", "node_id": "P2", "property_id": "师父",
+         "value": "P1", "evidence": quote},
+        {"kind": "property_value", "id": "r2", "event_id": "E1", "node_id": "P1", "property_id": "徒弟",
+         "value": "P2", "evidence": quote},
+        # 单向：只有林舟崇拜苏娘，苏娘那边没有对应的边。
+        {"kind": "property_value", "id": "r3", "event_id": "E1", "node_id": "P1", "property_id": "崇拜",
+         "value": "P3", "evidence": quote},
+        {"kind": "property_value", "id": "r4", "event_id": "E1", "node_id": "P2", "property_id": "恋人（冷战中）",
+         "value": "P3", "evidence": quote},
+    ], revision, source="manual"), 1)
+
+    graph = tool_api.call("relation_map", {}, project=project)
+    assert {row["name"] for row in graph["persons"]} == {"林舟", "老周", "苏娘"}
+    edges = {(row["from_name"], row["kind"], row["to_name"]): row["state"] for row in graph["edges"]}
+    # 对等关系两支箭头，词不一样。
+    assert ("老周", "师父", "林舟") in edges
+    assert ("林舟", "徒弟", "老周") in edges
+    # 单向关系只有一支。
+    assert ("林舟", "崇拜", "苏娘") in edges
+    assert not [key for key in edges if key[0] == "苏娘"]
+    # 状态单独给出。
+    assert edges[("老周", "恋人", "苏娘")] == "冷战中"

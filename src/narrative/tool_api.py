@@ -545,6 +545,49 @@ def _revise_node(ops, params: dict) -> dict:
     return {"status": "accepted", "revision": after, "node_id": params["node_id"], "changes": changes}
 
 
+def _relation_map(ops, params: dict) -> dict:
+    """人物关系网：人是点，关系是有方向的边。
+
+    一条关系就是一条属性记录（属性名是关系性质，值指向对方），所以两个人之间
+    可以有两支箭头——「A 父亲 B」和「B 儿子 A」——也可以只有一支（「A 崇拜 B」）。
+    关系性质带括号时（「恋人（冷战中）」），括号里的是状态，单独给出来。
+    """
+    snapshot = ops.graph_snapshot()
+    nodes = {item["id"]: item for item in snapshot["nodes"]}
+    events = {item["id"]: item.get("name", item["id"]) for item in snapshot["nodes"]}
+    persons = [
+        {"id": item["id"], "name": item.get("name", item["id"]),
+         "label_id": item.get("label_id", item["id"])}
+        for item in snapshot["nodes"] if item.get("node_type") == "person"
+    ]
+    edges: list[dict] = []
+    for record in ops.property_records():
+        if record.get("kind") != "property_value":
+            continue
+        left, right = str(record.get("node_id") or ""), str(record.get("value") or "")
+        if nodes.get(left, {}).get("node_type") != "person":
+            continue
+        if nodes.get(right, {}).get("node_type") != "person":
+            continue
+        raw = str(record.get("property_id") or "")
+        kind, state = raw, ""
+        for mark in ("（", "("):
+            if mark in raw:
+                head, _, tail = raw.partition(mark)
+                kind, state = head.strip(), tail.rstrip("）)").strip()
+                break
+        edges.append({
+            "record_id": record.get("id"),
+            "from": left, "from_name": nodes[left].get("name", left),
+            "to": right, "to_name": nodes[right].get("name", right),
+            "kind": kind, "state": state,
+            "event_id": record.get("event_id"),
+            "event_name": events.get(record.get("event_id") or "", ""),
+        })
+    edges.sort(key=lambda item: (item["from_name"], item["kind"], item["to_name"]))
+    return {"revision": snapshot["revision"], "persons": persons, "edges": edges}
+
+
 def _attach_scenes(ops, params: dict) -> dict:
     """把若干场景挂到一个大事件下面（立刻生效）。
 
@@ -1014,6 +1057,12 @@ _register(Tool(
     },
     _revise_node,
     writes=True,
+))
+_register(Tool(
+    "relation_map",
+    "人物关系网：人是点，关系是有方向的边（A 父亲 B 与 B 儿子 A 是两条）",
+    {},
+    _relation_map,
 ))
 _register(Tool(
     "attach_scenes",

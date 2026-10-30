@@ -283,7 +283,11 @@ def aspect_of(property_id: str) -> str:
     the audit still asks a human to make.
     """
     name = (property_id or "").strip().lower()
-    return name.split("_")[0] if name else ""
+    # 「恋人（冷战中）」是同一个方面的两种状态：括号里的不算新方面。
+    for mark in ("（", "(", "[", "【"):
+        if mark in name:
+            name = name.split(mark)[0]
+    return name.strip().split("_")[0] if name else ""
 
 
 def inverse_category(source_category: str, viewer_type: str | None, config: object = None) -> str:
