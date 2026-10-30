@@ -610,6 +610,13 @@ class NativeBridge(QObject):
         """Whole-graph property audit; the review page shows the findings."""
         self._project_task("property_audit", lambda ops: ops.property_audit())
 
+    @Slot()
+    def loadRelations(self) -> None:
+        """人物关系网：人是点、关系是有方向的边，给关系图用。"""
+        from .tool_api import _relation_map
+
+        self._project_task("relations", lambda ops: _relation_map(ops, {}))
+
     @Slot("QVariantMap")
     def loadBrowse(self, spec: dict) -> None:
         """One question for the browsing page: nodes, counts, steps and the cut.

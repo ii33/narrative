@@ -13,6 +13,14 @@ Item {
     property var nodes: []
     property var steps: []
     property var events: []
+    // 时间点的层级：大事件 → 场景 → 事件（带 depth，菜单按它缩进展开）。
+    property var timeline: []
+    // 当前阅读位置在步骤里的序号（0 = 最新）。
+    readonly property int stepIndex: {
+        for (var i = 0; i < steps.length; ++i)
+            if (steps[i].id === cutEventId) return i + 1
+        return 0
+    }
     property var nameIndex: ({})
     property string selectedType: ""
     property string query: ""
@@ -128,6 +136,7 @@ Item {
         revision = payload.revision === undefined ? revision : payload.revision
         steps = payload.steps || []
         events = payload.events || []
+        timeline = payload.timeline || []
         counts = payload.counts || ({})
         projectTotal = payload.project_total === undefined ? 0 : payload.project_total
         total = payload.total || 0
@@ -155,7 +164,6 @@ Item {
             })
         }
         rebuildCategories()
-        syncCutIndex()
 
         // 收窄或过滤后选中的节点可能不在列表里：不能留着一个"此刻还不存在"的详情。
         if (page.selectedId.length > 0 && !nodes.some(function (node) {
@@ -192,13 +200,6 @@ Item {
         }
     }
 
-    function syncCutIndex() {
-        var index = 0
-        for (var i = 0; i < page.steps.length; ++i)
-            if (page.steps[i].id === page.cutId) { index = i + 1; break }
-        if (cutBox.currentIndex !== index) cutBox.currentIndex = index
-    }
-
     function clearSelection() {
         selectedId = ""
         detail = ({})
@@ -232,12 +233,37 @@ Item {
         page.load()
     }
 
-    // 步骤按编号排列（编号即阅读顺序），所以下拉里的顺序就是读者读到的顺序。
+    // 按步骤序号定位（0 = 最新）。菜单走的是 pickCutById，这个是给「上一步/下一步」用的。
     function pickCut(index) {
-        if (cutBox.currentIndex !== index) cutBox.currentIndex = index
-        page.cutId = index > 0 ? page.steps[index - 1].id : ""
+        page.pickCutById(
+            index > 0 && index <= page.steps.length ? page.steps[index - 1].id : "")
+    }
+
+    // 点哪一级就停在哪一级：大事件停在它最后一场的最后一步，场景停在它最后一个事件。
+    function pickCutById(id) {
+        page.cutId = id || ""
         page.cutLater = 0
         page.load()
+    }
+
+    // 层级树里第 index 项的直接子项（按 depth 判断），返回下标数组。
+    function timelineChildren(index) {
+        var out = []
+        if (index < 0 || index >= page.timeline.length) return out
+        var base = page.timeline[index].depth
+        for (var i = index + 1; i < page.timeline.length; ++i) {
+            var row = page.timeline[i]
+            if (row.depth <= base) break
+            if (row.depth === base + 1) out.push(i)
+        }
+        return out
+    }
+
+    function timelineTop() {
+        var out = []
+        for (var i = 0; i < page.timeline.length; ++i)
+            if (page.timeline[i].depth === 0) out.push(i)
+        return out
     }
 
     function toggleTimeFilter() {
@@ -251,8 +277,7 @@ Item {
     }
 
     function backToLatest() {
-        cutBox.currentIndex = 0
-        page.pickCut(0)
+        page.pickCutById("")
     }
 
     // 上一个 / 下一个时间点。下拉里 0 是「最新」，1..N 是各步骤，
@@ -260,7 +285,15 @@ Item {
     function stepCut(delta) {
         var count = page.steps.length
         if (count === 0) return
-        var index = cutBox.currentIndex
+        // 当前位置可能是「步骤本身」，也可能是菜单里点的某个事件：两种都认。
+        var index = 0
+        for (var i = 0; i < count; ++i) {
+            var step = page.steps[i]
+            if (step.id === page.cutId || step.id === page.cutEventId) {
+                index = i + 1
+                break
+            }
+        }
         if (delta < 0) {
             if (index === 0) index = count
             else if (index > 1) index -= 1
@@ -268,7 +301,7 @@ Item {
             if (index === 0) return
             index = index < count ? index + 1 : 0
         }
-        page.pickCut(index)
+        page.pickCutById(index > 0 ? page.steps[index - 1].id : "")
     }
 
     function select(id) {
@@ -803,28 +836,6 @@ Item {
             Layout.fillWidth: true
             spacing: 8
 
-            // 事件等级：决定「阅读位置」按场景还是按事件走。
-            Label {
-                text: "事件等级"
-                color: t.muted
-                font.pixelSize: 12
-            }
-            Button {
-                objectName: "browseGranularityScene"
-                text: "场景"
-                flat: page.granularity !== "scene"
-                highlighted: page.granularity === "scene"
-                font.pixelSize: 11
-                onClicked: page.pickGranularity("scene")
-            }
-            Button {
-                objectName: "browseGranularityEvent"
-                text: "事件"
-                flat: page.granularity !== "event"
-                highlighted: page.granularity === "event"
-                font.pixelSize: 11
-                onClicked: page.pickGranularity("event")
-            }
             // 列表是否跟着阅读位置收窄。
             Button {
                 objectName: "browseTimeFilter"
@@ -844,25 +855,27 @@ Item {
                 text: "‹"
                 flat: true
                 font.pixelSize: 15
-                enabled: page.steps.length > 0
-                    && (cutBox.currentIndex > 1 || cutBox.currentIndex === 0)
+                enabled: page.steps.length > 0 && page.stepIndex > 1
                 onClicked: page.stepCut(-1)
             }
-            ComboBox {
-                id: cutBox
-                objectName: "browseCutBox"
+            // 阅读位置：按层级展开——大事件 → 场景 → 事件。点哪一级就停在哪一级。
+            Button {
+                id: cutButton
+                objectName: "browseCutButton"
                 Layout.fillWidth: true
                 Layout.maximumWidth: 320
-                model: page.cutLabels
-                enabled: page.steps.length > 0
-                onActivated: page.pickCut(currentIndex)
+                text: page.cutName.length > 0
+                    ? page.cutName
+                    : (page.timeline.length > 0 ? "最新（读到末尾）" : "没有时间点")
+                enabled: page.timeline.length > 0
+                onClicked: timelinePopup.open()
             }
             Button {
                 objectName: "browseCutNext"
                 text: "›"
                 flat: true
                 font.pixelSize: 15
-                enabled: page.steps.length > 0 && cutBox.currentIndex !== 0
+                enabled: page.steps.length > 0 && page.stepIndex !== 0
                 onClicked: page.stepCut(1)
             }
             Button {
@@ -881,6 +894,94 @@ Item {
                 onToggled: page.toggleRelated()
             }
             Item { Layout.fillWidth: true }
+        }
+
+        // 阅读位置的多级菜单：一列一层——大事件 → 场景 → 事件。
+        // 点哪一层就把阅读位置停在那一段（大事件停在它最后一场的最后一步）。
+        Popup {
+            id: timelinePopup
+            objectName: "browseTimelinePopup"
+            modal: true
+            padding: 0
+            width: 860
+            height: 380
+            property int first: 0
+            property int second: -1
+            property int third: -1
+
+            function choose(level, index) {
+                var row = page.timeline[index]
+                if (!row) return
+                if (level === 0) { first = index; second = -1; third = -1 }
+                else if (level === 1) { second = index; third = -1 }
+                else { third = index }
+                page.pickCutById(row.id)
+            }
+
+            RowLayout {
+                anchors.fill: parent
+                spacing: 0
+
+                ListView {
+                    objectName: "browseTimelineLevel0"
+                    Layout.preferredWidth: 300
+                    Layout.fillHeight: true
+                    clip: true
+                    model: page.timelineTop()
+                    delegate: ItemDelegate {
+                        required property var modelData
+                        width: ListView.view.width
+                        highlighted: timelinePopup.first === modelData
+                        onClicked: timelinePopup.choose(0, modelData)
+                        contentItem: Label {
+                            text: page.timeline[modelData].label_id + "　" + page.timeline[modelData].name
+                            elide: Text.ElideRight
+                            font.pixelSize: 12
+                            color: t.body
+                        }
+                    }
+                }
+                Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: t.line }
+                ListView {
+                    objectName: "browseTimelineLevel1"
+                    Layout.preferredWidth: 280
+                    Layout.fillHeight: true
+                    clip: true
+                    model: page.timelineChildren(timelinePopup.first)
+                    delegate: ItemDelegate {
+                        required property var modelData
+                        width: ListView.view.width
+                        highlighted: timelinePopup.second === modelData
+                        onClicked: timelinePopup.choose(1, modelData)
+                        contentItem: Label {
+                            text: page.timeline[modelData].label_id + "　" + page.timeline[modelData].name
+                            elide: Text.ElideRight
+                            font.pixelSize: 12
+                            color: t.body
+                        }
+                    }
+                }
+                Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: t.line }
+                ListView {
+                    objectName: "browseTimelineLevel2"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    model: page.timelineChildren(timelinePopup.second)
+                    delegate: ItemDelegate {
+                        required property var modelData
+                        width: ListView.view.width
+                        highlighted: timelinePopup.third === modelData
+                        onClicked: timelinePopup.choose(2, modelData)
+                        contentItem: Label {
+                            text: page.timeline[modelData].label_id + "　" + page.timeline[modelData].name
+                            elide: Text.ElideRight
+                            font.pixelSize: 12
+                            color: t.body
+                        }
+                    }
+                }
+            }
         }
 
         // 搜索防抖：输入停下 200ms 才查。
@@ -1177,11 +1278,9 @@ Item {
                                 visible: page.cutEventId.length > 0
                                 wrapMode: Text.Wrap
                                 text: "读到「" + (page.cutName || page.cutEventId) + "」时的状态"
-                                    + (cutBox.currentIndex > 0
-                                        ? "（第 " + cutBox.currentIndex + " / "
-                                            + page.steps.length + " 个"
-                                            + (page.granularity === "scene" ? "场景" : "事件")
-                                            + "）" : "")
+                                    + (page.stepIndex > 0
+                                        ? "（第 " + page.stepIndex + " / "
+                                            + page.steps.length + " 个时间点）" : "")
                                 color: t.warn
                                 font.pixelSize: 11
                             }

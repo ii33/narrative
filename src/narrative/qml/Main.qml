@@ -82,6 +82,7 @@ ApplicationWindow {
 
     readonly property var navItems: [
         {key: "browse", label: "数据浏览", hint: "按分类看节点"},
+        {key: "relations", label: "关系图", hint: "人物与关系"},
         {key: "source", label: "原文", hint: "导入与回查"},
         {key: "extract", label: "提取", hint: "按章提取"},
         {key: "property", label: "属性", hint: "披露序列"},
@@ -355,6 +356,7 @@ ApplicationWindow {
                         }
 
                         BrowsePage { app: app }
+                        RelationPage { app: app }
                         SourcePage { id: sourcePage; app: app }
                         ExtractPage { app: app }
                         PropertyPage { app: app }

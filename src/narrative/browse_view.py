@@ -80,9 +80,18 @@ def anchor_event(snapshot: dict, node: dict) -> dict:
     An event is its own anchor. A scene is a container, so reading it means
     reading its last event; without children it falls back to itself.
     """
+    nodes = _by_id(snapshot)
+    if node.get("node_type") == "storyline":
+        # 大事件是一段：读到它的位置，就是读到它最后一场的最后一步。
+        scenes = [
+            nodes[child] for child in node.get("events") or []
+            if child in nodes and nodes[child].get("node_type") == "scene"
+        ]
+        anchors = [anchor_event(snapshot, scene) for scene in scenes]
+        anchors = [item for item in anchors if item.get("node_type") == "event"]
+        return max(anchors, key=_key) if anchors else node
     if node.get("node_type") != "scene":
         return node
-    nodes = _by_id(snapshot)
     children = [
         nodes[child] for child in node.get("events") or []
         if child in nodes and nodes[child].get("node_type") == "event"
@@ -305,6 +314,61 @@ def matches(node: dict, needle: str) -> bool:
     return any(text in str(alias).casefold() for alias in node.get("aliases") or [])
 
 
+def timeline_tree(snapshot: dict) -> list[dict]:
+    """按层级排开的时间点：大事件 → 场景 → 事件，各自带缩进深度。
+
+    没有归属的场景直接挂在顶层；没有场景的事件也一样——层级是从数据里读出来的，
+    不是硬性要求的。
+    """
+    nodes = {
+        node["id"]: node
+        for node in snapshot.get("nodes", [])
+        if not node.get("retracted")
+    }
+    order = _reading_key(snapshot)
+    rows: list[dict] = []
+
+    def emit(node: dict, depth: int) -> None:
+        rows.append({
+            "id": node["id"],
+            "name": node.get("name", node["id"]),
+            "label_id": label_id(node["id"], node.get("node_type")),
+            "node_type": node.get("node_type"),
+            "depth": depth,
+        })
+
+    placed: set[str] = set()
+    storylines = [n for n in nodes.values() if n.get("node_type") == "storyline"]
+    storylines.sort(key=order)
+    for story in storylines:
+        emit(story, 0)
+        placed.add(story["id"])
+        for scene_id in story.get("events") or []:
+            scene = nodes.get(scene_id)
+            if not scene or scene.get("node_type") != "scene":
+                continue
+            emit(scene, 1)
+            placed.add(scene_id)
+            for event_id in scene.get("events") or []:
+                event = nodes.get(event_id)
+                if not event or event.get("node_type") != "event":
+                    continue
+                emit(event, 2)
+                placed.add(event_id)
+
+    for kind, depth in (("scene", 0), ("event", 1)):
+        loose = [
+            n for n in nodes.values()
+            if n.get("node_type") == kind and n["id"] not in placed
+        ]
+        for node in sorted(loose, key=order):
+            if kind == "event" and node.get("scene") in nodes:
+                continue  # 挂在场景下面的事件已经由上面输出了
+            emit(node, depth)
+            placed.add(node["id"])
+    return rows
+
+
 def browse_view(
     snapshot: dict,
     *,
@@ -349,6 +413,8 @@ def browse_view(
         "granularity": granularity if granularity in GRANULARITIES else "scene",
         "revision": snapshot.get("revision"),
         "steps": steps(snapshot, granularity),
+        # 时间点的层级：大事件 → 场景 → 事件。菜单按这个缩进展开，点哪一级就停在哪一级。
+        "timeline": timeline_tree(snapshot),
         # Pickers that need an event (补录) get the full list whatever the
         # granularity is — the reading position is not the only use of events.
         "events": steps(snapshot, "event"),
