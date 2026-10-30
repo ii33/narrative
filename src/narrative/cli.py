@@ -43,11 +43,11 @@ def main():
     parser = argparse.ArgumentParser(description="叙事证据工作台")
     parser.add_argument("--db", default="data/demo.sqlite3", help="项目数据库；新图项目使用独立 .sqlite3 文件")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("graph-create", help="创建全新节点—断言—时序图项目")
+    commands.add_parser("graph-create", help="创建工程包（节点 + 属性记录 + 原文）")
     graph_import = commands.add_parser("graph-import", help="向图项目导入 UTF-8 原文")
     graph_import.add_argument("path", type=Path)
     graph_import.add_argument("--title")
-    graph_query = commands.add_parser("graph-query", help="检索已审核图节点及断言")
+    graph_query = commands.add_parser("graph-query", help="检索已审核的节点与属性记录")
     graph_query.add_argument("--query", default="")
     graph_query.add_argument("--node-id")
     graph_view = commands.add_parser("graph-view", help="通过结构化 JSON 查询导图、时间轴、森林或分类表")
@@ -66,7 +66,7 @@ def main():
         "--axis", choices=["disclosure", "story"], default="disclosure",
         help="disclosure=读者先读到谁（线性）；story=故事里谁先发生（可分支）",
     )
-    graph_event_lines = commands.add_parser("graph-event-lines", help="投影已审时序断言为事件线")
+    graph_event_lines = commands.add_parser("graph-event-lines", help="按阅读顺序列出事件")
     graph_event_lines.add_argument("--context-id", default="canon")
     graph_event_lines.add_argument("--as-of-revision", type=int)
     graph_candidate = commands.add_parser("graph-candidate", help="查看待审候选原始对象及诊断")

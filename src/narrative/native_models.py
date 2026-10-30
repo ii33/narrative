@@ -27,7 +27,7 @@ def _node(item: dict, labels: dict[str, dict], positions: dict[str, tuple[float,
 def _edge(item: dict) -> dict:
     """Preserve direction and epistemic status of an accepted direct assertion."""
     if item.get("direct") is not True or not item.get("object_id"):
-        raise ValueError("画布边只能来自已接受的直接节点断言")
+        raise ValueError("画布上的边只能来自已接受的节点关系")
     view = {key: item.get(key) for key in (
         "assertion_id", "subject_id", "object_id", "predicate_id", "label",
         "semantic", "role", "scope", "holder_id", "origin", "derived_status", "direct",

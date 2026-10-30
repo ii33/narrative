@@ -128,7 +128,7 @@ class Node(GraphModel):
     @model_validator(mode="after")
     def check_occurrence(self) -> Node:
         if self.occurrence and self.node_type != "event":
-            raise ValueError("仅事件节点有发生区间；其他对象的时变状态用断言")
+            raise ValueError("只有事件节点有发生区间；其他对象的状态变化记成属性记录")
         for mark in self.source_marks:
             if not isinstance(mark, dict) or not isinstance(mark.get("source_id"), str):
                 raise ValueError("章节标记须含 source_id")

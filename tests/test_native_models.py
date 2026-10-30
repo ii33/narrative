@@ -63,7 +63,7 @@ def test_canvas_rejects_inferred_edge_and_does_not_draw_indirect_relation() -> N
     assert len(delta["edges_added"]) == 2
     assert not any(edge["subject_id"] == "p" and edge["object_id"] == "l" for edge in delta["edges_added"])
     route["edges"].append(_edge("fake", "p", "l") | {"direct": False})
-    with pytest.raises(ValueError, match="直接节点断言"):
+    with pytest.raises(ValueError, match="已接受的节点关系"):
         canvas.expand(route, LABELS)
 
 

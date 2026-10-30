@@ -99,5 +99,5 @@ def query_graph(
         "disclosure_cut": disclosure_cut,
         "nodes": result,
         "uncertainties": [],
-        "note": "图只有节点与属性记录；没有断言层，因此不返回边",
+        "note": "图只有节点与属性记录，没有边",
     }

@@ -808,7 +808,7 @@ _register(Tool(
 ))
 _register(Tool(
     "search",
-    "按关键字检索节点与断言",
+    "按关键字检索节点与属性记录",
     {
         "query": {"type": "string", "required": True},
         "limit": {"type": "integer", "description": "默认 50"},

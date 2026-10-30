@@ -89,7 +89,7 @@ def graph_view(snapshot: dict, spec: dict) -> dict:
             "status": "none" if focus is None
             else "visible" if any(n["id"] == focus for n in nodes) else "not_visible",
         },
-        "note": "视图只投影节点；图没有断言层，因此没有边、路径或组织树",
+        "note": "视图只投影节点；图里没有边、路径或组织树",
     }
     result.update(_table(chosen, spec["group_by"]))
     return result

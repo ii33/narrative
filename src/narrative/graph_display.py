@@ -5,9 +5,7 @@ from __future__ import annotations
 from collections import Counter
 
 _KINDS = {
-    "node": "节点", "predicate": "谓词", "assertion": "断言", "evidence": "证据",
-    "evidence_link": "证据关联", "context": "语境", "timeline": "时间轴",
-    "source_order": "披露顺序",
+    "node": "节点", "context": "语境", "timeline": "时间轴", "source_order": "披露顺序",
 }
 _NODES = {
     "person": "人物", "item": "物品", "location": "地点", "event": "事件",
@@ -30,16 +28,10 @@ def display_map(snapshot: dict, candidate: dict | None = None) -> dict:
         item = by_id[ref_id]
         if item["kind"] == "node":
             return item["name"]
-        if item["kind"] == "predicate":
-            return item["label"]
         if item["kind"] == "context":
             return item["label"]
         if item["kind"] == "timeline":
             return item["label"]
-        if item["kind"] == "evidence":
-            return item["quote"]
-        if item["kind"] == "assertion":
-            return f"{label(item['subject_id'],'节点')} · {label(item['predicate_id'],'谓词')}"
         return _KINDS.get(item["kind"], "对象")
 
     result: dict[str, dict] = {}
@@ -50,30 +42,6 @@ def display_map(snapshot: dict, candidate: dict | None = None) -> dict:
             qualified = f"{name}（{item['id'][:8]}）" if names[name] > 1 else name
             summary = f"{_NODES[item['node_type']]} · {item.get('identity_note') or item.get('subtype') or item['context_id']}"
             kind_label = _NODES[item["node_type"]]
-        elif kind == "predicate":
-            name = item["label"]
-            qualified = f"{name}（{item['id']}）"
-            summary = f"{item['semantic']} · {item.get('description') or '受控谓词'}"
-            kind_label = "谓词"
-        elif kind == "assertion":
-            object_label = label(item.get("object_id"), "节点") if item.get("object_id") else str(item.get("value", "时间边界"))
-            role = item.get("qualifiers", {}).get("role")
-            name = f"{label(item['subject_id'],'节点')} → {label(item['predicate_id'],'谓词')} → {object_label}"
-            if role:
-                name += f"（{role}）"
-            qualified = name
-            summary = f"{item['scope']} · {item['origin']} · {item['assessment']}"
-            kind_label = "断言"
-        elif kind == "evidence":
-            name = item["quote"]
-            qualified = name
-            summary = f"{sources.get(item['source_id'], {}).get('title', '未找到的来源')} · {item['start']}–{item['end']}"
-            kind_label = "证据"
-        elif kind == "evidence_link":
-            name = f"{label(item['assertion_id'],'断言')} ← {label(item['evidence_id'],'证据')}"
-            qualified = name
-            summary = item["role"]
-            kind_label = "证据关联"
         elif kind == "source_order":
             name = sources.get(item["source_id"], {}).get("title", "未找到的来源")
             qualified = name
