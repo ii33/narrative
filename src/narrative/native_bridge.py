@@ -1118,10 +1118,18 @@ class NativeBridge(QObject):
         self._detail_node = node_id
         cut = dict(self._reading_cut)
         def work(ops) -> dict:
-            return node_detail(
+            from .graph_event_order import _storyline_spans
+
+            detail = node_detail(
                 ops.graph_query(node_id=node_id, limit=2000, disclosure_cut=cut or None), node_id,
                 ops.graph_display_map()["items"], ops.sources(),
             )
+            # 大事件是一段：把它的起止事件附上，页面上才看得出它串了哪几场。
+            spans = {row["id"]: row for row in _storyline_spans(
+                ops.graph_snapshot(), "canon", cut or None
+            )}
+            detail["span"] = spans.get(node_id)
+            return detail
 
         self._project_task("detail", work)
 

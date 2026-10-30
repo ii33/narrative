@@ -28,6 +28,46 @@ def _visible(snapshot: dict, context_id: str, disclosure_cut: dict | None) -> di
     }
 
 
+def _storyline_spans(
+    snapshot: dict, context_id: str, disclosure_cut: dict | None
+) -> list[dict]:
+    """大事件在阅读顺序上的跨度：从第一个场景的第一个事件，到最后一个场景的最后一个事件。
+
+    大事件不是一个点，而是一段：它在阅读顺序上占的是它所有场景合起来的那一段。
+    """
+    nodes = {
+        node["id"]: node
+        for node in query_graph(
+            snapshot, context_id=context_id, disclosure_cut=disclosure_cut, limit=None
+        )["nodes"]
+    }
+    events = {node_id for node_id, node in nodes.items() if node.get("node_type") == "event"}
+    spans: list[dict] = []
+    for node in nodes.values():
+        if node.get("node_type") != "storyline":
+            continue
+        scenes = [nodes[item] for item in node.get("events") or [] if item in nodes]
+        members = [
+            event_id
+            for scene in scenes
+            for event_id in scene.get("events") or []
+            if event_id in events
+        ]
+        if not members:
+            continue
+        ordered = sorted(members, key=lambda event_id: order_key(event_id) or ())
+        spans.append({
+            "id": node["id"],
+            "name": node.get("name", node["id"]),
+            "scene_count": len(scenes),
+            "event_count": len(ordered),
+            "first": ordered[0],
+            "last": ordered[-1],
+            "scenes": [scene["id"] for scene in scenes],
+        })
+    return spans
+
+
 def event_lines(
     snapshot: dict, *, context_id: str = "canon", disclosure_cut: dict | None = None
 ) -> dict:
@@ -49,6 +89,8 @@ def event_lines(
             for index, node in enumerate(ordered, start=1)
         ],
         "relations": [],
+        # 大事件是一段，不是一点：从它第一个场景的第一个事件，到最后一个场景的最后一个事件。
+        "storylines": _storyline_spans(snapshot, context_id, disclosure_cut),
         "note": "只有阅读顺序；事件之间没有存储的关系",
     }
 

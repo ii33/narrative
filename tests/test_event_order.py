@@ -94,3 +94,53 @@ def test_a_single_type_list_is_in_number_order(tmp_path: Path) -> None:
         query="", related_only=False, time_filter=None,
     )
     assert [node["id"] for node in events["nodes"]] == ["E1", "E2"]
+
+
+def test_a_storyline_spans_its_scenes(tmp_path: Path) -> None:
+    """大事件不是一个点：它占的是所有场景合起来的那一段阅读范围。"""
+    from narrative.extraction import build_candidate, parse_nodes
+    from narrative.project_catalog import create_graph_project
+
+    ops = create_graph_project(tmp_path / "span.nproj")
+    text = "林舟推门。老周递钥匙。林舟收下。"
+    data = parse_nodes(json.dumps({
+        "nodes": [
+            {"name": "接手杂货铺", "type": "storyline", "quotes": ["老周递钥匙"], "aliases": []},
+            {"name": "门口", "type": "scene", "quotes": ["林舟推门"], "aliases": [],
+             "storyline": "接手杂货铺"},
+            {"name": "柜台", "type": "scene", "quotes": ["老周递钥匙"], "aliases": [],
+             "storyline": "接手杂货铺"},
+            {"name": "林舟推门进来", "type": "event", "quotes": ["林舟推门"], "aliases": [],
+             "participants": ["林舟"], "scene": "门口"},
+            {"name": "老周递钥匙", "type": "event", "quotes": ["老周递钥匙"], "aliases": [],
+             "participants": ["老周", "林舟"], "scene": "柜台"},
+            {"name": "林舟收下钥匙", "type": "event", "quotes": ["林舟收下"], "aliases": [],
+             "participants": ["林舟"], "scene": "柜台"},
+        ],
+        "properties": [],
+    }, ensure_ascii=False), text) | {
+        "source_id": (sid := ops.import_source("第一章", text)),
+        "source_hash": ops.source(sid)["hash"],
+        "chapter": "第一章",
+    }
+    built = build_candidate(ops, data)
+    ops.change_accept(
+        ops.change_propose(
+            built["objects"], built["property_records"], built["revision"], source="model"
+        ),
+        1,
+    )
+
+    spans = ops.graph_event_lines()["storylines"]
+    assert len(spans) == 1
+    span = spans[0]
+    assert span["scene_count"] == 2
+    assert span["event_count"] == 3
+    # 起点是它第一个场景的第一个事件，终点是最后一个事件。
+    names = {row["id"]: row["name"] for row in ops.graph_event_lines()["events"]}
+    assert names[span["first"]] == "林舟推门进来"
+    assert names[span["last"]] == "林舟收下钥匙"
+
+    # 大事件自己的披露位置 = 第一个场景的位置，不是它随手引的那句。
+    story = next(n for n in ops.graph_snapshot()["nodes"] if n["node_type"] == "storyline")
+    assert story["disclosure"]["start"] == 0

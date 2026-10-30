@@ -955,7 +955,17 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
             payload["events"] = scene_children.get(item["name"], [])
         if item["type"] == "storyline":
             # 大事件下面挂的是场景：跨场景、甚至跨章都正常。
-            payload["events"] = storyline_children.get(item["name"], [])
+            children = storyline_children.get(item["name"], [])
+            payload["events"] = children
+            # 它是一段而不是一点：披露位置取它第一个场景的位置，别用模型随手引的那句。
+            starts = [
+                scene["start"] for scene in nodes
+                if scene["type"] == "scene" and scene.get("storyline") == item["name"]
+            ]
+            if starts:
+                payload["disclosure"] = {
+                    "source_id": data["source_id"], "start": min(starts),
+                }
         if item["type"] == "storyline":
             # 大事件下面挂的是场景：跨场景、甚至跨章都正常。
             payload["events"] = storyline_children.get(item["name"], [])

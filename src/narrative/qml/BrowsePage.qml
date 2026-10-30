@@ -1123,6 +1123,20 @@ Item {
                                 color: t.body
                                 font.pixelSize: 13
                             }
+                            // 大事件是一段而不是一点：它串起的那一段阅读范围写在这里。
+                            Label {
+                                Layout.fillWidth: true
+                                wrapMode: Text.Wrap
+                                visible: !!(detail.span)
+                                text: detail.span
+                                    ? "跨度：" + page.nameOf(detail.span.first) + " → "
+                                      + page.nameOf(detail.span.last) + "（"
+                                      + detail.span.scene_count + " 个场景 / "
+                                      + detail.span.event_count + " 个事件）"
+                                    : ""
+                                color: t.accent
+                                font.pixelSize: 12
+                            }
                             Label {
                                 Layout.fillWidth: true
                                 wrapMode: Text.Wrap
