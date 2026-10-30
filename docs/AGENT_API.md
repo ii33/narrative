@@ -41,6 +41,8 @@
 | `update_material_card` / `delete_material_card` | 改一张资料卡（只改给了的字段）；删一张卡，图片一起走 | 写 |
 | `add_material_image` / `delete_material_image` | 给资料卡加图（拷进工程，可带说明）；删掉某张图 | 写 |
 | `revise_node` | 修订节点的名称、类型、别名或说明（立刻生效） | 写 |
+| `attach_scenes` | 把一个或多个场景挂到大事件下面（立刻生效；场景原有归属会被替换） | 写 |
+| `attach_scenes` | 把一个或多个场景挂到大事件下面（立刻生效；场景原有归属会被替换） | 写 |
 | `merge_properties` / `rename_property` | 两个名字合成一个方面；一个方面改名 | 写 |
 | `categorize_records` | 把记录移到某个显示大类 | 写 |
 | `accept_candidate` / `reject_candidate` | 处理候选（节点/属性/提取结果） | 写 |

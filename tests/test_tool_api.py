@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from narrative import tool_api
+from narrative.operations import Operations
 from narrative.project_catalog import create_graph_project
 
 
@@ -340,3 +341,36 @@ def test_bad_calls_say_what_is_wrong(project: Path) -> None:
         tool_api.call("get_node", {"node_id": "999"}, project=project)
     with pytest.raises(tool_api.ToolError):
         tool_api.call("project_info", {}, project=None)
+
+
+def test_attach_scenes_puts_an_earlier_scene_under_a_later_storyline(tmp_path: Path) -> None:
+    """大事件常常是后面才成形的：回头把前面的场景挂上去，不用重提。"""
+    project, source_id = _fresh_project(tmp_path / "attach.nproj")
+    ops = Operations.open_graph_project(project)
+    revision = ops.graph_project_info()["revision"]
+    quote = {"source_id": source_id, "quote": "林舟推门进来。老周笑了。"}
+    ops.change_accept(ops.change_propose([
+        {"kind": "node", "id": "S1", "node_type": "scene", "name": "旅社房间",
+         "disclosure": {"source_id": source_id, "start": 0}, "evidence": quote},
+        {"kind": "node", "id": "S2", "node_type": "scene", "name": "走廊",
+         "disclosure": {"source_id": source_id, "start": 0}, "evidence": quote},
+    ], [], revision, source="manual"), 1)
+
+    # 后面一章才发现这两场其实是同一件事
+    revision = ops.graph_project_info()["revision"]
+    ops.change_accept(ops.change_propose([
+        {"kind": "node", "id": "T1", "node_type": "storyline", "name": "旅社一夜",
+         "disclosure": {"source_id": source_id, "start": 0}, "evidence": quote},
+    ], [], revision, source="manual"), 1)
+
+    attached = tool_api.call(
+        "attach_scenes", {"storyline_id": "T1", "scene_ids": ["S1", "S2"]}, project=project
+    )
+    assert attached["status"] == "accepted"
+    assert attached["events"] == ["S1", "S2"]
+
+    # 再加一次不会重复
+    again = tool_api.call(
+        "attach_scenes", {"storyline_id": "T1", "scene_ids": ["S1"]}, project=project
+    )
+    assert again["events"] == ["S1", "S2"]

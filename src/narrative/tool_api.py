@@ -545,6 +545,50 @@ def _revise_node(ops, params: dict) -> dict:
     return {"status": "accepted", "revision": after, "node_id": params["node_id"], "changes": changes}
 
 
+def _attach_scenes(ops, params: dict) -> dict:
+    """把若干场景挂到一个大事件下面（立刻生效）。
+
+    大事件常常在后面才成形：先写了几章散场，某天回头发现「这些其实是一件事」。
+    这时不用重提——把场景挂上去就行。场景本来属于哪个大事件会被替换掉（一个场景
+    只属于一个大事件），大事件原有的其它场景保留。
+    """
+    _need(params, "storyline_id")
+    raw = params.get("scene_ids")
+    scene_ids = [str(item) for item in (raw if isinstance(raw, list) else [raw]) if item]
+    if not scene_ids:
+        raise ToolError("请提供要挂上的场景编号（scene_ids）")
+    snapshot = ops.graph_snapshot()
+    nodes = {item["id"]: item for item in snapshot["nodes"]}
+    story = nodes.get(str(params["storyline_id"]))
+    if story is None:
+        raise ToolError(f"节点不存在：{params['storyline_id']}")
+    if story.get("node_type") != "storyline":
+        raise ToolError(f"{params['storyline_id']} 不是大事件（storyline）")
+    wrong = [item for item in scene_ids if nodes.get(item, {}).get("node_type") != "scene"]
+    if wrong:
+        raise ToolError(f"这些不是场景：{'、'.join(wrong)}")
+
+    existing = [item for item in (story.get("events") or []) if isinstance(item, str)]
+    merged = existing + [item for item in scene_ids if item not in existing]
+    if params.get("replace"):
+        merged = list(dict.fromkeys(scene_ids))
+    updated = dict(story) | {"events": merged}
+    revision = _revision(ops)
+    diagnostics = ops.change_precheck([updated], [], revision)
+    errors = [item for item in diagnostics if item.get("severity") == "error"]
+    if errors:
+        return {"status": "rejected", "diagnostics": diagnostics}
+    candidate = ops.change_propose(
+        [updated], [], revision, source="correction",
+        note=f"归入大事件：{story.get('name')}",
+    )
+    after = ops.change_accept(candidate, 1)
+    return {
+        "status": "accepted", "revision": after,
+        "storyline_id": story["id"], "events": merged,
+    }
+
+
 def _merge(ops, params: dict) -> dict:
     _need(params, "alias_id", "target_id")
     return {"status": "accepted", **ops.property_merge(params["alias_id"], params["target_id"])}
@@ -969,6 +1013,17 @@ _register(Tool(
         "identity_note": {"type": "string"},
     },
     _revise_node,
+    writes=True,
+))
+_register(Tool(
+    "attach_scenes",
+    "把一个或多个场景挂到大事件下面（立刻生效；场景原有的归属会被替换）",
+    {
+        "storyline_id": {"type": "string", "required": True},
+        "scene_ids": {"type": "array", "items": {"type": "string"}, "required": True},
+        "replace": {"type": "boolean", "description": "true 时只留这些场景，false 时追加（默认）"},
+    },
+    _attach_scenes,
     writes=True,
 ))
 _register(Tool(
