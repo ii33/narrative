@@ -723,12 +723,18 @@ def test_the_node_editor_corrects_and_invalidates(workspace) -> None:
     retracted = _pump(app, results, "property_retract")
     assert retracted["retracted"]
 
-    # 撤回之后这条属性从编辑器里消失：编辑器只回答「现在是什么」。
+    # 撤回之后那几条记录不再出现：编辑器只回答「现在是什么」。
+    # 物品总会有一行「持有者」——原文没说就是「未知」，那是算出来的占位，不是记录。
     del results[:]
     editor.reload()
     payload = _pump(app, results, "node_editor")
-    labels = {entry["label"] for entry in _value(editor.property("properties"))}
-    assert "持有者" not in labels
+    holders = [
+        entry for entry in _value(editor.property("properties"))
+        if entry["label"] == "持有者"
+    ]
+    assert len(holders) == 1
+    assert holders[0]["records"] == []
+    assert holders[0]["value"] == "未知"
 
 
 

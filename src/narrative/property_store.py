@@ -162,15 +162,21 @@ def supersede_plan(
 
     plan: list[dict] = []
     for group in groups.values():
+        name = str(group[0].get("property_id") or "")
+        definition = definitions.get(aliases.get(name, name))
+        node_valued = bool(definition) and definition.get("value_type") in {"node", "either"}
         ordered = sorted(group, key=record_position)
         still_valid: list[dict] = []
         for record in ordered:
             for older in still_valid:
                 if str(older.get("value")) == str(record.get("value")):
                     continue
-                # 同一个事件里说了两件事（值不同）不互相取代：那是并列或矛盾，
-                # 不是推进。只有更晚的事件才覆盖。
-                if _statement_event(record) <= _statement_event(older):
+                if record_position(record) <= record_position(older):
+                    continue
+                # 同一个事件里说了两件事（值不同）不互相取代：那是并列或矛盾，不是推进。
+                # 例外是**换手**：一件东西在同一场里先给出去再被接过，位置更后的那条接手。
+                same_event = _statement_event(record) == _statement_event(older)
+                if same_event and not node_valued:
                     continue
                 item = {
                     "target_id": older.get("id"),
@@ -1413,6 +1419,24 @@ class PropertyStore:
         items.sort(key=lambda item: (
             ordered_categories.index(item["category"]), item["label"], item["aspect"],
         ))
+
+        # 物品必须回答「在谁手里」。原文没写就补一行「未知」——**不造假记录**，
+        # 这一行是算出来的（derived），展开没有披露可看。
+        if node_type == "item" and not any(
+            "持有" in item["aspect"] or "归属" in item["aspect"] for item in items
+        ):
+            items.append({
+                "property_id": "持有者", "property_ids": ["持有者"],
+                "aspect": "持有者", "label": "持有者",
+                "category": "归属与持有", "category_source": "inferred",
+                "other_categories": [],
+                "value_node": None, "scope": "world", "scopes": ["world"],
+                "holder_id": None, "holder_name": "",
+                "value_type": "either", "value": "未知",
+                "event_id": None, "start": None, "disclosed_at": "",
+                "is_current": True, "record_count": 0, "later_count": 0,
+                "records": [], "derived": True,
+            })
 
         # The other end of a relation: a record stored on another node whose
         # value points here. Same record, second entrance — nothing is copied.

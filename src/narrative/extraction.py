@@ -20,7 +20,7 @@ from .property_categories import aspect_of
 from .property_store import record_position
 
 # 提示词改一次，这个号跟着动；缓存的提取结果里会写下来，便于对照。
-PROMPT_VERSION = "extract/7"
+PROMPT_VERSION = "extract/8"
 
 NODE_TYPES = ("person", "group", "item", "location", "scene", "event")
 
@@ -182,11 +182,16 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
     "category": "基本信息",
     "quotes": ["原文逐字引文"], "scope": "world", "holder": null,
     "source": "narration", "related_nodes": [], "at_event": "沈砚告知林舟陈总来电"}},
-  {{"node": "铜钥匙", "property": "持有者", "value": "林舟", "value_type": "node",
+  {{"node": "铜钥匙", "property": "持有者", "value": "林舟", "value_type": "either",
     "category": "归属与持有",
     "quotes": ["原文逐字引文"], "scope": "world", "holder": null,
     "source": "narration", "related_nodes": ["老周"],
     "at_event": "老周赠送铜钥匙，林舟戴上试用"}},
+  {{"node": "断剑", "property": "持有者", "value": "未知", "value_type": "either",
+    "category": "归属与持有",
+    "quotes": ["原文逐字引文"], "scope": "world", "holder": null,
+    "source": "narration", "related_nodes": [],
+    "at_event": "废墟里散落着断剑与破甲"}},
   {{"node": "老周", "property": "状态", "value": "赢了那场交战", "value_type": "string",
     "category": "其他",
     "quotes": ["原文逐字引文"], "scope": "cognition", "holder": "林舟",
@@ -319,6 +324,9 @@ def _parse_properties(rows, text: str, names: set[str], rejected: list[dict]) ->
         })
     properties.sort(key=lambda item: item["start"])
     return properties
+
+
+NODE_ID = re.compile(r"^[A-Z][0-9]")
 
 
 WRAPPING_QUOTES = "\"'\u2018\u2019\u201c\u201d\u300c\u300d\u300e\u300f"
@@ -1137,9 +1145,15 @@ def split_confident(ops, built: dict, data: dict) -> dict:
         )
         groups.setdefault(key, []).append(record)
     for rows in groups.values():
-        if len({str(row.get("value")) for row in rows}) > 1:
-            for row in rows:
-                flag_record(row["id"], "同一事件里同一方面有多个不同值")
+        values = {str(row.get("value")) for row in rows}
+        if len(values) <= 1:
+            continue
+        # 全是节点编号 = 一件东西在同一场里换手（先给出、再接过），位置更后的那条接手，
+        # 不算并列。普通值在同一事件里出现两个说法才是真的拿不准。
+        if all(NODE_ID.match(value) for value in values):
+            continue
+        for row in rows:
+            flag_record(row["id"], "同一事件里同一方面有多个不同值")
 
     # 闭合：存疑节点带着自己的记录一起留；引用了它的节点也留（否则参与者悬空）。
     doubtful_names = {nodes[node_id].get("name") for node_id in doubtful_nodes}
