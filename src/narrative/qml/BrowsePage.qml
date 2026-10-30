@@ -903,81 +903,147 @@ Item {
             objectName: "browseTimelinePopup"
             modal: true
             padding: 0
-            width: 860
-            height: 380
+            width: Math.min(860, page.width - 80)
+            height: Math.min(420, page.height - 140)
+            x: Math.round((page.width - width) / 2)
+            y: 76
             property int first: 0
             property int second: -1
             property int third: -1
 
+            // 打开时先落在第一段的第一个场景上：右边那列立刻有东西，不用先点一下。
+            onOpened: {
+                var top = page.timelineTop()
+                first = top.length > 0 ? top[0] : -1
+                var kids = page.timelineChildren(first)
+                second = kids.length > 0 ? kids[0] : -1
+                third = -1
+            }
+
             function choose(level, index) {
                 var row = page.timeline[index]
                 if (!row) return
-                if (level === 0) { first = index; second = -1; third = -1 }
-                else if (level === 1) { second = index; third = -1 }
-                else { third = index }
+                if (level === 0) {
+                    first = index
+                    var kids = page.timelineChildren(index)
+                    second = kids.length > 0 ? kids[0] : -1
+                    third = -1
+                } else if (level === 1) {
+                    second = index
+                    third = -1
+                } else {
+                    third = index
+                }
                 page.pickCutById(row.id)
             }
 
-            RowLayout {
+            background: Rectangle {
+                color: t.panel
+                border.color: t.line
+                radius: t.radius
+            }
+
+            ColumnLayout {
                 anchors.fill: parent
                 spacing: 0
 
-                ListView {
-                    objectName: "browseTimelineLevel0"
-                    Layout.preferredWidth: 300
-                    Layout.fillHeight: true
-                    clip: true
-                    model: page.timelineTop()
-                    delegate: ItemDelegate {
-                        required property var modelData
-                        width: ListView.view.width
-                        highlighted: timelinePopup.first === modelData
-                        onClicked: timelinePopup.choose(0, modelData)
-                        contentItem: Label {
-                            text: page.timeline[modelData].label_id + "　" + page.timeline[modelData].name
-                            elide: Text.ElideRight
-                            font.pixelSize: 12
-                            color: t.body
-                        }
+                // 表头：一列一层，写清楚这一列是什么。
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 30
+                    spacing: 0
+                    Label {
+                        text: "大事件"
+                        Layout.preferredWidth: 300
+                        leftPadding: 12
+                        color: t.muted
+                        font.pixelSize: 11
+                        font.weight: Font.DemiBold
+                    }
+                    Label {
+                        text: "场景"
+                        Layout.preferredWidth: 280
+                        leftPadding: 12
+                        color: t.muted
+                        font.pixelSize: 11
+                        font.weight: Font.DemiBold
+                    }
+                    Label {
+                        text: "事件"
+                        Layout.fillWidth: true
+                        leftPadding: 12
+                        color: t.muted
+                        font.pixelSize: 11
+                        font.weight: Font.DemiBold
                     }
                 }
-                Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: t.line }
-                ListView {
-                    objectName: "browseTimelineLevel1"
-                    Layout.preferredWidth: 280
-                    Layout.fillHeight: true
-                    clip: true
-                    model: page.timelineChildren(timelinePopup.first)
-                    delegate: ItemDelegate {
-                        required property var modelData
-                        width: ListView.view.width
-                        highlighted: timelinePopup.second === modelData
-                        onClicked: timelinePopup.choose(1, modelData)
-                        contentItem: Label {
-                            text: page.timeline[modelData].label_id + "　" + page.timeline[modelData].name
-                            elide: Text.ElideRight
-                            font.pixelSize: 12
-                            color: t.body
-                        }
-                    }
-                }
-                Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: t.line }
-                ListView {
-                    objectName: "browseTimelineLevel2"
+                Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: t.line }
+
+                RowLayout {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    clip: true
-                    model: page.timelineChildren(timelinePopup.second)
-                    delegate: ItemDelegate {
-                        required property var modelData
-                        width: ListView.view.width
-                        highlighted: timelinePopup.third === modelData
-                        onClicked: timelinePopup.choose(2, modelData)
-                        contentItem: Label {
-                            text: page.timeline[modelData].label_id + "　" + page.timeline[modelData].name
-                            elide: Text.ElideRight
-                            font.pixelSize: 12
-                            color: t.body
+                    spacing: 0
+
+                    ListView {
+                        objectName: "browseTimelineLevel0"
+                        Layout.preferredWidth: 300
+                        Layout.fillHeight: true
+                        clip: true
+                        model: page.timelineTop()
+                        delegate: ItemDelegate {
+                            required property var modelData
+                            width: ListView.view.width
+                            highlighted: timelinePopup.first === modelData
+                            onClicked: timelinePopup.choose(0, modelData)
+                            contentItem: Label {
+                                text: page.timeline[modelData].label_id + "　"
+                                    + page.timeline[modelData].name
+                                elide: Text.ElideRight
+                                font.pixelSize: 12
+                                color: t.body
+                            }
+                        }
+                    }
+                    Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: t.line }
+                    ListView {
+                        objectName: "browseTimelineLevel1"
+                        Layout.preferredWidth: 280
+                        Layout.fillHeight: true
+                        clip: true
+                        model: page.timelineChildren(timelinePopup.first)
+                        delegate: ItemDelegate {
+                            required property var modelData
+                            width: ListView.view.width
+                            highlighted: timelinePopup.second === modelData
+                            onClicked: timelinePopup.choose(1, modelData)
+                            contentItem: Label {
+                                text: page.timeline[modelData].label_id + "　"
+                                    + page.timeline[modelData].name
+                                elide: Text.ElideRight
+                                font.pixelSize: 12
+                                color: t.body
+                            }
+                        }
+                    }
+                    Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: t.line }
+                    ListView {
+                        objectName: "browseTimelineLevel2"
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        model: page.timelineChildren(timelinePopup.second)
+                        delegate: ItemDelegate {
+                            required property var modelData
+                            width: ListView.view.width
+                            highlighted: timelinePopup.third === modelData
+                            onClicked: timelinePopup.choose(2, modelData)
+                            contentItem: Label {
+                                text: page.timeline[modelData].label_id + "　"
+                                    + page.timeline[modelData].name
+                                elide: Text.ElideRight
+                                font.pixelSize: 12
+                                color: t.body
+                            }
                         }
                     }
                 }
