@@ -160,3 +160,85 @@ def test_the_payload_carries_both_granularities_of_the_cut(tmp_path: Path) -> No
     view = browse_view(ops.graph_snapshot(), cut_id="4")
     assert view["cut_alt"] == {"scene": "4", "event": "6"}
     assert browse_view(ops.graph_snapshot())["cut_alt"] == {"scene": "", "event": ""}
+
+
+def test_timeline_tree_lays_the_levels_out_in_order(tmp_path: Path) -> None:
+    """时间点菜单按层级排：大事件 → 场景 → 事件，没有归属的挂在顶层。"""
+    from narrative.browse_view import timeline_tree
+
+    ops, snapshot = _project(tmp_path / "tree.nproj")
+    rows = timeline_tree(snapshot)
+    shape = [(row["depth"], row["name"]) for row in rows]
+    assert shape == [
+        (0, "房间冲突"),
+        (1, "林舟进门"),
+        (1, "两人对峙"),
+        (0, "老周现身"),
+        (1, "老周出场"),
+    ]
+
+
+def test_a_storyline_sits_above_its_scenes(tmp_path: Path) -> None:
+    """大事件在最上层，它的场景退一层，事件再退一层。"""
+    from narrative.browse_view import timeline_tree
+
+    ops, snapshot = _project(tmp_path / "story.nproj")
+    ops.graph_accept(
+        ops.graph_propose(
+            [
+                {"kind": "node", "id": "T1", "node_type": "storyline", "name": "一夜之间",
+                 "events": ["4", "7"],
+                 "disclosure": {"source_id": ops.sources()[0]["id"], "start": 0}},
+            ],
+            ops.graph_project_info()["revision"],
+        ),
+        1,
+    )
+    rows = timeline_tree(ops.graph_snapshot())
+    shape = [(row["depth"], row["name"]) for row in rows]
+    assert shape == [
+        (0, "一夜之间"),
+        (1, "房间冲突"), (2, "林舟进门"), (2, "两人对峙"),
+        (1, "老周现身"), (2, "老周出场"),
+    ]
+
+
+def test_timeline_tree_lays_the_levels_out_in_order(tmp_path: Path) -> None:
+    """时间点菜单按层级排：大事件 → 场景 → 事件，没有归属的挂在顶层。"""
+    from narrative.browse_view import timeline_tree
+
+    ops, snapshot = _project(tmp_path / "tree.nproj")
+    rows = timeline_tree(snapshot)
+    shape = [(row["depth"], row["name"]) for row in rows]
+    assert shape == [
+        (0, "房间冲突"),
+        (1, "林舟进门"),
+        (1, "两人对峙"),
+        (0, "老周现身"),
+        (1, "老周出场"),
+    ]
+
+
+def test_a_storyline_sits_above_its_scenes(tmp_path: Path) -> None:
+    """大事件在最上层，它的场景退一层，事件再退一层。"""
+    from narrative.browse_view import timeline_tree
+
+    ops, snapshot = _project(tmp_path / "story.nproj")
+    ops.graph_accept(
+        ops.graph_propose(
+            [
+                {"kind": "node", "id": "T1", "node_type": "storyline", "name": "一夜之间",
+                 "events": ["4", "7"],
+                 "disclosure": {"source_id": ops.sources()[0]["id"], "start": 0}},
+            ],
+            ops.graph_project_info()["revision"],
+        ),
+        1,
+    )
+    rows = timeline_tree(ops.graph_snapshot())
+    shape = [(row["depth"], row["name"]) for row in rows]
+    assert shape == [
+        (0, "一夜之间"),
+        (1, "房间冲突"), (2, "林舟进门"), (2, "两人对峙"),
+        (1, "老周现身"), (2, "老周出场"),
+    ]

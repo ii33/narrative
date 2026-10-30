@@ -317,8 +317,8 @@ def matches(node: dict, needle: str) -> bool:
 def timeline_tree(snapshot: dict) -> list[dict]:
     """按层级排开的时间点：大事件 → 场景 → 事件，各自带缩进深度。
 
-    没有归属的场景直接挂在顶层；没有场景的事件也一样——层级是从数据里读出来的，
-    不是硬性要求的。
+    层级从数据里读：场景挂在它所属的大事件下，事件挂在它所属的场景下；没有归属的
+    自己占一层（散场在顶层，散事件也在顶层），不硬凑。
     """
     nodes = {
         node["id"]: node
@@ -327,6 +327,7 @@ def timeline_tree(snapshot: dict) -> list[dict]:
     }
     order = _reading_key(snapshot)
     rows: list[dict] = []
+    placed: set[str] = set()
 
     def emit(node: dict, depth: int) -> None:
         rows.append({
@@ -336,36 +337,39 @@ def timeline_tree(snapshot: dict) -> list[dict]:
             "node_type": node.get("node_type"),
             "depth": depth,
         })
+        placed.add(node["id"])
 
-    placed: set[str] = set()
-    storylines = [n for n in nodes.values() if n.get("node_type") == "storyline"]
-    storylines.sort(key=order)
+    def emit_scene(scene: dict, depth: int) -> None:
+        """场景连同它下面的事件一起排——事件永远跟着自己的场景走。"""
+        emit(scene, depth)
+        for event_id in scene.get("events") or []:
+            event = nodes.get(event_id)
+            if event and event.get("node_type") == "event":
+                emit(event, depth + 1)
+
+    storylines = sorted(
+        (n for n in nodes.values() if n.get("node_type") == "storyline"), key=order
+    )
     for story in storylines:
         emit(story, 0)
-        placed.add(story["id"])
         for scene_id in story.get("events") or []:
             scene = nodes.get(scene_id)
-            if not scene or scene.get("node_type") != "scene":
-                continue
-            emit(scene, 1)
-            placed.add(scene_id)
-            for event_id in scene.get("events") or []:
-                event = nodes.get(event_id)
-                if not event or event.get("node_type") != "event":
-                    continue
-                emit(event, 2)
-                placed.add(event_id)
+            if scene and scene.get("node_type") == "scene":
+                emit_scene(scene, 1)
 
-    for kind, depth in (("scene", 0), ("event", 1)):
-        loose = [
-            n for n in nodes.values()
-            if n.get("node_type") == kind and n["id"] not in placed
-        ]
-        for node in sorted(loose, key=order):
-            if kind == "event" and node.get("scene") in nodes:
-                continue  # 挂在场景下面的事件已经由上面输出了
-            emit(node, depth)
-            placed.add(node["id"])
+    for scene in sorted(
+        (n for n in nodes.values()
+         if n.get("node_type") == "scene" and n["id"] not in placed),
+        key=order,
+    ):
+        emit_scene(scene, 0)
+
+    for event in sorted(
+        (n for n in nodes.values()
+         if n.get("node_type") == "event" and n["id"] not in placed),
+        key=order,
+    ):
+        emit(event, 0)
     return rows
 
 
