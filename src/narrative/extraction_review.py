@@ -264,7 +264,8 @@ RELATION_PROMPT = """再看一遍这一章的**人物关系**：谁和谁是什�
 - `to`：关系的另一方
 - `kind`：关系性质，用原文的词——师徒 / 父子 / 夫妻 / 恋人 / 仇敌 / 上下级 / 同伙 / 主仆。
   **不要写称呼**（「大哥」「老弟」「老板」是叫法，不是关系）
-- `quotes`：**逐字**引用原文那句话，一个字都不要改
+- `quotes`：**逐字**引用原文那句话，一个字都不要改；要引用**完整的一句**，
+  不要只截「他」「你」这种几个字——短句在原文里出现好几次，落不到唯一位置，这条就会被丢掉
 - `at_event`：读者在哪一步知道这件事，从下面的「本章事件」里照抄一个
 
 只输出 JSON：{{"relations": [ … ]}}。没有就返回空数组。
@@ -410,13 +411,18 @@ def _relation_round(runner, session, data, keep, events, ops, rounds, *, text: s
             continue
         seen.add(key)
         # 这一轮加的行没有经过第一轮的解析，位置要自己算：引文在原文里的起点。
-        start = text.find(quotes[0])
+        # 引文必须**只出现一次**，否则落不到唯一位置（和第一轮同样的要求）。
+        start, quote = -1, ""
+        for candidate in quotes:
+            if text.count(candidate) == 1:
+                start, quote = text.find(candidate), candidate
+                break
         if start < 0:
             continue
         out.append({
             "start": start,
             "node": left, "property": kind, "value": right, "value_type": "node",
-            "category": "关系", "quotes": quotes[:2], "scope": "world", "holder": None,
+            "category": "关系", "quotes": [quote], "scope": "world", "holder": None,
             "source": "narration", "related_nodes": [right],
             "at_event": str(row.get("at_event") or ""),
         })
