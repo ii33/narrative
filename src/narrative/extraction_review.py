@@ -16,7 +16,7 @@ from .graph_operations import GraphOperations
 from .harness import HarnessRunner, HarnessSettings
 
 MAX_ROUNDS = 4
-REVIEW_VERSION = "review/6"
+REVIEW_VERSION = "review/7"
 
 REVIEW_PROMPT = """你在为一部小说的属性记录做去重。
 
@@ -249,6 +249,34 @@ def _format_stored(rows: list[dict]) -> str:
     )
 
 
+RELATION_PROMPT = """再看一遍这一章的**人物关系**：谁和谁是什么关系。
+
+只写本章原文明确说出的关系，不要推测，不要写「关系不错」这种空话。同一对人只写一条。
+
+本章出现的人物只有下面这些，`from` / `to` **必须从这里选，一个字不差**：
+
+{people}
+
+每人每条给出：
+
+- `from`：关系的这一方
+- `to`：关系的另一方
+- `kind`：关系性质，用原文的词——师徒 / 父子 / 夫妻 / 恋人 / 仇敌 / 上下级 / 同伙 / 主仆。
+  **不要写称呼**（「大哥」「老弟」「老板」是叫法，不是关系）
+- `quotes`：**逐字**引用原文那句话，一个字都不要改
+- `at_event`：读者在哪一步知道这件事，从下面的「本章事件」里照抄一个
+
+只输出 JSON：{{"relations": [ … ]}}。没有就返回空数组。
+
+## 本章事件
+
+{events}
+
+## 本章原文
+
+{text}"""
+
+
 NO_JSON_PROMPT = "上一条回复里没有 JSON。请只输出那个 JSON 对象，不要任何解释或代码块。"
 
 ANCHOR_REPAIR_PROMPT = """下面这些「旧值失效」写的事件名，在本章事件里找不到。请只从「本章事件」
@@ -325,6 +353,57 @@ def _repair_anchors(runner, session, items, events, ops, rounds) -> list[dict]:
     return list(by_key.values())
 
 
+def _relation_round(runner, session, data, keep, events, ops, rounds, *, text: str) -> list[dict]:
+    """人物关系：每个人物与别人的关系，写成一条**值指向对方节点**的属性。
+
+    关系性质放在属性名上（「仇敌」「师父」），值指向对方——这样对方的页面能在反向引用里
+    看到这条，两个人就连起来了。这一轮只提案，落不落地由 build 判断。
+    """
+    people = {
+        str(node.get("name"))
+        for node in (data.get("nodes") or [])
+        if str(node.get("type") or "") == "person" and node.get("name")
+    }
+    if len(people) < 2:
+        return []
+    instruction = RELATION_PROMPT.format(
+        people="\n".join(f"- {name}" for name in sorted(people)),
+        events="\n".join(f"- {name}" for name in events) or "（本章没有事件）",
+        text=text or "（拿不到本章原文）",
+    )
+    try:
+        payload = _turn(runner, session, instruction, ops, rounds)
+    except ValueError:
+        return []
+    rows = payload.get("relations")
+    if not isinstance(rows, list):
+        return []
+    seen = {
+        (str(item.get("node")), str(item.get("property")), str(item.get("value")))
+        for item in keep if isinstance(item, dict)
+    }
+    out: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        left, right = str(row.get("from") or ""), str(row.get("to") or "")
+        kind = str(row.get("kind") or "").strip()
+        quotes = [str(item) for item in row.get("quotes") or [] if str(item).strip()]
+        if left not in people or right not in people or not kind or not quotes:
+            continue
+        key = (left, kind, right)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "node": left, "property": kind, "value": right, "value_type": "node",
+            "category": "关系", "quotes": quotes[:2], "scope": "world", "holder": None,
+            "source": "narration", "related_nodes": [right],
+            "at_event": str(row.get("at_event") or ""),
+        })
+    return out
+
+
 def review_properties(
     ops: GraphOperations,
     data: dict,
@@ -373,6 +452,10 @@ def review_properties(
             supersede += list(payload.get("supersede") or [])
             unsure = list(payload.get("unsure") or []) if payload else unsure
         supersede = _repair_anchors(runner, session, supersede, events, ops, rounds)
+        keep += _relation_round(
+            runner, session, data, keep, events, ops, rounds,
+            text=source.get("text") or "",
+        )
         return _apply(
             data, keep, drop, rounds[0], unresolved=unsure, supersede=supersede
         )
