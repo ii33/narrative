@@ -391,7 +391,7 @@ def test_two_names_for_one_aspect_share_a_line(tmp_path: Path) -> None:
     ops.property_accept(
         ops.property_propose(
             _definitions("cultivation", "cultivation_stage") + [
-                _value("v1", "1", "cultivation", "灵寂期", scope="claim", holder_id="2"),
+                _value("v1", "1", "cultivation", "灵寂期"),
                 _value("v2", "1", "cultivation_stage", "辟谷期"),
                 _value("v3", "1", "cultivation_stage", "到了元婴初期",
                        scope="cognition", holder_id="1"),
@@ -410,8 +410,8 @@ def test_two_names_for_one_aspect_share_a_line(tmp_path: Path) -> None:
     assert item["aspect"] == "cultivation"
     assert item["label"] == "修为"
     assert item["property_ids"] == ["cultivation", "cultivation_stage"]
-    assert [row["scope"] for row in item["records"]] == ["claim", "world", "cognition"]
-    assert item["scopes"] == ["claim", "cognition", "world"]
+    assert [row["scope"] for row in item["records"]] == ["world", "world", "cognition"]
+    assert item["scopes"] == ["cognition", "world"]
     assert item["value"] == "到了元婴初期"
     # 三条都还是有效记录：谁是「当前」由失效标记决定，不由位置推算。
     assert [row["valid"] for row in item["records"]] == [True, True, True]

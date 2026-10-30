@@ -856,16 +856,18 @@ def test_node_properties_keeps_one_line_per_aspect(tmp_path: Path) -> None:
 
     items = ops.property_node_summary("1")["properties"]
 
-    # 一个方面一条线：世界值和老周的说法是同一条时间线上的两条记录，
-    # 作用域是记录上的标签，不是把同一个人拆成两行的理由。
+    # 别人说的不算他的属性：「老周说他深不可测」是老周的说法，记在节点 1 上，
+    # 但显示在老周那一页，不在节点 1 的方面里。
     assert len(items) == 1
     item = items[0]
     assert item["aspect"] == "realm"
-    assert [row["scope"] for row in item["records"]] == ["world", "claim"]
-    assert item["scopes"] == ["claim", "world"]
-    # 当前值仍是披露顺序的最后一条。
-    assert item["value"] == "深不可测"
-    assert item["holder_id"] == "2"
+    assert [row["scope"] for row in item["records"]] == ["world"]
+    assert item["value"] == "灵寂期"
+
+    claims = ops.property_node_summary("2")["claims"]
+    assert [row["property_id"] for row in claims] == ["realm"]
+    assert claims[0]["value"] == "深不可测"
+    assert claims[0]["node_id"] == "1"   # 关于谁
 
 
 CATEGORY_TEXT = "林舟身穿一套黑色西装，脸色铁青。\n"

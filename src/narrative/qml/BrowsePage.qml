@@ -62,6 +62,7 @@ Item {
     property var propertyRows: []      // 扁平列表，「全部」视图用
     property var categoryGroups: []    // 按大类分组
     property var inboundRows: []       // 别的节点指向本节点的记录
+    property var claimRows: []         // 本节点说过的、关于别人的说法
     // 节点资料：一张张资料卡，各有生效/失效时间。它和属性是同一类东西——
     // 「从这一步起成立，到那一步起不成立」——只是没有引文，所以不进属性记录。
     property var material: ({ node_id: "", cut: "", cards: [], hidden_count: 0,
@@ -202,6 +203,7 @@ Item {
         propertyRows = []
         categoryGroups = []
         inboundRows = []
+        claimRows = []
         expandedProps = ({})
         material = ({ node_id: "", cut: "", cards: [], hidden_count: 0,
             moments: { levels: [], nodes: [] } })
@@ -271,6 +273,7 @@ Item {
         propertyRows = []
         categoryGroups = []
         inboundRows = []
+        claimRows = []
         expandedProps = ({})
         appliedCut = page.cutEventId
         material = ({ node_id: "", cut: "", cards: [], hidden_count: 0,
@@ -537,6 +540,7 @@ Item {
         }
         vocabulary = payload.vocabulary || []
         inboundRows = payload.inbound || []
+        claimRows = payload.claims || []
         cutLater = payload.later_count || 0
         categoryGroups = built
         propertyRows = all
@@ -684,6 +688,7 @@ Item {
                 propertyRows = []
                 categoryGroups = []
                 inboundRows = []
+        claimRows = []
                 expandedProps = ({})
                 page.cutId = ""
                 page.cutEventId = ""
@@ -1314,6 +1319,71 @@ Item {
                                                 || page.propertyLabels[modelData.property_id]
                                                 || modelData.property_id) + " = "
                                                 + (modelData.node_type ? "" : "")
+                                                + page.nameOf(modelData.value)
+                                            color: t.body
+                                            font.pixelSize: 11
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                        }
+                                    }
+                                }
+                            }
+                            // 他说的 / 他以为的：这些记录记在**别人**的节点上，但说话的人
+                            // 是他——所以显示在这里，被说的那个人的属性里不出现。
+                            Column {
+                                Layout.fillWidth: true
+                                Layout.topMargin: 6
+                                spacing: 2
+                                visible: claimRows.length > 0
+
+                                RowLayout {
+                                    width: parent.width
+                                    spacing: 6
+                                    Label {
+                                        text: "他说的 / 他以为的"
+                                        color: t.muted
+                                        font.pixelSize: 11
+                                        font.weight: Font.DemiBold
+                                    }
+                                    Label {
+                                        text: claimRows.length
+                                        color: t.muted
+                                        font.pixelSize: 10
+                                    }
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: 1
+                                        color: t.line
+                                    }
+                                }
+                                Repeater {
+                                    objectName: "browseClaimRows"
+                                    model: claimRows
+
+                                    delegate: RowLayout {
+                                        required property var modelData
+                                        width: parent.width
+                                        spacing: 6
+
+                                        Label {
+                                            text: modelData.scope_label
+                                            color: t.muted
+                                            font.pixelSize: 10
+                                            Layout.preferredWidth: 28
+                                        }
+                                        Label {
+                                            text: "关于 " + modelData.node_name
+                                            color: t.accent
+                                            font.pixelSize: 11
+                                            font.underline: true
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: page.jumpTo(modelData.node_id)
+                                            }
+                                        }
+                                        Label {
+                                            text: "· " + modelData.property_label + " = "
                                                 + page.nameOf(modelData.value)
                                             color: t.body
                                             font.pixelSize: 11

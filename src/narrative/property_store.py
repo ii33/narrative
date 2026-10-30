@@ -1274,6 +1274,11 @@ class PropertyStore:
                 continue
             if record.get("node_id") != node_id:
                 continue
+            # 「老周说他到了灵寂期」不是他的属性，是老周的说法：记在被说的节点上，
+            # 但显示在说话的人那里（见下面的 claims）。他自己对自己的认知留着。
+            holder = record.get("holder_id")
+            if (record.get("scope") or "world") != "world" and holder and holder != node_id:
+                continue
             category, category_source = property_categories.resolve(
                 record, node_type, config, overrides
             )
@@ -1483,7 +1488,45 @@ class PropertyStore:
                 "source": record.get("source"),
                 "evidence": record.get("evidence"),
             })
+        # 同一件东西可能有好几条持有者记录（重申、换手后又换回）：只列最新的那条，
+        # 否则「反向引用」里会出现同一个名字三遍。
+        deduped: dict[tuple, dict] = {}
+        for row in inbound:
+            key = (row["node_id"], row["property_id"])
+            deduped[key] = row
+        inbound = list(deduped.values())
         inbound.sort(key=lambda item: (item["category"], item["node_name"], item["property_id"]))
+
+        # 反过来：这个人是**认知者**。他说的、他以为的关于别人的事，记在别人节点上，
+        # 显示在他这里——被说的那个人的页面上不该出现。
+        claims: list[dict] = []
+        for record in records:
+            if record.get("kind") != "property_value" or record.get("id") in invalid:
+                continue
+            if str(record.get("holder_id") or "") != node_id:
+                continue
+            subject = str(record.get("node_id") or "")
+            if not subject or subject == node_id:
+                continue
+            scope = record.get("scope") or "world"
+            if scope == "world":
+                continue
+            raw_name = record.get("property_id")
+            name = aliases.get(raw_name, raw_name) if isinstance(raw_name, str) else ""
+            claims.append({
+                "record_id": record.get("id"),
+                "node_id": subject,
+                "node_name": names.get(subject) or subject,
+                "property_id": name,
+                "property_label": property_labels.label_for(name),
+                "value": record.get("value"),
+                "scope": scope,
+                "scope_label": "声称" if scope == "claim" else "认知",
+                "event_id": record.get("event_id"),
+                "event_name": names.get(record.get("event_id") or ""),
+                "evidence": record.get("evidence"),
+            })
+        claims.sort(key=lambda item: (item["node_name"], item["property_id"]))
 
         return {
             "node_id": node_id,
@@ -1503,6 +1546,7 @@ class PropertyStore:
             ],
             "properties": items,
             "inbound": inbound,
+            "claims": claims,
             "cut": cut,
             "later_count": hidden_total,
         }
