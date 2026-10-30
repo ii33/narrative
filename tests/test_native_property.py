@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
@@ -67,3 +68,48 @@ def test_native_property_candidate_and_state_history(tmp_path) -> None:
         assert {row["id"] for row in query["history"]} == {"key-color", "key-color-initial"}
     finally:
         bridge.close()
+
+
+def test_a_retracted_holder_stops_appearing_on_the_old_owner(tmp_path: Path) -> None:
+    """换手之后，旧持有者的「反向引用」里不该还挂着这件东西。"""
+    from narrative.project_catalog import create_graph_project
+
+    ops = create_graph_project(tmp_path / "holder.nproj")
+    source_id = ops.import_source("第一章", "老周把铜钥匙交给林舟。")
+    revision = ops.graph_project_info()["revision"]
+    quote = {"source_id": source_id, "quote": "老周把铜钥匙交给林舟。"}
+    ops.change_accept(ops.change_propose(
+        [
+            {"kind": "source_order", "id": "o1", "source_id": source_id,
+             "ordinal": 1, "context_id": "canon"},
+            {"kind": "node", "id": "E1", "node_type": "event", "name": "交钥匙",
+             "disclosure": {"source_id": source_id, "start": 0}, "evidence": quote},
+            {"kind": "node", "id": "P1", "node_type": "person", "name": "老周",
+             "disclosure": {"source_id": source_id, "start": 0}},
+            {"kind": "node", "id": "P2", "node_type": "person", "name": "林舟",
+             "disclosure": {"source_id": source_id, "start": 0}},
+            {"kind": "node", "id": "I1", "node_type": "item", "name": "铜钥匙",
+             "disclosure": {"source_id": source_id, "start": 0}},
+        ],
+        [
+            {"kind": "property_definition", "id": "持有者", "value_type": "either",
+             "cardinality": "one", "persistence": "until_changed"},
+            {"kind": "property_value", "id": "v1", "node_id": "I1", "property_id": "持有者",
+             "value": "P1", "event_id": "E1",
+             "disclosure": {"source_id": source_id, "start": 0}, "evidence": quote},
+            {"kind": "property_value", "id": "v2", "node_id": "I1", "property_id": "持有者",
+             "value": "P2", "event_id": "E1",
+             "disclosure": {"source_id": source_id, "start": 6}, "evidence": quote},
+            # 换手：提取侧把「旧持有者失效」和值一起带进来。
+            {"kind": "property_retraction", "id": "r1", "target_id": "v1",
+             "reason": "被后一条披露取代", "event_id": "E1", "basis": "audit",
+             "disclosure": {"source_id": source_id, "start": 6}},
+        ],
+        revision,
+        source="manual",
+    ), 1)
+
+    old_owner = ops.property_node_summary("P1")
+    new_owner = ops.property_node_summary("P2")
+    assert [row["node_name"] for row in old_owner["inbound"]] == []
+    assert [row["node_name"] for row in new_owner["inbound"]] == ["铜钥匙"]

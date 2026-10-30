@@ -1444,6 +1444,9 @@ class PropertyStore:
         for record in records:
             if record.get("kind") != "property_value" or record.get("node_id") == node_id:
                 continue
+            # 失效的记录不再是「谁持有它」：换手之后旧持有者不该还挂在反向上。
+            if record.get("id") in invalid:
+                continue
             # The other end of a relation follows the same reading position: a
             # holder the reader has not met yet must not appear on this page.
             if cut_position is not None and position(record) > cut_position:
