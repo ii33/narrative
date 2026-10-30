@@ -36,6 +36,10 @@ def adapt_request(body: dict, settings) -> dict:
     if settings.reasoning_effort:
         body["reasoning_effort"] = settings.reasoning_effort
     body["model"] = settings.model
+    temperature = getattr(settings, "temperature", None)
+    if temperature is not None:
+        # 运行时不带 temperature，这里补上；配了就用配的，不配就保持供应商默认。
+        body["temperature"] = float(temperature)
     if body.get("stream"):
         body["stream_options"] = {**(body.get("stream_options") or {}), "include_usage": True}
     return body

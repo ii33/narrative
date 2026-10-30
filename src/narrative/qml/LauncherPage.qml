@@ -67,6 +67,8 @@ Item {
         compactionReserveField.text = profile.compaction_reserve || ""
         compactionMaxField.text = profile.compaction_max_tokens || ""
         timeoutField.text = profile.timeout_seconds || ""
+        temperatureField.text = profile.temperature === null
+            || profile.temperature === undefined ? "" : profile.temperature
     }
 
     function applyProviderPreset(index) {
@@ -94,7 +96,10 @@ Item {
             output_reserve: parseInt(outputReserveField.text, 10) || 0,
             compaction_reserve: parseInt(compactionReserveField.text, 10) || 0,
             compaction_max_tokens: parseInt(compactionMaxField.text, 10) || 0,
-            timeout_seconds: parseInt(timeoutField.text, 10) || 0
+            timeout_seconds: parseInt(timeoutField.text, 10) || 0,
+            // 留空 = 用供应商默认；提取建议 0.2，低了同一段原文跑两遍才稳。
+            temperature: temperatureField.text.trim() === ""
+                ? null : parseFloat(temperatureField.text)
         }
     }
 
@@ -509,6 +514,14 @@ Item {
                                 id: timeoutField
                                 Layout.fillWidth: true
                                 inputMethodHints: Qt.ImhDigitsOnly
+                            }
+
+                            Label { text: "温度"; color: t.muted; font.pixelSize: 12 }
+                            TextField {
+                                id: temperatureField
+                                Layout.fillWidth: true
+                                placeholderText: "留空用供应商默认；提取建议 0.2"
+                                inputMethodHints: Qt.ImhFormattedNumbersOnly
                             }
                         }
                     }

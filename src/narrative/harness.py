@@ -33,6 +33,9 @@ class HarnessSettings(Model):
     timeout_seconds: int = Field(default=120, ge=5, le=600)
     key_env: str = "DEEPSEEK_API_KEY"
     token_parameter: str = "max_tokens"
+    # 提取要的是稳定：同一段原文跑两遍不该一个给 43 个方面、一个给 32 个。
+    # 温度压在这里，网关在转发时写进请求体（运行时自己不带这个参数）。
+    temperature: float | None = Field(default=0.2, ge=0, le=2)
 
     @model_validator(mode="before")
     @classmethod
