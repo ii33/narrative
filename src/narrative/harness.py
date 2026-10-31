@@ -25,10 +25,10 @@ class HarnessSettings(Model):
     base_url: str = "https://ark.cn-beijing.volces.com/api/plan/v3"
     model: str = "Doubao-Seed-2.1-pro"
     reasoning_effort: str | None = "low"
-    max_tokens: StrictInt | None = Field(default=131_072, gt=0)
+    max_tokens: StrictInt | None = Field(default=65_536, gt=0)
     context_window: StrictInt = Field(default=1_000_000, gt=0)
-    output_reserve: StrictInt = Field(default=131_072, ge=0)
-    compaction_reserve: StrictInt = Field(default=65_536, ge=0)
+    output_reserve: StrictInt = Field(default=65_536, ge=0)
+    compaction_reserve: StrictInt = Field(default=131_072, ge=0)
     compaction_max_tokens: StrictInt = Field(default=32_768, gt=0)
     timeout_seconds: int = Field(default=120, ge=5, le=600)
     key_env: str = "DEEPSEEK_API_KEY"

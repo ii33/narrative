@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from narrative import assistant, tool_api
+from narrative.operations import Operations
 from narrative.project_catalog import create_graph_project
 
 
@@ -35,11 +36,12 @@ def _script(*replies: dict):
     return ask
 
 
-def test_the_catalog_is_read_only_and_comes_from_the_tool_table() -> None:
+def test_catalog_allows_only_slice_creation_in_addition_to_reads() -> None:
     names = [tool["name"] for tool in assistant.tool_catalog()]
     assert "list_nodes" in names
     # 写操作一个都不在里面：协作者不能改图。
-    assert all(not tool_api.TOOLS[name].writes for name in names)
+    assert {name for name in names if tool_api.TOOLS[name].writes} == {"create_source_slices"}
+    assert {"list_source_slices", "read_source_slice"} <= set(names)
 
 
 def test_a_turn_can_call_a_tool_and_then_answer(tmp_path: Path) -> None:
@@ -155,3 +157,39 @@ def test_the_loop_stops_at_the_step_limit(tmp_path: Path) -> None:
     )
     assert len(result["steps"]) == 3
     assert "停在这里" in result["answer"]
+
+
+def test_assistant_reads_then_creates_and_previews_source_slices(tmp_path: Path) -> None:
+    project = _project(tmp_path / "slices.nproj")
+    ops = Operations.open(project)
+    text = "第一章\n甲😀走进房间。\n第二章\n乙离开。"
+    source_id = ops.import_source("章节", text)
+    boundary = text.index("第二章")
+    prompts = []
+    round_index = 0
+
+    def ask(instruction):
+        nonlocal round_index
+        prompts.append(instruction)
+        replies = [
+            {"tool": "read_source", "args": {"source_id": source_id}},
+            {"tool": "list_source_slices", "args": {"source_id": source_id}},
+            {"tool": "create_source_slices", "args": {"source_id": source_id, "slices": [
+                {"title": "第一章", "start": 0, "end": boundary},
+                {"title": "第二章", "start": boundary, "end": len(text)},
+            ]}},
+            {"answer": "已按章节创建两个切片。"},
+        ]
+        reply = replies[round_index]
+        round_index += 1
+        return json.dumps(reply, ensure_ascii=False)
+
+    result = assistant.run_turn(ask, "按章节切片", project=project)
+    assert all(step["ok"] for step in result["steps"])
+    assert "没有任何写工具" not in prompts[0]
+    assert "Unicode codepoint" in prompts[0]
+    slices = tool_api.call("list_source_slices", {"source_id": source_id}, project=project)["slices"]
+    assert len(slices) == 2
+    preview = tool_api.call("read_source_slice", {"source_id": source_id, "slice_id": slices[0]["id"]}, project=project)
+    assert preview["text"] == text[:boundary]
+    assert Operations.open(project).source(source_id)["text"] == text

@@ -3,8 +3,8 @@
 harness 不开原生工具调用（运行时的 profile 只暴露 `read_image`/`working_directory`），
 所以这里沿用同一种桥接：模型每轮回一个 JSON——要么调工具，要么给答案。
 
-工具表直接取自 `tool_api`，而且**只放读操作**：协作者能看、能解释、能对照，
-但不能改图。改图仍然是人的动作（接受候选、删除记录、改资料卡）。
+工具表直接取自 `tool_api`，开放读取和原文切片创建：协作者能看、能解释、能对照，
+但不能改图中的事实。改图仍然是人的动作（接受候选、删除记录、改资料卡）。
 """
 
 from __future__ import annotations
@@ -36,11 +36,18 @@ READ_TOOLS = (
     "search",
     "list_sources",
     "read_source",
+    "list_source_slices",
+    "read_source_slice",
     "property_categories",
     "node_material",
     "audit_properties",
     "list_candidates",
 )
+
+
+# 原文切片是浏览索引，不修改原文或图中事实。
+SLICE_TOOLS = ("create_source_slices",)
+ASSISTANT_TOOLS = READ_TOOLS + SLICE_TOOLS
 
 
 def tool_catalog() -> list[dict]:
@@ -51,7 +58,7 @@ def tool_catalog() -> list[dict]:
             "description": tool_api.TOOLS[name].summary,
             "parameters": tool_api.TOOLS[name].schema(),
         }
-        for name in READ_TOOLS
+        for name in ASSISTANT_TOOLS
         if name in tool_api.TOOLS
     ]
 
@@ -87,7 +94,7 @@ def _first_prompt(message: str, image: str = "") -> str:
         "先看图再回答，不要说自己看不到图，也不要试图用工具去找它。）"
         if image else ""
     )
-    return f"""你是这个叙事图工程的协作者。你只能读，不能改：没有任何写工具，也不要假装改过。
+    return f"""你是这个叙事图工程的协作者。你可以读取工程，并在用户要求切分原文时创建切片；不能修改原文、节点、属性或审核候选，也不要假装改过。
 
 可用工具（`?` 表示可选参数）：
 {_catalog_lines()}
@@ -106,6 +113,12 @@ def _first_prompt(message: str, image: str = "") -> str:
    不要把全部场景列一遍；回答时说明你用的是什么判据。
 6. 回答用中文，简短。可以用 Markdown（`-` 列表、**粗体**、`代码`、`>` 引用），
    不要用 HTML 表格或复杂排版——面板按 Markdown 渲染。
+
+7. 用户要求切片时，先 list_sources、read_source 阅读原文，按章节、场景或语义分析边界；
+   用 list_source_slices 检查已有切片，再 create_source_slices 一次批量提交。
+   start/end 是原文从 0 开始的 Python Unicode codepoint 位置，end 不包含在内；
+   read_source 的 start 也是同一坐标。不要把分段后的字符串位置当原文位置，不按固定字数机械切分。
+   切片只是原文浏览索引，不能据此声称已经提取或修改了图中事实。
 
 用户说：{message}{image_note}"""
 
@@ -150,8 +163,10 @@ def _summary(name: str, result: dict) -> str:
         return f"{node.get('label_id') or node.get('id')} {node.get('name') or ''}".strip()
     if name in {"scene_state", "event_state"}:
         return f"{len(result.get('state') or [])} 个节点有状态"
-    if name == "read_source":
+    if name in {"read_source", "read_source_slice"}:
         return f"{len(str(result.get('text') or ''))} 字"
+    if name in {"list_source_slices", "create_source_slices"}:
+        return f"{len(result.get('slices') or [])} 个切片"
     if name == "statistics":
         return f"{result.get('node_total')} 个节点"
     if name == "list_sources":
@@ -172,12 +187,12 @@ def _observation(step: dict) -> str:
 
 
 def _call(project: str | Path, name: str, args: dict) -> dict:
-    if name not in READ_TOOLS:
+    if name not in ASSISTANT_TOOLS:
         return {
             "tool": name,
             "args": args,
             "ok": False,
-            "error": f"「{name}」不在协作者能用的范围里（只能读）",
+            "error": f"「{name}」不在协作者能用的范围里（图中事实只能读；仅允许额外创建原文切片）",
         }
     try:
         result = tool_api.call(name, args, project=project)

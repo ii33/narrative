@@ -12,8 +12,8 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from uuid import uuid4
 
+from .extraction_session import open_extraction_session
 from .harness import HarnessReply, HarnessRunner, HarnessSettings
 from .order_ids import allocate, order_key, prefix_for
 from .property_categories import aspect_of
@@ -21,7 +21,7 @@ from .property_labels import STORYLINE_PROGRESS
 from .property_store import record_position
 
 # 提示词改一次，这个号跟着动；缓存的提取结果里会写下来，便于对照。
-PROMPT_VERSION = "extract/20"
+PROMPT_VERSION = "extract/21"
 
 NODE_TYPES = ("person", "group", "item", "location", "scene", "event", "storyline")
 
@@ -628,16 +628,18 @@ def read_chapter(
     api_key: str,
     workdir: Path,
     ops=None,
+    prior: dict | None = None,
+    source_id: str = "",
 ) -> dict:
     """第一轮：整章读。不带库里的旧值，只认原文。
 
     返回校验过的提议（节点、属性、被丢弃的引文）。原始响应和元数据落在
     `workdir` 里，随时可以回看模型到底说了什么。
     """
-    runner = HarnessRunner(settings, api_key, workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
     known = known_properties(ops) if ops is not None else None
     context = graph_context(ops) if ops is not None else ""
-    session = f"extract-{uuid4().hex}"
+    runner, session = open_extraction_session(ops, settings, api_key, workdir, HarnessRunner)
     raws: list[str] = []
 
     def _check(reply: HarnessReply) -> None:
@@ -648,25 +650,24 @@ def read_chapter(
         raise ValueError(f"模型没有返回内容：{problem or '空回复'}")
 
     try:
-        reply: HarnessReply = runner.agent_turn(
-            build_prompt(title, text, known, context), session
-        )
-        raws.append(reply.raw)
-        _check(reply)
-        # 先落盘再解析：解析失败时，磁盘上留着的必须是**这次**的回复。
-        (workdir / "raw.txt").write_text(reply.raw, encoding="utf-8")
-        try:
-            result = parse_nodes(reply.raw, text)
-        except ValueError:
-            # 一次重试：让它把完整的 JSON 再输出一遍，别把整章丢掉。
-            reply = runner.agent_turn(
-                "上一条回复不是完整的 JSON（可能被截断或混了说明）。"
-                "请重新输出那个 JSON 对象：只输出 JSON，不要解释，不要代码块。",
-                session,
+        instruction = build_prompt(title, text, known, context)
+        if source_id:
+            instruction += "\n当前原文ID：" + source_id
+        if prior is not None:
+            instruction += (
+                "\n本轮是查漏补缺复核。重新核对原文与下列既有提取，找出遗漏的节点、事件、属性与关系。"
+                "已有合法项保留，新增项必须逐字引用本段原文；不要仅回答差异，返回完整提取JSON。"
+                "引文定位坐标以当前文本为准。\n既有提取：\n"
+                + json.dumps(prior, ensure_ascii=False)
             )
-            raws.append(reply.raw)
-            _check(reply)
-            result = parse_nodes(reply.raw, text)
+        reply: HarnessReply = runner.agent_turn(instruction, session)
+        raws.append(reply.raw)
+        (workdir / "raw.txt").write_text(reply.raw, encoding="utf-8")
+        (workdir / "metadata.json").write_text(
+            json.dumps(reply.metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        _check(reply)
+        result = parse_nodes(reply.raw, text)
     finally:
         runner.close()
     workdir.mkdir(parents=True, exist_ok=True)
@@ -685,6 +686,7 @@ def read_chapter(
         "model": settings.model,
         "provider": settings.provider,
         "usage": reply.metadata,
+        "session_id": session,
         "raw": reply.raw,
     })
     return result
@@ -722,6 +724,7 @@ def review_chapter(
         }
         return result
     result = dict(data)
+    result["session_id"] = reviewed["session_id"]
     result["properties"] = reviewed["properties"]
     # 旧值是不是真的失效，要等 `build_candidate` 把它们解析成记录和事件；
     # 解析不出来的会被丢掉。
@@ -748,6 +751,7 @@ def extract_chapter(
     api_key: str,
     workdir: Path,
     ops=None,
+    source_id: str = "",
 ) -> dict:
     """一轮读完再加对照：`read_chapter` + `review_chapter` 的组合。
 
@@ -755,8 +759,11 @@ def extract_chapter(
     同一对函数，不会各说一套。
     """
     result = read_chapter(
-        title, text, settings=settings, api_key=api_key, workdir=workdir, ops=ops
+        title, text, settings=settings, api_key=api_key, workdir=workdir, ops=ops,
+        source_id=source_id,
     )
+    if source_id:
+        result["source_id"] = source_id
     if ops is None:
         return result
     return review_chapter(

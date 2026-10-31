@@ -119,7 +119,7 @@ def test_a_node_with_more_relations_gets_a_bigger_circle(page) -> None:
     hub = _value(view.radiusOf(_person("P1", "林舟")))
     leaf = _value(view.radiusOf(_person("P3", "老周")))
     assert hub > leaf
-    # 名字长度不该影响圈的大小：放不下就写到圈外，不然「店员小姐」零关系比枢纽还大。
+    # Long names wrap and scale inside the circle without changing its size.
     assert _value(view.radiusOf(_person("P3", "名字特别长的一个人"))) == leaf
     # 没有关系的节点是最小的那一档，但不能没有。
     assert leaf >= 13
@@ -204,3 +204,20 @@ def test_the_graph_can_stop_at_a_reading_position(page) -> None:
     view.chooseCut("S2", "第二场")
     assert view.property("cutId") == "S2"
     assert view.property("cutName") == "第二场"
+
+
+@pytest.mark.parametrize("name", [
+    "A", "Alexander Montgomery", "VeryLongNameWithoutSpaces" * 8,
+    "\u6b27\u9633\u7279\u522b\u957f\u7684\u4e00\u4e2a\u540d\u5b57", "Name\nSecond line", "\U0001f600\U0001f680Long name",
+])
+@pytest.mark.parametrize("radius", [13, 24, 44])
+def test_complete_node_name_fits_inside_circle(page, name, radius) -> None:
+    _app, view = page
+    label = _value(view.nodeLabel(name, radius))
+    assert "".join(label["lines"]) == name.replace("\n", "")
+    assert label["fontSize"] > 0
+    assert label["fontSize"] <= 12
+    assert max(label["widths"]) <= label["room"]
+    assert len(label["lines"]) * label["lineHeight"] <= label["room"]
+    # The bounding square, including its corners, stays inside the circle.
+    assert label["room"] ** 2 / 2 < radius ** 2

@@ -9,14 +9,14 @@ but the default is two.
 from __future__ import annotations
 
 import json
-from uuid import uuid4
 
 from .extraction import _payload
+from .extraction_session import IncompleteExtraction, open_extraction_session
 from .graph_operations import GraphOperations
 from .harness import HarnessRunner, HarnessSettings
 
 MAX_ROUNDS = 4
-REVIEW_VERSION = "review/8"
+REVIEW_VERSION = "review/9"
 
 REVIEW_PROMPT = """你在为一部小说的属性记录做去重。
 
@@ -316,15 +316,7 @@ def _turn(runner, session: str, instruction: str, ops, rounds: list[int]) -> dic
     while rounds[0] < MAX_ROUNDS:
         rounds[0] += 1
         reply = runner.agent_turn(instruction, session)
-        try:
-            payload = _payload(reply.raw)
-        except ValueError:
-            # 偶尔它会把 JSON 写成一段说明。追问一次；再不行就当这一轮没答。
-            rounds[0] += 1
-            if rounds[0] >= MAX_ROUNDS:
-                raise
-            reply = runner.agent_turn(NO_JSON_PROMPT, session)
-            payload = _payload(reply.raw)
+        payload = _payload(reply.raw)
         need = payload.get("need")
         if not need:
             return payload
@@ -354,6 +346,8 @@ def _repair_anchors(runner, session, items, events, ops, rounds) -> list[dict]:
     )
     try:
         payload = _turn(runner, session, instruction, ops, rounds)
+    except IncompleteExtraction:
+        raise
     except ValueError:
         return items
     fixed = payload.get("supersede")
@@ -431,6 +425,8 @@ def _relation_round(
     try:
         reply = runner.agent_turn(instruction, session)
         payload = _payload(reply.raw)
+    except IncompleteExtraction:
+        raise
     except ValueError:
         return [], []
     rows = payload.get("relations")
@@ -509,6 +505,7 @@ def review_properties(
     """
     stored = _stored_values(ops, data)
     source = ops.source(str(data.get("source_id") or "")) if data.get("source_id") else {}
+    review_text = data.get("slice_text") if "slice_text" in data else source.get("text")
     events = [
         str(node.get("name"))
         for node in (data.get("nodes") or [])
@@ -517,10 +514,9 @@ def review_properties(
     instruction = REVIEW_PROMPT.format(
         proposed=_format_proposed(data), stored=_format_stored(stored),
         events="\n".join(f"- {name}" for name in events) or "（本章没有事件）",
-        text=source.get("text") or "（拿不到本章原文）",
+        text=review_text or "（拿不到本章原文）",
     )
-    runner = HarnessRunner(settings, api_key, workdir)
-    session = f"review-{uuid4().hex}"
+    runner, session = open_extraction_session(ops, settings, api_key, workdir, HarnessRunner)
     rounds = [0]
     try:
         payload = _turn(runner, session, instruction, ops, rounds)
@@ -534,6 +530,8 @@ def review_properties(
                 payload = _turn(
                     runner, session, UNSURE_PROMPT.format(context=context), ops, rounds
                 )
+            except IncompleteExtraction:
+                raise
             except ValueError:
                 # 终判没拿到：那几条按「拿不准」留着，不连累本章其他内容。
                 payload = {}
@@ -543,8 +541,8 @@ def review_properties(
             unsure = list(payload.get("unsure") or []) if payload else unsure
         supersede = _repair_anchors(runner, session, supersede, events, ops, rounds)
         related, retire = _relation_round(
-            runner, f"relation-{uuid4().hex}", data, keep, events, ops, rounds,
-            text=source.get("text") or "",
+            runner, session, data, keep, events, ops, rounds,
+            text=review_text or "",
         )
         keep += related
         result = _apply(
@@ -552,6 +550,7 @@ def review_properties(
         )
         # 关系变了：模型点名了要撤哪条记录，跟着这一批一起落。
         result["retire"] = retire
+        result["session_id"] = session
         return result
     finally:
         runner.close()

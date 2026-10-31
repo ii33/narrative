@@ -176,7 +176,8 @@ class NativeBridge(QObject):
         stale = [
             (request_id, request)
             for request_id, request in self._requests.items()
-            if now - request[4] > self.STALE_AFTER_SECONDS
+            if request[0] != "slice_extraction_action"
+            and now - request[4] > self.STALE_AFTER_SECONDS
         ]
         if not stale:
             return
@@ -1260,6 +1261,7 @@ class NativeBridge(QObject):
                 source["title"], source["text"],
                 settings=settings, api_key=api_key,
                 workdir=directory / source_id / "sdk", ops=ops,
+                source_id=source_id,
             )
             data.pop("raw", None)
             data["source_id"] = source_id
@@ -1371,10 +1373,10 @@ class NativeBridge(QObject):
 
     @Slot(str, str)
     def assistantTurn(self, text: str, image_path: str = "") -> None:
-        """协作者的一轮：模型可以连着调几次读工具，最后给答案。
+        """Run an assistant turn with the tools in assistant.ASSISTANT_TOOLS.
 
-        它只能读——工具白名单在 `assistant.READ_TOOLS`，写操作调不到。改图仍然是
-        人的动作。对话记在当前会话里：重开窗口还在。
+        Source slice creation is its only write capability; graph edits still
+        follow the existing candidate review workflow. Chats persist on disk.
         """
         from .assistant import run_turn
 
@@ -1583,7 +1585,7 @@ class NativeBridge(QObject):
 
     @Slot(str)
     def sourceText(self, source_id: str) -> None:
-        self._project_task("source", lambda ops: {"source": ops.source(source_id)})
+        self._project_task("source", lambda ops: {"source_id": source_id, "source": ops.source(source_id)})
 
     @Slot(str, str)
     def importSource(self, title: str, text: str) -> None:
@@ -1596,13 +1598,99 @@ class NativeBridge(QObject):
     @Slot(str, str)
     def importSourceFile(self, title: str, file_path: str) -> None:
         def work(ops) -> dict:
-            path = Path(file_path)
-            if not path.is_file() or path.stat().st_size > 10_000_000:
-                raise ValueError("原文文件不存在或超过 10 MB")
-            source_id = ops.import_source(title or path.stem, path.read_text(encoding="utf-8-sig"))
+            source_id = ops.import_source_file(self.urlToPath(file_path), title=title)
             return {"source_id": source_id, "sources": ops.sources(), "revision": ops.graph_project_info()["revision"]}
 
         self._project_task("source_imported", work)
+
+    @Slot(str)
+    def loadSourceSlices(self, source_id: str) -> None:
+        self._project_task(
+            "source_slices",
+            lambda ops: {"source_id": source_id, "items": ops.source_slices(source_id)},
+        )
+
+    @Slot(str, str)
+    def sourceSlice(self, source_id: str, slice_id: str) -> None:
+        self._project_task(
+            "source_slice",
+            lambda ops: {"source_id": source_id, "slice": ops.source_slice(source_id, slice_id)},
+        )
+
+    @Slot(str, str)
+    def loadSliceExtraction(self, source_id: str, slice_id: str) -> None:
+        def work(ops) -> dict:
+            target = self._source_extraction_target(ops, source_id, slice_id)
+            if not target:
+                return {"source_id": source_id, "slice_id": slice_id, "missing": True,
+                        "nodes": [], "properties": [], "round": 0}
+            return ops.load_slice_extraction(source_id, target) | {
+                "slice_id": slice_id, "target_slice_id": target,
+            }
+
+        self._project_task(
+            "slice_extraction",
+            work,
+        )
+
+    @staticmethod
+    def _source_extraction_target(ops, source_id: str, slice_id: str, *, create=False) -> str:
+        if slice_id:
+            return slice_id
+        source = ops.source(source_id)
+        for part in ops.source_slices(source_id):
+            if part["start"] == 0 and part["end"] == len(source["text"]):
+                return part["id"]
+        if not create:
+            return ""
+        # An explicit whole-file extraction is one range, not automatic segmentation.
+        title = source["title"] + "（全文）"
+        parts = ops.create_source_slices(source_id, [
+            {"title": title, "start": 0, "end": len(source["text"])},
+        ])
+        return next(part["id"] for part in parts
+                    if part["title"] == title and part["start"] == 0
+                    and part["end"] == len(source["text"]))
+
+    def _slice_extraction_action(self, source_id: str, slice_id: str, action: str) -> None:
+        # A model turn has its own configured timeout; it must not be discarded
+        # by the ten-second deadline used for ordinary UI reads.
+        if any(kind == "slice_extraction_action" and epoch == self._epoch
+               for kind, epoch, _apply, _query, _started in self._requests.values()):
+            return
+
+        def work(ops) -> dict:
+            target = self._source_extraction_target(
+                ops, source_id, slice_id, create=action == "extract",
+            )
+            if not target:
+                raise ValueError("当前原文尚未提取，请先提取再复核或送审")
+            if action == "commit":
+                result = ops.commit_slice_extraction(source_id, target)
+                return {"source_id": source_id, "slice_id": slice_id,
+                        "action": action, "commit": result}
+            data = ops.extract_slice(source_id, target, review=action == "review")
+            return {"source_id": source_id, "slice_id": slice_id,
+                    "action": action, "extraction": data}
+
+        self._project_task("slice_extraction_action", work)
+        if any(kind == "slice_extraction_action" and epoch == self._epoch
+               for kind, epoch, _apply, _query, _started in self._requests.values()):
+            self.resultReady.emit("slice_extraction_status", {
+                "source_id": source_id, "slice_id": slice_id, "action": action, "busy": True,
+            })
+
+    @Slot(str, str)
+    def startSliceExtraction(self, source_id: str, slice_id: str) -> None:
+        self._slice_extraction_action(source_id, slice_id, "extract")
+
+    @Slot(str, str)
+    def reviewSliceExtraction(self, source_id: str, slice_id: str) -> None:
+        self._slice_extraction_action(source_id, slice_id, "review")
+
+    @Slot(str, str)
+    def commitSliceExtraction(self, source_id: str, slice_id: str) -> None:
+        self._slice_extraction_action(source_id, slice_id, "commit")
 
     @Slot()
     def loadProviderProfile(self) -> None:

@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
+import QtQuick.Window
 
 // 数据浏览：左侧分类，中间节点列表（按阅读顺序排，编号按类型各成一套），右侧详情 + 属性。
 Item {
@@ -2035,26 +2036,48 @@ Item {
     }
 
     // 点缩略图看大图：图原样铺开，说明在下面。
-    Dialog {
+    Window {
         id: imagePreview
         objectName: "materialImagePreview"
-        modal: true
-        anchors.centerIn: parent
-        width: Math.min(880, (page.width || 900) - 120)
-        height: Math.min(720, (page.height || 800) - 80)
-        padding: 0
+        visible: false
+        transientParent: page.Window.window
+        flags: Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint
+            | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint
+        modality: Qt.NonModal
+        title: caption ? "图片预览 · " + caption : "图片预览"
+        color: page.t.card
+        width: 880
+        height: 720
+        minimumWidth: 480
+        minimumHeight: 280
 
         property string source: ""
         property string caption: ""
+        property bool positioned: false
 
-        contentItem: ColumnLayout {
+        function open() {
+            if (!positioned && transientParent) {
+                x = transientParent.x + (transientParent.width - width) / 2
+                y = transientParent.y + (transientParent.height - height) / 2
+                positioned = true
+            }
+            if (visibility === Window.Minimized) showNormal()
+            visible = true
+            previewViewer.resetView()
+            raise()
+            requestActivate()
+        }
+
+        Shortcut { sequence: "Escape"; onActivated: imagePreview.close() }
+
+        ColumnLayout {
+            anchors.fill: parent
             spacing: 6
-            Image {
+            ZoomImage {
+                id: previewViewer
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 source: imagePreview.source
-                fillMode: Image.PreserveAspectFit
-                asynchronous: true
             }
             RowLayout {
                 Layout.fillWidth: true
@@ -2066,12 +2089,38 @@ Item {
                     font.pixelSize: 11
                     wrapMode: Text.Wrap
                 }
+                Label {
+                    text: Math.round(previewViewer.zoom * 100) + "%"
+                    color: t.muted
+                    font.pixelSize: 11
+                }
+                Button {
+                    objectName: "materialImageZoomOut"
+                    text: "−"
+                    flat: true
+                    onClicked: previewViewer.zoomAt(previewViewer.width / 2,
+                        previewViewer.height / 2, 1 / 1.2)
+                }
+                Button {
+                    objectName: "materialImageZoomIn"
+                    text: "+"
+                    flat: true
+                    onClicked: previewViewer.zoomAt(previewViewer.width / 2,
+                        previewViewer.height / 2, 1.2)
+                }
+                Button {
+                    objectName: "materialImageZoomReset"
+                    text: "复位"
+                    flat: true
+                    onClicked: previewViewer.resetView()
+                }
                 Button {
                     objectName: "materialImagePreviewClose"
                     text: "关闭"
                     flat: true
                     onClicked: imagePreview.close()
                 }
+
             }
         }
     }

@@ -3,7 +3,7 @@ import QtQuick.Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
 
-// 常驻协作者：只能读。问它图里的事，它自己调读工具，把用到的工具一行行摆出来。
+// 常驻协作者：读取图中事实，可分析原文并批量创建浏览切片。
 // 面板不参与改图——接受候选、删除记录、改资料卡仍然是人在这里做。
 Rectangle {
     id: panel
@@ -137,7 +137,7 @@ Rectangle {
                 font.weight: Font.DemiBold
             }
             Label {
-                text: "只读"
+                text: "可整理原文"
                 color: t.muted
                 font.pixelSize: 10
             }

@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtQuick import QQuickWindow
 from PySide6.QtWidgets import QApplication
 
 from narrative.native_app import QML_PATH
@@ -298,6 +299,42 @@ def test_clicking_a_picture_opens_a_preview(workspace) -> None:
     assert preview.property("visible") is True
     assert preview.property("caption") == "正面"
     assert str(preview.property("source")).startswith("file:///")
+
+    viewer = page.findChild(object, "zoomImageViewer")
+    assert viewer is not None
+    viewer.zoomAt(180, 120, 2)
+    assert viewer.property("zoom") == 2
+    before_x, before_y = viewer.property("panX"), viewer.property("panY")
+    viewer.panBy(32, -18)
+    assert viewer.property("panX") == before_x + 32
+    assert viewer.property("panY") == before_y - 18
+    viewer.zoomAt(180, 120, 100)
+    assert viewer.property("zoom") == 16
+    viewer.resetView()
+    assert viewer.property("zoom") == 1
+    assert viewer.property("panX") == viewer.property("panY") == 0
+
+    assert isinstance(preview, QQuickWindow)
+    assert preview is not page.window()
+    assert viewer.window() is preview
+    assert preview.transientParent() is page.window()
+    assert preview.modality() == Qt.WindowModality.NonModal
+    assert not preview.flags() & Qt.WindowType.FramelessWindowHint
+    assert preview.flags() & Qt.WindowType.WindowMaximizeButtonHint
+    assert preview.minimumWidth() == 480 and preview.minimumHeight() == 280
+    preview.setPosition(preview.x() + 40, preview.y() + 30)
+    position = preview.position()
+    preview.resize(1040, 760)
+    app.processEvents()
+    assert preview.width() == 1040 and preview.height() == 760
+    assert preview.position() == position  # Resizing does not recenter the window.
+    assert viewer.width() == preview.width() and 0 < viewer.height() < preview.height()
+    preview.close()
+    assert not preview.isVisible()
+    page.previewImage({"path": "C:/x.png", "caption": "Reopened"})
+    app.processEvents()
+    assert preview.isVisible() and preview.position() == position
+    assert preview.width() == 1040
 
 
 def test_cards_belong_to_the_node_not_the_page(workspace) -> None:

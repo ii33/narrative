@@ -184,12 +184,59 @@ Item {
         return count
     }
 
-    // 半径**只看关系条数**：按面积算，所以取平方根。
-    // 之前把「名字要多宽」也算进半径，结果名字长的零关系节点比名字短的枢纽还大——
-    // 大小成了名字长度的函数，关系多少反而看不出来。名字放不下就写到圈外，不撑大圈。
+    // 圆的大小只由关系数量决定；名称在圆内换行、缩放，不参与半径计算。
     function radiusOf(person) {
         var degree = page.degreeOf(person.id)
         return Math.max(13, Math.min(44, 13 + 5.2 * Math.sqrt(degree)))
+    }
+
+    FontMetrics {
+        id: nodeFontMetrics
+        font.family: "sans-serif"
+        font.pixelSize: 12
+    }
+
+    // 在圆的内接正方形中排完整名称，四角也不会越出圆边。
+    function nodeLabel(name, radius) {
+        var room = Math.max(1, (radius - 3) * Math.SQRT2)
+        var characters = Array.from(String(name || ""))
+        var size = 12
+        var rows, widths, row, rowWidth
+        while (true) {
+            rows = []
+            widths = []
+            row = ""
+            rowWidth = 0
+            for (var i = 0; i < characters.length; ++i) {
+                var character = characters[i]
+                if (character === "\n") {
+                    rows.push(row)
+                    widths.push(rowWidth)
+                    row = ""
+                    rowWidth = 0
+                    continue
+                }
+                var trial = row + character
+                var trialWidth = nodeFontMetrics.advanceWidth(trial) * size / 12
+                if (row.length > 0 && trialWidth > room) {
+                    rows.push(row)
+                    widths.push(rowWidth)
+                    row = character
+                    rowWidth = nodeFontMetrics.advanceWidth(character) * size / 12
+                } else {
+                    row = trial
+                    rowWidth = trialWidth
+                }
+            }
+            rows.push(row)
+            widths.push(rowWidth)
+            var lineHeight = Math.max(nodeFontMetrics.height, 12) * size / 12
+            if (rows.length * lineHeight <= room
+                && Math.max.apply(null, widths) <= room)
+                return { lines: rows, widths: widths, fontSize: size,
+                         lineHeight: lineHeight, room: room }
+            size *= 0.9
+        }
     }
 
     ColumnLayout {
@@ -439,21 +486,19 @@ Item {
                     ctx.stroke()
                     ctx.fillStyle = page.ink
                     ctx.textAlign = "center"
+                    var label = page.nodeLabel(person.name, spot.r)
+                    // 用画布缩放保留小数字号，避免字体解析时取整后越界。
+                    ctx.save()
+                    ctx.translate(spot.x, spot.y)
+                    var textScale = label.fontSize / 12
+                    ctx.scale(textScale, textScale)
                     ctx.font = "12px sans-serif"
-                    var room = spot.r * 2 - 8
-                    if (ctx.measureText(person.name).width <= room) {
-                        ctx.fillText(person.name, spot.x, spot.y + 4)
-                    } else {
-                        // 圈里放不下就写在圈下面：圈的大小是关系数说了算，不是名字。
-                        // 带白底，免得压在关系线上读不清。
-                        ctx.font = "11px sans-serif"
-                        var w = ctx.measureText(person.name).width
-                        var ly = spot.y + spot.r + 13
-                        ctx.fillStyle = "#ffffff"
-                        ctx.fillRect(spot.x - w / 2 - 3, ly - 9, w + 6, 13)
-                        ctx.fillStyle = page.ink
-                        ctx.fillText(person.name, spot.x, ly)
+                    ctx.textBaseline = "middle"
+                    for (var row = 0; row < label.lines.length; ++row) {
+                        var y = (row - (label.lines.length - 1) / 2) * label.lineHeight / textScale
+                        ctx.fillText(label.lines[row], 0, y)
                     }
+                    ctx.restore()
                     ctx.textAlign = "left"
                 }
             }

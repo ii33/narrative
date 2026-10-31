@@ -128,3 +128,38 @@ def _delegation_target(method: str) -> tuple[str, str]:
 def test_compatibility_methods_are_thin_delegations(method: str) -> None:
     facade, name = _delegation_target(method)
     assert facade and name
+
+
+@pytest.mark.parametrize("facade_class,domain", [
+    (graph_facades.GraphReviewFacade, "graph"),
+    (graph_facades.GraphPropertyFacade, "property"),
+    (graph_facades.GraphChangeFacade, "change"),
+])
+def test_review_facades_notify_only_after_successful_business_actions(facade_class, domain):
+    class Service:
+        failing = False
+
+        def accept(self, candidate_id, version):
+            if self.failing:
+                raise ValueError("precheck failed")
+            return 7
+
+        def reject(self, candidate_id, version):
+            if self.failing:
+                raise ValueError("stale candidate")
+
+    service, actions = Service(), []
+    facade = facade_class(service, review_callback=lambda *args: actions.append(args))
+    assert facade.accept("candidate", 2) == 7
+    facade.reject("other", 3)
+    assert actions == [(domain + "_accept", "candidate", 2, 7),
+                       (domain + "_reject", "other", 3, None)]
+    service.failing = True
+    with pytest.raises(ValueError):
+        facade.accept("failed", 1)
+    with pytest.raises(ValueError):
+        facade.reject("failed", 1)
+    assert len(actions) == 2
+    # Existing callers may still construct a facade with its service alone.
+    service.failing = False
+    assert facade_class(service).accept("plain", 1) == 7

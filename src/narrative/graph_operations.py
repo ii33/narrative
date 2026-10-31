@@ -51,9 +51,9 @@ class GraphOperations:
         self._graphrag = GraphRagService(self._store, self._service)
 
         self.project = GraphProjectFacade(self._store, self._service, self._read)
-        self.review = GraphReviewFacade(self._service)
-        self.properties = GraphPropertyFacade(self._properties)
-        self.changes = GraphChangeFacade(self._changes)
+        self.review = GraphReviewFacade(self._service, review_callback=self._record_extraction_review)
+        self.properties = GraphPropertyFacade(self._properties, review_callback=self._record_extraction_review)
+        self.changes = GraphChangeFacade(self._changes, review_callback=self._record_extraction_review)
         self.query = GraphQueryFacade(self._read, self._timeline)
         self.profiles = GraphProfileFacade(self._profile)
         self.graphrag = GraphRagFacade(self._graphrag)
@@ -67,6 +67,41 @@ class GraphOperations:
 
     def import_source(self, title: str, text: str) -> str:
         return self.project.import_source(title, text)
+
+    def import_source_file(self, file_path: str | Path, title: str = "") -> str:
+        from .source_documents import read_source_file
+
+        return self.import_source(title or Path(file_path).stem, read_source_file(file_path))
+
+    def source_slices(self, source_id: str) -> list[dict]:
+        from .source_slices import SourceSlices
+
+        return SourceSlices(self._store).list(source_id)
+
+    def create_source_slices(self, source_id: str, slices: list[dict]) -> list[dict]:
+        from .source_slices import SourceSlices
+
+        return SourceSlices(self._store).create(source_id, slices)
+
+    def source_slice(self, source_id: str, slice_id: str) -> dict:
+        from .source_slices import SourceSlices
+
+        return SourceSlices(self._store).get(source_id, slice_id)
+
+    def load_slice_extraction(self, source_id: str, slice_id: str) -> dict:
+        from .slice_extraction import load
+
+        return load(self, source_id, slice_id)
+
+    def extract_slice(self, source_id: str, slice_id: str, *, review: bool = False) -> dict:
+        from .slice_extraction import extract
+
+        return extract(self, source_id, slice_id, review=review)
+
+    def commit_slice_extraction(self, source_id: str, slice_id: str, *, review: str = "doubtful") -> dict:
+        from .slice_extraction import commit
+
+        return commit(self, source_id, slice_id, review=review)
 
     def sources(self) -> list[dict]:
         return self.project.sources()
@@ -580,6 +615,13 @@ class GraphOperations:
 
     def change_reject(self, candidate_id: str, version: int) -> None:
         self.changes.reject(candidate_id, version)
+
+    def _record_extraction_review(self, action: str, candidate_id: str, version: int,
+                                  revision: int | None = None) -> None:
+        from .extraction_session import record_review_action
+
+        record_review_action(self, {"action": action, "candidate_id": candidate_id,
+                                    "version": version, "revision": revision})
 
     # -- model profiles --------------------------------------------------
     def harness_settings(self, provider: str | None = None) -> dict:

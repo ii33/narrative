@@ -8,6 +8,8 @@ delegations to these facades.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from .change_service import ChangeService
 from .graph_profile_ops import ProfileService
 from .graph_read_ops import GraphReadService
@@ -16,6 +18,8 @@ from .graph_store import GraphStore
 from .graph_timeline_ops import TimelineService
 from .graphrag_ops import GraphRagService
 from .property_store import PropertyStore
+
+ReviewCallback = Callable[[str, str, int, int | None], None]
 
 
 class GraphProjectFacade:
@@ -51,8 +55,9 @@ class GraphProjectFacade:
 class GraphReviewFacade:
     """Graph object review: precheck, propose, edit, accept, reject."""
 
-    def __init__(self, service: GraphService):
+    def __init__(self, service: GraphService, *, review_callback: ReviewCallback | None = None):
         self.service = service
+        self._review_callback = review_callback
 
     def precheck(self, objects: list[dict], expected_revision: int) -> list[dict]:
         return self.service.precheck(objects, expected_revision)
@@ -73,17 +78,23 @@ class GraphReviewFacade:
         return self.service.select_operations(candidate_id, keep_ids, version)
 
     def accept(self, candidate_id: str, version: int) -> int:
-        return self.service.accept(candidate_id, version)
+        revision = self.service.accept(candidate_id, version)
+        if self._review_callback is not None:
+            self._review_callback("graph_accept", candidate_id, version, revision)
+        return revision
 
     def reject(self, candidate_id: str, version: int) -> None:
         self.service.reject(candidate_id, version)
+        if self._review_callback is not None:
+            self._review_callback("graph_reject", candidate_id, version, None)
 
 
 class GraphPropertyFacade:
     """Property records: review plus story-time and disclosure projections."""
 
-    def __init__(self, properties: PropertyStore):
+    def __init__(self, properties: PropertyStore, *, review_callback: ReviewCallback | None = None):
         self.properties = properties
+        self._review_callback = review_callback
 
     def precheck(self, records: list[dict], expected_revision: int) -> list[dict]:
         return self.properties.precheck(records, expected_revision)
@@ -105,10 +116,15 @@ class GraphPropertyFacade:
         )
 
     def accept(self, candidate_id: str, version: int) -> int:
-        return self.properties.accept(candidate_id, version)
+        revision = self.properties.accept(candidate_id, version)
+        if self._review_callback is not None:
+            self._review_callback("property_accept", candidate_id, version, revision)
+        return revision
 
     def reject(self, candidate_id: str, version: int) -> None:
         self.properties.reject(candidate_id, version)
+        if self._review_callback is not None:
+            self._review_callback("property_reject", candidate_id, version, None)
 
     def state(self, node_id: str, property_id: str, at=None, **kwargs) -> dict:
         return self.properties.state(node_id, property_id, at, **kwargs)
@@ -169,8 +185,9 @@ class GraphPropertyFacade:
 class GraphChangeFacade:
     """Unified mixed candidate: graph objects and property records together."""
 
-    def __init__(self, changes: ChangeService):
+    def __init__(self, changes: ChangeService, *, review_callback: ReviewCallback | None = None):
         self.changes = changes
+        self._review_callback = review_callback
 
     def precheck(self, graph_objects, property_records, expected_revision: int) -> list[dict]:
         return self.changes.precheck(graph_objects, property_records, expected_revision)
@@ -187,10 +204,15 @@ class GraphChangeFacade:
         return self.changes.candidate(candidate_id)
 
     def accept(self, candidate_id: str, version: int) -> int:
-        return self.changes.accept(candidate_id, version)
+        revision = self.changes.accept(candidate_id, version)
+        if self._review_callback is not None:
+            self._review_callback("change_accept", candidate_id, version, revision)
+        return revision
 
     def reject(self, candidate_id: str, version: int) -> None:
         self.changes.reject(candidate_id, version)
+        if self._review_callback is not None:
+            self._review_callback("change_reject", candidate_id, version, None)
 
 
 class GraphQueryFacade:

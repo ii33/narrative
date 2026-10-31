@@ -31,6 +31,8 @@
 | `statistics` | 统计：节点分类计数、原文、属性记录种类、撤回数、审核计数 | 读 |
 | `search` | 按关键字检索节点与属性记录 | 读 |
 | `list_sources` / `read_source` | 原文清单；按字符位置读一段 | 读 |
+| `list_source_slices` / `read_source_slice` | 列出某份原文的切片／读取单片完整内容及原文位置 | 读 |
+| `create_source_slices` | agent 阅读原文并分析边界后批量创建切片，不修改原文或图中事实 | 写 |
 | `property_categories` | 每个节点类型的大类表（显示分组，不是事实） | 读 |
 | `audit_properties` | 属性审核：重复值、缺定义、缺证据、锚点缺失等结构问题 | 读 |
 | `list_candidates` | 列出候选（默认待审） | 读 |
@@ -49,6 +51,10 @@
 | `categorize_records` | 把记录移到某个显示大类 | 写 |
 | `accept_candidate` / `reject_candidate` | 处理候选（节点/属性/提取结果） | 写 |
 | `import_source` | 导入一段原文（标题 + 正文），返回原文编号 | 写 |
+| `get_slice_extraction` | 读取指定切片的最近提取结果、轮次及持久会话编号 | 读 |
+| `extract_slice` | 对指定切片提取，保持原文全局字符位置，不自动入图 | 写 |
+| `review_slice` | 重读已提取切片查漏补缺、合并新增项，保留前轮合法数据 | 写 |
+| `commit_slice_extraction` | 按既有置信规则入图或生成待审候选，支持全审 | 写 |
 | `extract_propose` | 提取第一步：模型读整章，出节点、事件、属性（只读原文） | 写 |
 | `extract_review` | 提取第二步：拿库里已有的值对照提议，只丢确定的重复 | 写 |
 | `extract_build` | 提取第三步：落成对象与记录，**只算不写**；编号、锚点、取代都在这里定 | 读 |
@@ -161,3 +167,20 @@ payload = tool_api.call("event_state", {"event_id": "34"}, project="data/graph-p
 ```
 
 `tool_api.describe()` 给出 MCP 形状的工具清单，可以直接喂给任何需要 tools 定义的模型。
+
+
+## Agent 分析原文后创建切片
+
+导入文件保留完整原文，不自动按固定字数分割。agent 使用 `list_sources` 找到文件，
+使用 `read_source` 分段阅读并分析章节、场景或语义边界，使用 `list_source_slices`
+检查已有切片，然后通过 `create_source_slices` 一次提交一个批次：
+
+```json
+{"source_id": "source_id", "slices": [{"title": "第一章", "start": 0, "end": 120}]}
+```
+
+`start` 和 `end` 是完整原文从 0 开始的 **Python Unicode codepoint** 位置，范围为
+`[start, end)`，不是 UTF-8 字节数或 UTF-16 单元数。`read_source.start` 使用同一坐标；
+读取后续窗口时应加上窗口起点。整批范围校验成功后才会写入，不会替换原文。
+`read_source_slice` 需要 `source_id` 和 `slice_id`，返回该片文本和范围。
+内置协作者只额外开放这一种写工具，不能改动节点、属性、原文或审核候选。

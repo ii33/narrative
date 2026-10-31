@@ -396,6 +396,43 @@ def _read_source(ops, params: dict) -> dict:
     }
 
 
+def _list_source_slices(ops, params: dict) -> dict:
+    _need(params, "source_id")
+    source_id = str(params["source_id"])
+    try:
+        return {"source_id": source_id, "slices": ops.source_slices(source_id)}
+    except (ValueError, KeyError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+def _read_source_slice(ops, params: dict) -> dict:
+    _need(params, "source_id", "slice_id")
+    try:
+        return ops.source_slice(str(params["source_id"]), str(params["slice_id"]))
+    except (ValueError, KeyError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+def _create_source_slices(ops, params: dict) -> dict:
+    _need(params, "source_id", "slices")
+    slices = params["slices"]
+    if not isinstance(slices, list) or not slices:
+        raise ToolError("slices must be a non-empty array")
+    for item in slices:
+        if not isinstance(item, dict) or set(item) - {"title", "start", "end"}:
+            raise ToolError("Each slice requires only title, start and end")
+        if not isinstance(item.get("title"), str) or not item["title"].strip():
+            raise ToolError("Each slice requires a non-empty title")
+        if any(type(item.get(key)) is not int for key in ("start", "end")):
+            raise ToolError("Slice start and end must be integer Unicode codepoint offsets")
+    source_id = str(params["source_id"])
+    try:
+        created = ops.create_source_slices(source_id, slices)
+    except (ValueError, KeyError) as exc:
+        raise ToolError(str(exc)) from exc
+    return {"status": "created", "source_id": source_id, "slices": created}
+
+
 def _audit(ops, params: dict) -> dict:
     node_ids = params.get("node_ids")
     return ops.property_audit(set(node_ids) if node_ids else None)
@@ -864,6 +901,39 @@ def _extract(ops, params: dict) -> dict:
     return result | _extract_commit(ops, params)
 
 
+def _get_slice_extraction(ops, params: dict) -> dict:
+    _need(params, "source_id", "slice_id")
+    try:
+        return ops.load_slice_extraction(str(params["source_id"]), str(params["slice_id"]))
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+def _extract_slice(ops, params: dict) -> dict:
+    _need(params, "source_id", "slice_id")
+    try:
+        return ops.extract_slice(str(params["source_id"]), str(params["slice_id"]))
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+def _review_slice(ops, params: dict) -> dict:
+    _need(params, "source_id", "slice_id")
+    try:
+        return ops.extract_slice(str(params["source_id"]), str(params["slice_id"]), review=True)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+def _commit_slice_extraction(ops, params: dict) -> dict:
+    _need(params, "source_id", "slice_id")
+    try:
+        return ops.commit_slice_extraction(str(params["source_id"]), str(params["slice_id"]),
+                                           review=str(params.get("review") or "doubtful"))
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+
+
 TOOLS: dict[str, Tool] = {}
 
 
@@ -978,6 +1048,45 @@ _register(Tool(
     },
     _read_source,
 ))
+
+_register(Tool(
+    "list_source_slices",
+    "列出一份原文已保存的切片，按原文位置排列；不创建切片",
+    {"source_id": {"type": "string", "required": True}},
+    _list_source_slices,
+))
+_register(Tool(
+    "read_source_slice",
+    "读取一份原文中的单个切片，返回完整内容和原文位置",
+    {
+        "source_id": {"type": "string", "required": True},
+        "slice_id": {"type": "string", "required": True},
+    },
+    _read_source_slice,
+))
+_register(Tool(
+    "create_source_slices",
+    "先用 read_source 阅读原文并分析章节、场景或语义边界，再一次批量创建切片；不改原文、不自动按字数分割",
+    {
+        "source_id": {"type": "string", "required": True},
+        "slices": {
+            "type": "array", "required": True, "minItems": 1,
+            "description": "整批校验后创建；start/end 为原文中从 0 开始的 Python Unicode codepoint 位置，end 不包含在切片内，不是 UTF-8 字节或 UTF-16 单元",
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["title", "start", "end"],
+                "properties": {
+                    "title": {"type": "string", "minLength": 1},
+                    "start": {"type": "integer", "minimum": 0},
+                    "end": {"type": "integer", "minimum": 1},
+                },
+            },
+        },
+    },
+    _create_source_slices,
+    writes=True,
+))
+
 _register(Tool(
     "audit_properties",
     "属性审核：重复值、缺定义、缺证据、锚点缺失等结构问题",
@@ -1190,6 +1299,22 @@ _register(Tool(
     _import_source,
     writes=True,
 ))
+for _name, _summary_text, _handler, _writes in (
+    ("get_slice_extraction", "读取指定切片最近一轮提取结果与会话编号", _get_slice_extraction, False),
+    ("extract_slice", "提取指定切片；复用项目提取会话，不自动入图", _extract_slice, True),
+    ("review_slice", "重新阅读已提取切片查漏补缺，合并新增项并保留前轮合法数据", _review_slice, True),
+    ("commit_slice_extraction", "按既有置信规则入图或生成待审候选", _commit_slice_extraction, True),
+):
+    _params = {
+        "source_id": {"type": "string", "required": True},
+        "slice_id": {"type": "string", "required": True},
+    }
+    if _name == "commit_slice_extraction":
+        _params["review"] = {"type": "string", "enum": ["doubtful", "all"],
+                             "description": "doubtful 仅存疑项候选；all 全审"}
+    _register(Tool(_name, _summary_text, _params, _handler, writes=_writes))
+
+
 _register(Tool(
     "extract_propose",
     "提取第一步：模型读整章，出节点、事件、属性（只读原文，不带库里的旧值）",
