@@ -306,11 +306,28 @@ Item {
                             }
                         }
 
-                        Label {
+                        // 空列表不该只是一个空框：把「去哪儿找」直接放在这里。
+                        ColumnLayout {
                             anchors.centerIn: parent
+                            width: parent.width - 40
+                            spacing: 10
                             visible: projectRows.count === 0
-                            text: "还没有工程。在下面新建一个，或点「打开工程…」选一个 .nproj 目录。"
-                            color: t.muted
+
+                            Label {
+                                Layout.fillWidth: true
+                                horizontalAlignment: Text.AlignHCenter
+                                wrapMode: Text.WordWrap
+                                text: "列表里还没有工程。\n打开一个 .nproj 目录，它就留在这里。"
+                                color: t.muted
+                                font.pixelSize: 12
+                            }
+                            Button {
+                                objectName: "emptyOpenProject"
+                                Layout.alignment: Qt.AlignHCenter
+                                text: "打开工程…"
+                                highlighted: true
+                                onClicked: packageDialog.open()
+                            }
                         }
                     }
                 }
