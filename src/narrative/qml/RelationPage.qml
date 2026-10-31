@@ -145,9 +145,12 @@ Item {
         return count
     }
 
-    function radiusOf(person, textWidth) {
-        var byDegree = 18 + page.degreeOf(person.id) * 2.6
-        return Math.max(20, Math.min(46, byDegree), textWidth / 2 + 9)
+    // 半径**只看关系条数**：按面积算，所以取平方根。
+    // 之前把「名字要多宽」也算进半径，结果名字长的零关系节点比名字短的枢纽还大——
+    // 大小成了名字长度的函数，关系多少反而看不出来。名字放不下就写到圈外，不撑大圈。
+    function radiusOf(person) {
+        var degree = page.degreeOf(person.id)
+        return Math.max(13, Math.min(44, 13 + 5.2 * Math.sqrt(degree)))
     }
 
     ColumnLayout {
@@ -271,9 +274,7 @@ Item {
 
                 var pos = ({})
                 var place = function (person, x, y) {
-                    ctx.font = "12px sans-serif"
-                    var tw = ctx.measureText(person.name).width
-                    pos[person.id] = { x: x, y: y, r: page.radiusOf(person, tw) }
+                    pos[person.id] = { x: x, y: y, r: page.radiusOf(person) }
                 }
                 if (hub !== null) place(hub, 0, 0)
                 for (var i = 0; i < ring.length; ++i) {
@@ -370,9 +371,22 @@ Item {
                     ctx.lineWidth = 1
                     ctx.stroke()
                     ctx.fillStyle = page.ink
-                    ctx.font = "12px sans-serif"
                     ctx.textAlign = "center"
-                    ctx.fillText(person.name, spot.x, spot.y + 4)
+                    ctx.font = "12px sans-serif"
+                    var room = spot.r * 2 - 8
+                    if (ctx.measureText(person.name).width <= room) {
+                        ctx.fillText(person.name, spot.x, spot.y + 4)
+                    } else {
+                        // 圈里放不下就写在圈下面：圈的大小是关系数说了算，不是名字。
+                        // 带白底，免得压在关系线上读不清。
+                        ctx.font = "11px sans-serif"
+                        var w = ctx.measureText(person.name).width
+                        var ly = spot.y + spot.r + 13
+                        ctx.fillStyle = "#ffffff"
+                        ctx.fillRect(spot.x - w / 2 - 3, ly - 9, w + 6, 13)
+                        ctx.fillStyle = page.ink
+                        ctx.fillText(person.name, spot.x, ly)
+                    }
                     ctx.textAlign = "left"
                 }
             }

@@ -116,11 +116,13 @@ def test_a_node_with_more_relations_gets_a_bigger_circle(page) -> None:
         ],
     })
 
-    hub = _value(view.radiusOf(_person("P1", "林舟"), 24))
-    leaf = _value(view.radiusOf(_person("P3", "老周"), 24))
+    hub = _value(view.radiusOf(_person("P1", "林舟")))
+    leaf = _value(view.radiusOf(_person("P3", "老周")))
     assert hub > leaf
-    # 名字长的圈也不能比名字小的还小。
-    assert _value(view.radiusOf(_person("P3", "老周"), 200)) > leaf
+    # 名字长度不该影响圈的大小：放不下就写到圈外，不然「店员小姐」零关系比枢纽还大。
+    assert _value(view.radiusOf(_person("P3", "名字特别长的一个人"))) == leaf
+    # 没有关系的节点是最小的那一档，但不能没有。
+    assert leaf >= 13
 
 
 def test_zoom_is_clamped_and_pan_is_only_a_view(page) -> None:
