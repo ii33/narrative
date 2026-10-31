@@ -24,3 +24,26 @@ def test_temperature_is_bounded() -> None:
 
     with pytest.raises(ValueError):
         HarnessSettings(provider="deepseek", model="deepseek-chat", temperature=3)
+
+
+def test_off_turns_thinking_off_instead_of_naming_a_level() -> None:
+    """`off` 不是推理等级：运行时只认 low/medium/high，传 off 会被直接拒。
+
+    供应商自己的开关是 `thinking.type = disabled`，由网关补上——推理 token 归零。
+    """
+    settings = HarnessSettings(
+        provider="ark", model="ark-code-latest", reasoning_effort="off"
+    )
+    body = adapt_request({"model": "whatever", "messages": [], "reasoning_effort": "low"},
+                         settings)
+    assert body["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in body
+
+
+def test_a_normal_level_still_goes_through_as_itself() -> None:
+    settings = HarnessSettings(
+        provider="ark", model="ark-code-latest", reasoning_effort="low"
+    )
+    body = adapt_request({"model": "whatever", "messages": []}, settings)
+    assert body["reasoning_effort"] == "low"
+    assert "thinking" not in body

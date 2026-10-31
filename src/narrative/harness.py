@@ -309,7 +309,11 @@ class HarnessRunner:
             model=settings.model,
             base_url=self._gateway.base_url,
             api_key=self._gateway.token,
-            reasoning_effort=settings.reasoning_effort,
+            # 运行时只认 low/medium/high，"off" 由网关翻成供应商的 thinking 开关。
+            reasoning_effort=(
+                None if str(settings.reasoning_effort or "") == "off"
+                else settings.reasoning_effort
+            ),
             max_tokens=settings.max_tokens,
             initialize_timeout_seconds=30,
             request_timeout_seconds=settings.timeout_seconds,

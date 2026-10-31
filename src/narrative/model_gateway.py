@@ -33,7 +33,13 @@ def adapt_request(body: dict, settings) -> dict:
     if output_limit is not None:
         body[settings.token_parameter] = output_limit
     body.pop("reasoning_effort", None)
-    if settings.reasoning_effort:
+    body.pop("thinking", None)
+    if str(settings.reasoning_effort or "") == "off":
+        # 「不思考」不是推理等级的下一档：运行时只认 low/medium/high，传别的直接拒。
+        # 供应商自己的开关是 `thinking.type = disabled`，在这里补上——推理 token 归零，
+        # 一章从几分钟降到几十秒。
+        body["thinking"] = {"type": "disabled"}
+    elif settings.reasoning_effort:
         body["reasoning_effort"] = settings.reasoning_effort
     body["model"] = settings.model
     temperature = getattr(settings, "temperature", None)

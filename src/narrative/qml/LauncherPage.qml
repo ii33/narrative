@@ -16,7 +16,7 @@ Item {
     property string settingsPath: ""
     property bool loaded: false
 
-    readonly property var effortOptions: ["不设置", "low", "medium", "high"]
+    readonly property var effortOptions: ["不设置", "off", "low", "medium", "high"]
 
     ListModel { id: projectRows }
     // 没有「工程目录」这回事：列表就是打开过的那些工程包。
@@ -61,7 +61,8 @@ Item {
         tokenParamBox.currentIndex = (profile.token_parameter === "max_completion_tokens") ? 1 : 0
         var effort = profile.reasoning_effort || ""
         effortBox.currentIndex = effort === "" ? 0
-            : effort === "low" ? 1 : effort === "medium" ? 2 : effort === "high" ? 3 : 0
+            : effort === "off" ? 1 : effort === "low" ? 2
+            : effort === "medium" ? 3 : effort === "high" ? 4 : 0
         maxTokensField.text = profile.max_tokens || ""
         contextField.text = profile.context_window || ""
         outputReserveField.text = profile.output_reserve || ""
@@ -81,7 +82,8 @@ Item {
         tokenParamBox.currentIndex = (preset.token_parameter === "max_completion_tokens") ? 1 : 0
         var effort = preset.reasoning_effort || ""
         effortBox.currentIndex = effort === "" ? 0
-            : effort === "low" ? 1 : effort === "medium" ? 2 : effort === "high" ? 3 : 0
+            : effort === "off" ? 1 : effort === "low" ? 2
+            : effort === "medium" ? 3 : effort === "high" ? 4 : 0
     }
 
     function collect() {
