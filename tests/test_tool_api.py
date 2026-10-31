@@ -452,3 +452,55 @@ def test_relation_map_leaves_out_a_person_pointing_at_themselves(tmp_path: Path)
 
     graph = tool_api.call("relation_map", {}, project=project)
     assert graph["persons"] and graph["edges"] == []
+
+
+def test_relations_stop_at_the_reading_position(tmp_path) -> None:
+    """停在第一场时，后面才揭晓的关系不该出现在图上。"""
+    from narrative.project_catalog import create_graph_project
+    from narrative.tool_api import _relation_map
+
+    ops = create_graph_project(tmp_path / "rel.nproj")
+    text = "林舟把钥匙交给老周。后来林舟和苏娘成了仇敌。"
+    ops.import_source("第一章", text)
+    ops.graph_accept(
+        ops.graph_propose(
+            [
+                {"kind": "node", "id": "1", "node_type": "person", "name": "林舟"},
+                {"kind": "node", "id": "2", "node_type": "person", "name": "老周"},
+                {"kind": "node", "id": "3", "node_type": "person", "name": "苏娘"},
+                {"kind": "node", "id": "4", "node_type": "scene", "name": "第一场",
+                 "events": ["5"]},
+                {"kind": "node", "id": "5", "node_type": "event", "name": "交钥匙"},
+                {"kind": "node", "id": "6", "node_type": "scene", "name": "第二场",
+                 "events": ["7"]},
+                {"kind": "node", "id": "7", "node_type": "event", "name": "结仇"},
+            ],
+            ops.graph_project_info()["revision"],
+        ),
+        1,
+    )
+    rev = ops.graph_project_info()["revision"]
+    ops.property_accept(
+        ops.property_propose(
+            [
+                {"kind": "property_definition", "id": "朋友", "value_type": "node",
+                 "cardinality": "one"},
+                {"kind": "property_definition", "id": "仇敌", "value_type": "node",
+                 "cardinality": "one"},
+                {"kind": "property_value", "id": "v1", "node_id": "1",
+                 "property_id": "朋友", "value": "2", "event_id": "5"},
+                {"kind": "property_value", "id": "v2", "node_id": "1",
+                 "property_id": "仇敌", "value": "3", "event_id": "7"},
+            ],
+            rev,
+            source="manual",
+        ),
+        1,
+    )
+
+    whole = _relation_map(ops, {})
+    assert len(whole["edges"]) == 2
+
+    early = _relation_map(ops, {"cut": "4"})
+    assert [edge["kind"] for edge in early["edges"]] == ["朋友"]
+    assert {person["name"] for person in early["persons"]} == {"林舟", "老周"}

@@ -170,3 +170,35 @@ def test_zooming_keeps_the_point_under_the_cursor(page) -> None:
     world_before = (x - 400 - before) / 1.0
     world_after = (x - 400 - after) / view.property("zoom")
     assert abs(world_before - world_after) < 0.001
+
+
+def test_the_graph_can_stop_at_a_reading_position(page) -> None:
+    """关系图也按阅读位置画：停在某一场，就只画那一步之前知道的关系。"""
+    _app, view = page
+    view.apply({
+        "persons": [_person("P1", "林舟"), _person("P2", "老周"), _person("P3", "苏娘")],
+        "edges": [_edge("P1", "P2", "师父")],
+        "moments": {
+            "levels": [{"key": "storyline", "label": "大事件"},
+                       {"key": "scene", "label": "场景"},
+                       {"key": "event", "label": "事件"}],
+            "nodes": [
+                {"id": "T1", "label_id": "T1", "name": "一段", "level": "storyline",
+                 "parent_id": "", "rank": 0, "synthetic": False},
+                {"id": "S1", "label_id": "S1", "name": "第一场", "level": "scene",
+                 "parent_id": "T1", "rank": 1, "synthetic": False},
+                {"id": "S2", "label_id": "S2", "name": "第二场", "level": "scene",
+                 "parent_id": "T1", "rank": 1, "synthetic": False},
+            ],
+        },
+        "cut": "",
+        "cut_name": "",
+    })
+
+    # 下拉里是「最新」加每一场
+    options = _value(view.property("cutOptions"))
+    assert [row["id"] for row in options] == ["", "S1", "S2"]
+    assert options[0]["label"].startswith("最新")
+
+    view.pickCut(2)
+    assert view.property("cutId") == "S2"

@@ -15,6 +15,12 @@ Item {
     property var edges: []
     property string notice: ""
 
+    // 阅读位置与筛选：和「数据浏览」同一个概念——停在哪儿，就只画读者已经知道的关系。
+    property string cutId: ""
+    property bool relatedOnly: false
+    property var moments: ({ levels: [], nodes: [] })
+    property string cutName: ""
+
     // 画布是自由的：缩放、平移都是界面状态，不改任何数据。
     property real zoom: 1
     property real panX: 0
@@ -32,13 +38,46 @@ Item {
 
     function load() {
         page.notice = ""
-        bridge.loadRelations()
+        bridge.loadRelations(page.cutId, page.relatedOnly)
     }
 
     function apply(payload) {
         persons = payload.persons || []
         edges = payload.edges || []
+        moments = payload.moments || ({ levels: [], nodes: [] })
+        cutName = payload.cut_name || ""
+        if (!page.cutId && payload.cut) page.cutId = payload.cut
+        page.syncCutIndex()
         canvas.requestPaint()
+    }
+
+    // 时间点下拉：最新 + 每一场（按阅读顺序）。选一场就是「读到那一场」。
+    readonly property var cutOptions: {
+        var rows = [{ id: "", label: "最新（读到末尾）" }]
+        var nodes = (page.moments.nodes || [])
+        for (var i = 0; i < nodes.length; ++i) {
+            var node = nodes[i]
+            if (node.level !== "scene") continue
+            rows.push({
+                id: node.id,
+                label: (node.label_id ? node.label_id + "  " : "") + node.name
+            })
+        }
+        return rows
+    }
+
+    property int cutIndex: 0
+    function syncCutIndex() {
+        for (var i = 0; i < page.cutOptions.length; ++i) {
+            if (page.cutOptions[i].id === page.cutId) { page.cutIndex = i; return }
+        }
+        page.cutIndex = 0
+    }
+
+    function pickCut(index) {
+        var rows = page.cutOptions
+        page.cutId = (index >= 0 && index < rows.length) ? rows[index].id : ""
+        page.load()
     }
 
     Connections {
@@ -170,10 +209,39 @@ Item {
             }
             Label {
                 text: page.persons.length + " 人 · " + page.edges.length + " 条关系"
+                    + (page.cutId ? "（读到 " + (page.cutName || page.cutId) + "）" : "")
                 color: page.muted
                 font.pixelSize: 12
+                elide: Text.ElideRight
+                Layout.maximumWidth: 320
             }
             Item { Layout.fillWidth: true }
+            Label {
+                text: "读到"
+                color: page.muted
+                font.pixelSize: 11
+            }
+            ComboBox {
+                id: cutBox
+                objectName: "relationCut"
+                Layout.preferredWidth: 240
+                font.pixelSize: 11
+                model: page.cutOptions
+                textRole: "label"
+                currentIndex: page.cutIndex
+                onActivated: page.pickCut(index)
+            }
+            CheckBox {
+                id: relatedBox
+                objectName: "relationRelatedOnly"
+                text: "只看相关"
+                checked: page.relatedOnly
+                font.pixelSize: 11
+                onToggled: {
+                    page.relatedOnly = checked
+                    page.load()
+                }
+            }
             Label {
                 visible: page.notice.length > 0
                 text: page.notice

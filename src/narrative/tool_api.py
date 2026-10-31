@@ -552,9 +552,28 @@ def _relation_map(ops, params: dict) -> dict:
     可以有两支箭头——「A 父亲 B」和「B 儿子 A」——也可以只有一支（「A 崇拜 B」）。
     关系性质带括号时（「恋人（冷战中）」），括号里的是状态，单独给出来。
     """
+    from .browse_view import anchor_event, cut_for, moment_tree, related_nodes
+    from .order_ids import order_key
+
     snapshot = ops.graph_snapshot()
     nodes = {item["id"]: item for item in snapshot["nodes"]}
     events = {item["id"]: item.get("name", item["id"]) for item in snapshot["nodes"]}
+    # 阅读位置：停在哪一步，就只画那一步之前**读者已经知道**的关系。
+    # 编号是按阅读顺序发的，所以比编号就是比阅读位置。
+    cut = str(params.get("cut") or "")
+    anchor = cut_for(snapshot, cut) if cut else None
+    if anchor is None and cut and cut in nodes:
+        # 节点还没有披露位置（手写的库）时，退到它锚定的事件——比编号就够了。
+        step = anchor_event(snapshot, nodes[cut])
+        anchor = {"event_id": step["id"], "step_name": nodes[cut].get("name") or cut}
+    cut_key = order_key(anchor["event_id"]) if anchor else None
+
+    def past_cut(event_id: str) -> bool:
+        """这条记录是在切点之后才披露的吗（编号按阅读顺序发，比编号就行）。"""
+        here = order_key(event_id)
+        if cut_key is None or here is None:
+            return False
+        return here > cut_key
     persons = [
         {"id": item["id"], "name": item.get("name", item["id"]),
          "label_id": item.get("label_id", item["id"])}
@@ -571,6 +590,8 @@ def _relation_map(ops, params: dict) -> dict:
             continue
         if nodes.get(right, {}).get("node_type") != "person":
             continue
+        if past_cut(str(record.get("event_id") or "")):
+            continue  # 还没读到这一步
         raw = str(record.get("property_id") or "")
         kind, state = raw, ""
         for mark in ("（", "("):
@@ -587,7 +608,33 @@ def _relation_map(ops, params: dict) -> dict:
             "event_name": events.get(record.get("event_id") or "", ""),
         })
     edges.sort(key=lambda item: (item["from_name"], item["kind"], item["to_name"]))
-    return {"revision": snapshot["revision"], "persons": persons, "edges": edges}
+
+    # 只看相关：只留跟这一步有关的人（这一步出场的人、以及关系指向他们的人）。
+    related_only = bool(params.get("related_only"))
+    related_ids: set[str] = set()
+    if related_only and cut:
+        related_ids = {
+            item for item in related_nodes(snapshot, cut, ops.property_records())
+            if nodes.get(item, {}).get("node_type") == "person"
+        }
+        # 只要一头相关就画：读者想看的是「这一步里的人跟谁有关系」，
+        # 两头都要求相关会把这一步里的人的关系全剪掉。
+        edges = [e for e in edges if e["from"] in related_ids or e["to"] in related_ids]
+
+    # 没写阅读位置、也没开筛选时，全书的人都画（孤点说明「书里没写他和谁有关」）；
+    # 一旦按位置或相关收窄，就只留连线两端——筛选后还摆一屏孤点，等于没筛。
+    if cut_key is not None or related_only:
+        linked = {e["from"] for e in edges} | {e["to"] for e in edges}
+        persons = [item for item in persons if item["id"] in linked]
+    return {
+        "revision": snapshot["revision"],
+        "persons": persons,
+        "edges": edges,
+        "cut": cut,
+        "cut_name": (anchor or {}).get("step_name", ""),
+        # 时间点选择器用的那棵树（与数据浏览同一份）
+        "moments": moment_tree(snapshot),
+    }
 
 
 def _attach_scenes(ops, params: dict) -> dict:

@@ -663,11 +663,17 @@ class NativeBridge(QObject):
         self._project_task("property_audit", lambda ops: ops.property_audit())
 
     @Slot()
-    def loadRelations(self) -> None:
-        """人物关系网：人是点、关系是有方向的边，给关系图用。"""
+    @Slot(str, bool)
+    def loadRelations(self, cut: str = "", related_only: bool = False) -> None:
+        """人物关系网：人是点、关系是有方向的边，给关系图用。
+
+        `cut` 是阅读位置——只画那一步之前已经知道的关系；`related_only` 再收一层，
+        只留跟这一步有关的人。
+        """
         from .tool_api import _relation_map
 
-        self._project_task("relations", lambda ops: _relation_map(ops, {}))
+        spec = {"cut": cut, "related_only": related_only}
+        self._project_task("relations", lambda ops: _relation_map(ops, spec))
 
     @Slot("QVariantMap")
     def loadBrowse(self, spec: dict) -> None:
