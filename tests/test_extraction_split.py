@@ -107,3 +107,27 @@ def test_a_value_the_model_was_unsure_about_stays(tmp_path: Path) -> None:
     assert result["doubtful"][0]["name"] == "老周"
     assert "模型拿不准" in result["doubtful"][0]["why"]
     assert result["candidate"]
+
+
+def test_a_duplicated_aspect_name_does_not_hold_the_node_back(tmp_path: Path) -> None:
+    """「女友」和「恋人」指着同一个人：这是重名提示，不是反面证据。
+
+    它曾把枢纽节点判成存疑，再顺着参与者把整章拖成存疑——一章什么都没进图，
+    而且是在空工程上必然发生（第一章最先跑）。重名只该在审核面板里提醒。
+    """
+    ops, data = _project(tmp_path, {
+        "nodes": NODES,
+        "properties": [
+            {"node": "林舟", "property": "恋人", "value": "老周",
+             "value_type": "node", "quotes": ["老周站在门口"],
+             "at_event": "林舟推门进来", "scope": "world"},
+            {"node": "林舟", "property": "女友", "value": "老周",
+             "value_type": "node", "quotes": ["老周站在门口"],
+             "at_event": "林舟推门进来", "scope": "world"},
+        ],
+    })
+    result = commit_extraction(ops, data)
+
+    assert result["doubtful"] == []
+    assert result["accepted"] is not None
+    assert result["accepted"]["node_count"] == 3

@@ -291,3 +291,55 @@ def test_the_progress_sentence_is_anchored_on_the_scenes_last_event(
     assert record["anchor_basis"] == "scene_end"
     # E2 是这一场最后一步；模型说的 E1 不是。
     assert record["event_id"] == "E2"
+
+
+def test_progress_written_against_a_location_lands_on_its_scene(tmp_path: Path) -> None:
+    """模型会把 `node` 写成地点名（「旧站台」既是地点又是场景）。
+
+    这句话只能挂在场景上，所以按它自己的落点事件归位到那一场——用模型给的位置，
+    不是猜；归不回去就原样留着，审核会报「场景没写进展」。
+    """
+    from narrative.extraction import build_candidate
+    from narrative.project_catalog import create_graph_project
+
+    ops = create_graph_project(tmp_path / "reroute.nproj")
+    text = "两人到了旧站台。老周以白光带走林舟。"
+    source_id = ops.import_source("旧站台", text)
+    data = {
+        "source_id": source_id,
+        "nodes": [
+            {"type": "storyline", "name": "林舟随老周离开", "start": 0,
+             "quotes": ["两人到了旧站台。"], "scene": "", "storyline": "",
+             "provisional_name": ""},
+            {"type": "scene", "name": "旧站台", "start": 0,
+             "quotes": ["两人到了旧站台。"], "scene": "", "storyline": "林舟随老周离开",
+             "provisional_name": ""},
+            {"type": "location", "name": "旧站台", "start": 0,
+             "quotes": ["两人到了旧站台。"], "scene": "", "storyline": "",
+             "provisional_name": ""},
+            {"type": "event", "name": "老周以白光带走林舟", "start": 7,
+             "quotes": ["老周以白光带走林舟。"], "scene": "旧站台", "storyline": "",
+             "participants": []},
+        ],
+        "properties": [
+            # node 写的是地点，落点事件在「旧站台」这一场里
+            {"node": "旧站台", "property": STORYLINE_PROGRESS,
+             "value": "老周改造完林舟的身体，带他离开", "value_type": "string",
+             "quotes": ["老周以白光带走林舟。"], "start": 7,
+             "at_event": "老周以白光带走林舟",
+             "scope": "world", "holder": "", "source": "narration",
+             "related_nodes": [], "category": "大事件"},
+        ],
+        "rejected": [],
+    }
+
+    built = build_candidate(ops, data)
+    record = next(
+        item for item in built["property_records"]
+        if item.get("property_id") == STORYLINE_PROGRESS
+    )
+    scene_id = next(
+        obj["id"] for obj in built["objects"]
+        if obj.get("kind") == "node" and obj.get("node_type") == "scene"
+    )
+    assert record["node_id"] == scene_id

@@ -518,6 +518,10 @@ def audit_properties(
             f"同一节点上「{'」「'.join(sorted(aspects))}」记着同一个值「{value[:20]}」"
             f"，可能是同一个方面用了两个名字",
             node=names.get(node_id),
+            records=[
+                record for record in values
+                if record.get("node_id") == node_id and record.get("value") == value
+            ],
             suggestion="确认是不是同一个方面；是的话用「合并」把两个名字并成一条线",
         ))
 

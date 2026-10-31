@@ -21,7 +21,7 @@ from .property_labels import STORYLINE_PROGRESS
 from .property_store import record_position
 
 # 提示词改一次，这个号跟着动；缓存的提取结果里会写下来，便于对照。
-PROMPT_VERSION = "extract/16"
+PROMPT_VERSION = "extract/17"
 
 NODE_TYPES = ("person", "group", "item", "location", "scene", "event", "storyline")
 
@@ -115,7 +115,9 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
 - `related_nodes` 填原文明示涉及的其他节点（观察者、被归因的人、信息载体），
   **不要填 holder**——holder 已经由 scope 那一栏说明。
 - **每个场景给一条 `storyline_progress`**：一句话概括「这个大事件进行到这个场景时，
-  读者已经知道的部分」。只写这一步新走出来的东西，不要把上一场说过的再抄一遍。
+  读者已经知道的部分」。**`node` 写场景名**，不是地点名、不是人物名——场景是这一层
+  唯一带属性的东西，写错地方这句话就挂不到大事件上。只写这一步新走出来的东西，
+  不要把上一场说过的再抄一遍。
   例：第一场 `"老周找上门，说林舟得跟他走"`，第二场 `"两人到了旧车站，铁门还没开"`。
   这几个名字不是必须一致——读者看到的本来就是「到这里为止」的样子。
 - **大事件自己不写属性**：结局、结果、状态都不写。它的样子由各个场景的
@@ -1149,6 +1151,29 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
         if batch_types.get(name) != "either":
             batch_types[name] = prop["value_type"]
 
+    # 事件 → 它所属的场景。`storyline_progress` 只能挂在场景上；模型有时把 node 写成
+    # 地点名（「古战场」既是地点又是场景）或事件名，那就按**落点事件所在的场景**归位——
+    # 那是它自己给的位置，不是猜的。归不回去就原样留着，审核会报出来。
+    scene_of_event: dict[str, str] = {}
+    for scene_name, event_ids in scene_children.items():
+        scene_id = ids.get(("scene", scene_name))
+        if not scene_id:
+            continue
+        for event_id in event_ids:
+            scene_of_event.setdefault(event_id, scene_id)
+
+    def progress_scene(prop: dict, node_id: str | None) -> str | None:
+        if str(prop.get("property") or "") != STORYLINE_PROGRESS:
+            return node_id
+        if node_id and node_id in scene_name_by_id:
+            return node_id
+        anchor = event_by_name.get(str(prop.get("at_event") or ""))
+        if anchor and anchor in scene_of_event:
+            return scene_of_event[anchor]
+        if node_id in scene_of_event:  # node 写的是事件名
+            return scene_of_event[node_id]
+        return node_id
+
     for prop in data.get("properties", []):
         node_id = ids.get((prop["node_type"], prop["node"])) if "node_type" in prop else None
         if node_id is None:
@@ -1161,6 +1186,7 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
                 node_id = existing.get((kind, prop["node"]))
                 if node_id:
                     break
+        node_id = progress_scene(prop, node_id)
         if node_id is None:
             continue
         property_id = str(prop["property"])
@@ -1385,7 +1411,12 @@ def split_confident(ops, built: dict, data: dict) -> dict:
                     flag_node(node_id, why)
 
     # 分类名、缺中文名只是显示上的分组，不影响这条记录成立，不值得拦下来让人看。
-    cosmetic = {"category_unknown", "category_unassigned", "label_missing"}
+    # 重名、分组、中文名都只是「看起来像同一件事」，不影响这条记录成立。
+    # 一条提示就把枢纽节点拦下来，会顺着参与者把整章都拖成存疑——那等于没提。
+    cosmetic = {
+        "category_unknown", "category_unassigned", "label_missing",
+        "aspect_overlap", "repeated_value",
+    }
     for issue in audit_candidate(ops, built).get("issues") or []:
         if issue.get("severity") not in {"error", "warning"}:
             continue
