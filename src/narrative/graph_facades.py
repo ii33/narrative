@@ -124,8 +124,11 @@ class GraphPropertyFacade:
         node_id: str,
         as_of_revision: int | None = None,
         cut: object = None,
+        include_derived: bool = False,
     ) -> dict:
-        return self.properties.node_properties(node_id, as_of_revision, cut)
+        return self.properties.node_properties(
+            node_id, as_of_revision, cut, include_derived=include_derived
+        )
 
     def audit(
         self, node_ids: set[str] | None = None, as_of_revision: int | None = None

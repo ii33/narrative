@@ -419,8 +419,29 @@ class GraphOperations:
         the reader reached that event" instead of "what is known now".
 
         失效的记录不出现——撤回不删行，但它不再是这个节点的一个说法。
+
+        大事件多一行「大事件进展」：这句话不是它的记录，是它下面最后一个读过的
+        场景说的（记录挂在场景上）。所以 `derived` 标出来，`from_scene` 说明出处——
+        读者停在哪，这一行就说到哪。
         """
-        return self.properties.node_properties(node_id, cut=cut)
+        summary = self.properties.node_properties(node_id, cut=cut, include_derived=True)
+        names = {
+            node["id"]: node.get("name") or node["id"]
+            for node in self.graph_snapshot().get("nodes", [])
+        }
+        for item in summary.get("properties", []):
+            derived = next(
+                (record for record in item.get("records") or [] if record.get("derived")),
+                None,
+            )
+            if derived is None:
+                continue
+            item["derived"] = True
+            item["from_scene"] = {
+                "id": derived.get("derived_from") or "",
+                "name": names.get(derived.get("derived_from") or "", ""),
+            }
+        return summary
 
     def property_categories(self) -> dict[str, list[str]]:
         """Display categories per node type; loose groupings, editable at will."""

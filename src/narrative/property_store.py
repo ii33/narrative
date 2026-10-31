@@ -1180,11 +1180,62 @@ class PropertyStore:
             "superseded": [record["target_id"] for record in pending],
         }
 
+    def _storyline_progress(
+        self,
+        node_id: str,
+        snapshot: dict,
+        all_records: list[dict],
+        cut_position: tuple | None,
+    ) -> list[dict]:
+        """大事件在「现在」这一点的样子：最后读过的那个场景说的那句话。
+
+        记录挂在场景上（`storyline_progress`），大事件只是**读**它——所以改的是
+        场景，看到的还是同一句话，不会出现两处说法。读到的场景还没给出这句话时
+        什么都不返回，而不是编一句总结。
+        """
+        nodes = {node["id"]: node for node in snapshot.get("nodes", [])}
+        story = nodes.get(node_id) or {}
+        if story.get("node_type") != "storyline":
+            return []
+        scenes = {
+            child for child in story.get("events") or []
+            if child in nodes and nodes[child].get("node_type") == "scene"
+        }
+        if not scenes:
+            return []
+        candidates = [
+            record for record in all_records
+            if record.get("kind") == "property_value"
+            and record.get("node_id") in scenes
+            and str(record.get("property_id") or "") == property_labels.STORYLINE_PROGRESS
+            and (cut_position is None or record_position(record) <= cut_position)
+        ]
+        if not candidates:
+            return []
+        latest = max(candidates, key=record_position)
+        return [{
+            "id": f"derived:{latest.get('node_id')}",
+            "kind": "property_value",
+            "node_id": node_id,
+            "property_id": property_labels.STORYLINE_PROGRESS,
+            "value": latest.get("value"),
+            "value_type": latest.get("value_type") or "string",
+            "event_id": latest.get("event_id"),
+            "evidence": latest.get("evidence") or {},
+            "disclosure": latest.get("disclosure") or {},
+            "source": latest.get("source") or "narration",
+            "scope": "world",
+            "category": "大事件",
+            "derived": True,
+            "derived_from": latest.get("node_id"),
+        }]
+
     def node_properties(
         self,
         node_id: str,
         as_of_revision: int | None = None,
         cut: object = None,
+        include_derived: bool = False,
     ) -> dict:
         """Every property a node carries, grouped for reading.
 
@@ -1214,6 +1265,13 @@ class PropertyStore:
         # also what decides whether a retraction applies: one anchored at a later
         # disclosure has not happened for the reader yet.
         cut_position = self._cut_position(cut) if cut else None
+        # 大事件自己没有属性记录：它此刻的样子是它下面最后一个**读过的**场景说的
+        # 那句话。借一条记录过来显示，行就有了正常的 records / 披露 / 当前值，
+        # 编辑器不请求派生行，所以不会有人去改一条不存在的记录。
+        if include_derived:
+            all_records = all_records + self._storyline_progress(
+                node_id, snapshot, all_records, cut_position
+            )
         # Validity is explicit, not computed: a record counts until a retraction
         # says otherwise. Nothing here derives a window from the next disclosure.
         invalid = invalid_at(all_records, cut_position)
@@ -1363,6 +1421,12 @@ class PropertyStore:
                     "category_source": entry["category_source"],
                     # 唯一的有效性字段。走到这里的记录都还算数。
                     "valid": True,
+                    # 大事件那一行是从场景借来的：界面上要能说清出处。
+                    **(
+                        {"derived": True, "derived_from": row.get("derived_from")}
+                        if row.get("derived")
+                        else {}
+                    ),
                 })
             # 一条线只有一个「最新披露」：更早的仍然算数（他确实这么说过、这么想过），
             # 只是不再是当下状态。界面上据此把旧的压暗，而不是当成另一个当前值。

@@ -993,12 +993,17 @@ class NativeBridge(QObject):
         return MaterialStore(self._project())
 
     def _material_moments(self, ops) -> dict:
-        """生效/失效下拉用的分级阅读位置：一列一层（场景 → 事件）。
+        """生效/失效下拉用的分级阅读位置：一列一层（大事件 → 场景 → 事件）。
 
-        层级表在 `browse_view.MOMENT_LEVELS`，父子关系看谁把谁列在 `events` 里，
-        所以再往上加「卷/章」或往下加「动作」只是往那张表里插一行。
+        层级表在 `browse_view.MOMENT_LEVELS`，父子关系看谁把谁列在 `events` 里。
+        带上当前阅读位置和属性取值：大事件在读完之前显示暂称，它的「走到哪了」
+        由已经读过的场景那句话攒出来——同一份数据，读者停在哪就显示到哪。
         """
-        return moment_tree(ops.graph_snapshot())
+        return moment_tree(
+            ops.graph_snapshot(),
+            cut_event_id=self._state_cut,
+            records=ops.property_records(include_retracted=True),
+        )
 
     def _material_payload(self, ops, node_id: str) -> dict:
         return self._material().view(node_id, cut=self._state_cut) | {

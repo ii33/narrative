@@ -20,17 +20,26 @@ from collections import Counter
 
 from .graph_query import revealed
 from .order_ids import label_id, order_key
+from .property_labels import STORYLINE_PROGRESS
 
 GRANULARITIES = ("scene", "event")
-LABELS = {"scene": "场景", "event": "事件"}
+LABELS = {"storyline": "大事件", "scene": "场景", "event": "事件"}
 
-# 阅读位置的层级，从粗到细。目前只有场景和事件；再往上（卷、章）或再往下
-# （一个事件里的动作）只是往这张表里插一行——父子关系不是写死的，是看谁把谁
-# 列在 `events` 里，所以插入一层不用改别的地方。
+# 阅读位置的层级，从粗到细：大事件 → 场景 → 事件。再往下（一个事件里的动作）
+# 只是往这张表里插一行——父子关系不是写死的，是看谁把谁列在 `events` 里。
 MOMENT_LEVELS = (
+    {"key": "storyline", "label": "大事件"},
     {"key": "scene", "label": "场景"},
     {"key": "event", "label": "事件"},
 )
+
+# 场景必须挂在大事件下面、事件必须挂在场景下面。数据里偶尔缺这一环（老工程、
+# 模型漏填），投影不硬凑一个节点，而是给一个**看得见的桶**：它只用来展开，
+# 不能被选成阅读位置，所以不会冒充一条真数据。
+ORPHAN_STORYLINE = "~orphan"
+ORPHAN_SCENE = "~orphan-scene"
+ORPHAN_LABELS = {ORPHAN_STORYLINE: "未归入大事件", ORPHAN_SCENE: "未归入场景"}
+
 
 
 def _key(node: dict) -> tuple:
@@ -142,26 +151,77 @@ def steps(snapshot: dict, granularity: str = "scene") -> list[dict]:
     ]
 
 
-def moment_tree(snapshot: dict) -> dict:
+def _progress_by_scene(snapshot: dict, records: list[dict] | None) -> dict[str, dict]:
+    """每个场景对「大事件走到哪了」的那一句话，取它自己最后一条。
+
+    记录挂在场景上（`storyline_progress`），不是挂在大事件上：大事件是容器，
+    它的样子由已经读过的场景攒出来，而不是自己写一句结论。
+    """
+    nodes = _by_id(snapshot)
+    best: dict[str, tuple[tuple, dict]] = {}
+    for record in records or []:
+        if not isinstance(record, dict) or record.get("kind") != "property_value":
+            continue
+        if str(record.get("property_id") or "").strip() != STORYLINE_PROGRESS:
+            continue
+        scene = nodes.get(str(record.get("node_id") or ""))
+        if scene is None or scene.get("node_type") != "scene":
+            continue
+        event = nodes.get(str(record.get("event_id") or ""))
+        if event is None:
+            continue
+        key = _key(event)
+        if scene["id"] not in best or key > best[scene["id"]][0]:
+            best[scene["id"]] = (key, record)
+    return {scene_id: record for scene_id, (_key_, record) in best.items()}
+
+
+def _storyline_name(storyline: dict, nodes: dict[str, dict], cut_key: tuple | None) -> dict:
+    """读者此刻看到的大事件叫什么。
+
+    大事件常常到收尾才有正式名，过程里只有一个暂称。读到它最后一步之前，
+    显示暂称——否则读者在开头就看到了结局的名字。
+    """
+    final = storyline.get("name") or storyline["id"]
+    provisional = str(storyline.get("provisional_name") or "").strip()
+    if not provisional or cut_key is None:
+        return {"name": final, "final_name": final, "provisional": False}
+    end = _key(anchor_event({"nodes": list(nodes.values())}, storyline))
+    if cut_key >= end:
+        return {"name": final, "final_name": final, "provisional": False}
+    return {"name": provisional, "final_name": final, "provisional": True}
+
+
+def moment_tree(
+    snapshot: dict,
+    cut_event_id: str = "",
+    records: list[dict] | None = None,
+) -> dict:
     """按粒度分级的阅读位置：一列一层，粗的在前。
 
     返回 `{"levels": [{key, label}], "nodes": [{id, label_id, name, level,
-    parent_id, kind_label}]}`。父子关系取自节点自己的 `events`（场景列事件，
-    将来事件列动作），所以多一层只是 `MOMENT_LEVELS` 里多一行。
+    parent_id, rank, kind_label, summary, synthetic}]}`。
+
+    层级是**硬性**的：第一列只有大事件，场景一律在大事件下面，事件一律在场景
+    下面。没有归属的场景进「未归入大事件」这个桶，而不是混进第一列冒充大事件
+    ——混在一起时，读者没法判断自己在选哪一级。
+
+    `cut_event_id` 是当前阅读位置：大事件在读完最后一步之前显示暂称，`summary`
+    也只取到这一步为止。`records` 是属性取值，场景对「大事件走到哪了」的那句话
+    就在里面（`STORYLINE_PROGRESS`）。
     """
     nodes = {
         node["id"]: node
         for node in snapshot.get("nodes", [])
         if isinstance(node.get("id"), str) and not node.get("retracted")
     }
-    present = {
-        str(node.get("node_type"))
-        for node in nodes.values()
-    }
-    levels = [dict(level) for level in MOMENT_LEVELS if level["key"] in present]
-    if not levels:
+    present = {str(node.get("node_type")) for node in nodes.values()}
+    wanted = {level["key"] for level in MOMENT_LEVELS}
+    if not (present & wanted):
         return {"levels": [], "nodes": []}
-    wanted = {level["key"] for level in levels}
+    # 三级是固定的，不因为「这个工程暂时没有大事件」就塌成两级——塌了以后场景
+    # 又跑到第一列去，正是这次要修的那个错。
+    levels = [dict(level) for level in MOMENT_LEVELS]
     rank = {level["key"]: index for index, level in enumerate(levels)}
 
     # 谁把谁列在自己的 `events` 里，谁就是上一层。
@@ -171,36 +231,106 @@ def moment_tree(snapshot: dict) -> dict:
             if child in nodes:
                 parent_of.setdefault(child, node["id"])
 
+    progress = _progress_by_scene(snapshot, records)
+    cut_key = _key(nodes[cut_event_id]) if cut_event_id in nodes else None
+
+    def seen(scene_id: str) -> bool:
+        if cut_key is None:
+            return True
+        return _key(anchor_event(snapshot, nodes[scene_id])) <= cut_key
+
     orders = _orders(snapshot)
-    rows: list[tuple[int, int, dict]] = []
+    rows: list[tuple[tuple, dict]] = []
+    orphans: dict[str, list[dict]] = {ORPHAN_STORYLINE: [], ORPHAN_SCENE: []}
     for node in nodes.values():
-        if node.get("node_type") not in wanted:
+        kind = str(node.get("node_type"))
+        if kind not in wanted:
             continue
         disclosure = node.get("disclosure")
         disclosure = disclosure if isinstance(disclosure, dict) else {}
         source = disclosure.get("source_id")
         start = disclosure.get("start")
-        rows.append((
+        order = (
             int(orders.get(source, 0) or 0) if isinstance(source, str) else 0,
             start if isinstance(start, int) else -1,
-            node,
-        ))
-    rows.sort(key=lambda item: (item[0], item[1], _key(item[2])))
-    return {
-        "levels": levels,
-        "nodes": [
+            _key(node),
+        )
+        parent = parent_of.get(node["id"], "")
+        if kind == "scene":
+            if parent not in nodes or nodes[parent].get("node_type") != "storyline":
+                parent = ORPHAN_STORYLINE
+        elif kind == "event":
+            if parent not in nodes or nodes[parent].get("node_type") != "scene":
+                parent = ORPHAN_SCENE
+        else:
+            parent = ""
+        row = {
+            "id": node["id"],
+            "label_id": label_id(node["id"], kind),
+            "name": node.get("name") or node["id"],
+            "level": kind,
+            "kind_label": LABELS.get(kind, ""),
+            "parent_id": parent,
+            "rank": rank.get(kind, 0),
+            "synthetic": False,
+            "summary": "",
+        }
+        if kind == "storyline":
+            row.update(_storyline_name(node, nodes, cut_key))
+            # 大事件此刻的样子：它下面已经读过的场景里，最后那一句话。
+            done = [
+                child for child in node.get("events") or []
+                if child in nodes and nodes[child].get("node_type") == "scene"
+                and seen(child)
+            ]
+            done.sort(key=lambda scene_id: _key(anchor_event(snapshot, nodes[scene_id])))
+            for scene_id in reversed(done):
+                if progress.get(scene_id):
+                    row["summary"] = str(progress[scene_id].get("value") or "")
+                    break
+        elif kind == "scene":
+            row["summary"] = str((progress.get(node["id"]) or {}).get("value") or "")
+            if parent == ORPHAN_STORYLINE:
+                orphans[ORPHAN_STORYLINE].append(row)
+        elif kind == "event" and parent == ORPHAN_SCENE:
+            orphans[ORPHAN_SCENE].append(row)
+        rows.append((order, row))
+
+    rows.sort(key=lambda item: item[0])
+    out = [row for _order, row in rows]
+
+    # 桶排在它那一层的末尾：它是「剩下的」，不该抢在真数据前面。
+    if orphans[ORPHAN_SCENE]:
+        out.insert(
+            len(out),
             {
-                "id": node["id"],
-                "label_id": label_id(node["id"], node.get("node_type")),
-                "name": node.get("name") or node["id"],
-                "level": node.get("node_type"),
-                "kind_label": LABELS.get(str(node.get("node_type")), ""),
-                "parent_id": parent_of.get(node["id"], ""),
-                "rank": rank.get(str(node.get("node_type")), 0),
-            }
-            for _ordinal, _start, node in rows
-        ],
-    }
+                "id": ORPHAN_SCENE,
+                "label_id": "",
+                "name": ORPHAN_LABELS[ORPHAN_SCENE],
+                "level": "scene",
+                "kind_label": LABELS["scene"],
+                "parent_id": ORPHAN_STORYLINE,
+                "rank": rank.get("scene", 1),
+                "synthetic": True,
+                "summary": "",
+            },
+        )
+    if orphans[ORPHAN_STORYLINE]:
+        out.insert(
+            len(out),
+            {
+                "id": ORPHAN_STORYLINE,
+                "label_id": "",
+                "name": ORPHAN_LABELS[ORPHAN_STORYLINE],
+                "level": "storyline",
+                "kind_label": LABELS["storyline"],
+                "parent_id": "",
+                "rank": rank.get("storyline", 0),
+                "synthetic": True,
+                "summary": "",
+            },
+        )
+    return {"levels": levels, "nodes": out}
 
 
 def _scene_of(snapshot: dict, event_id: str) -> dict | None:

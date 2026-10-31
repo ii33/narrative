@@ -186,7 +186,7 @@ class GraphService:
             "time_bound_states": ["known", "unknown", "unbounded"],
             "review": "预检无 error 后仅生成待审候选；人工接受才进入正式图",
             "fields": {
-                "node": {"required": ["kind", "id", "node_type", "name"], "optional": ["aliases", "subtype", "context_id", "identity_note", "occurrence", "disclosure", "evidence", "retracted", "participants", "predecessors", "successors", "events", "source_marks"]},
+                "node": {"required": ["kind", "id", "node_type", "name"], "optional": ["aliases", "subtype", "context_id", "identity_note", "provisional_name", "occurrence", "disclosure", "evidence", "retracted", "participants", "predecessors", "successors", "events", "source_marks"]},
                 "context": {"required": ["kind", "id", "label", "context_type"], "optional": ["parent_id", "holder_id"]},
                 "timeline": {"required": ["kind", "id", "label"], "optional": ["context_id", "calendar"]},
                 "source_order": {"required": ["kind", "id", "source_id", "ordinal"], "optional": ["context_id"]},

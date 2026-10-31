@@ -15,12 +15,13 @@ from pathlib import Path
 from uuid import uuid4
 
 from .harness import HarnessReply, HarnessRunner, HarnessSettings
-from .order_ids import allocate, prefix_for
+from .order_ids import allocate, order_key, prefix_for
 from .property_categories import aspect_of
+from .property_labels import STORYLINE_PROGRESS
 from .property_store import record_position
 
 # 提示词改一次，这个号跟着动；缓存的提取结果里会写下来，便于对照。
-PROMPT_VERSION = "extract/13"
+PROMPT_VERSION = "extract/14"
 
 NODE_TYPES = ("person", "group", "item", "location", "scene", "event", "storyline")
 
@@ -36,10 +37,8 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
 - item：物品。法宝、武器、服饰、日常物件。
 - location：地点。城市、星球、房间、湖、战场等可指认的空间。
 - scene：场景。一段在同一地点、连续时间内发生的叙事片段，通常由地点变化或时间跳跃分隔。
-  场景可以用 `storyline` 字段挂到一个大事件下面（见下一节）。
+  **每个场景都必须用 `storyline` 字段挂到一个大事件下面**（见下一节）。
 - storyline：大事件。跨多个场景、**甚至跨章**的一段完整过程，有起因有结果。
-  大事件常常到结尾才有名字：过程里先给一个**暂称**（`provisional_name`），收尾那一步再定正式名
-  （`name`）。读者读到跨度中间时看到的是暂称，读完之后才看到正式名。没把握就只写 name。
   大事件常常到结尾才有名字：过程里先给一个**暂称**（`provisional_name`），收尾那一步再定正式名
   （`name`）。读者读到跨度中间时看到的是暂称，读完之后才看到正式名。没把握就只写 name。
 - event：事件。**改变了什么的一次发生**——状态、关系、地点、目标或认知发生了变化。
@@ -49,9 +48,10 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
 
 原文是一层套一层的。判断某个东西该放哪一层，看它「改变了什么」的范围有多大：
 
-- **大事件**（storyline 节点，可选）：跨多个场景、甚至跨章的一段完整过程，有起因有结果
-  （「老周把林舟带进另一个世界」）。它下面挂的是**场景**。一章里这段过程还没走完、或者
-  看不出边界，就**先不建**——不要为了凑一个节点把半截故事硬切出来；后面的章节会把它补上。
+- **大事件**（storyline 节点）：跨多个场景、甚至跨章的一段完整过程，有起因有结果
+  （「老周把林舟带进另一个世界」）。它下面挂的是**场景**，而且**每个场景都要有归属**。
+  一章里这段过程还没走完、或者看不出边界，就建一个用**暂称**的大事件——后面的章节会
+  把它补完、定下正式名。不要为了凑一个节点把半截故事硬切出来，但也不要让场景悬空。
 - **场景**（scene 节点）：同一地点、连续时间的一小段。地点变了、时间跳了，就是新场景。
 - **事件**（event 节点）：场景里**改变了什么**的一次发生——状态、关系、地点、目标或认知变了。
 - **动作**（不建节点）：「接起电话」「转身离开」「喝彩」「破口大骂」「一拳砸碎石块」。
@@ -114,6 +114,14 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
   `thought`（人物想法）、`observation`（人物观察）、`document`（书信碑文等载体）。拿不准就留空。
 - `related_nodes` 填原文明示涉及的其他节点（观察者、被归因的人、信息载体），
   **不要填 holder**——holder 已经由 scope 那一栏说明。
+- **每个场景给一条 `storyline_progress`**：一句话概括「这个大事件进行到这个场景时，
+  读者已经知道的部分」。只写这一步新走出来的东西，不要把上一场说过的再抄一遍。
+  例：第一场 `"老周找上门，说林舟得跟他走"`，第二场 `"两人到了旧车站，铁门还没开"`。
+  这几个名字不是必须一致——读者看到的本来就是「到这里为止」的样子。
+- **大事件自己不写属性**：结局、结果、状态都不写。它的样子由各个场景的
+  `storyline_progress` 攒出来，写完最后一场才完整。
+- **事件不写属性**：事件名已经说了发生了什么。状态、身份、持有者、位置这些记在
+  人物／物品／地点／场景上，不要挂在事件节点上。
 - 每条属性必须有原文引文，只写原文明确写出的。
 - property 用英文小写标识，命名的是**被说的那个方面**（age、skin、height、holder、injury、
   statement、plan），不要用中文。
@@ -991,18 +999,6 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
                 mention_ids[("scene", scene["name"], quote)]
             )
 
-    # 场景说自己属于哪个大事件：反过来给大事件填上它的场景。
-    storyline_children: dict[str, list[str]] = {}
-    for scene in nodes:
-        if scene["type"] != "scene":
-            continue
-        parent = str(scene.get("storyline") or "")
-        if parent and ("storyline", parent) in ids:
-            quote = scene["quotes"][0] if scene["quotes"] else ""
-            storyline_children.setdefault(parent, []).append(
-                mention_ids[("scene", scene["name"], quote)]
-            )
-
     existing_ids = {item["id"] for item in snapshot["nodes"]}
     for item in nodes:
         key = (item["type"], item["name"])
@@ -1103,6 +1099,11 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
     used_ids: set[str] = set()
     skipped: list[dict] = []
     records: list[dict] = []
+    # 场景名 → 编号，用来把「大事件走到哪了」这句话挂到场景的最后一步：这一场
+    # 读完才算读到它，读一半就显示等于提前剧透。
+    scene_name_by_id = {
+        node_id_: name for (kind, name), node_id_ in ids.items() if kind == "scene"
+    }
     # The model may hand back a spelling that was merged or renamed away. Reading
     # it as the name in use keeps one aspect from growing a second definition the
     # moment a human renames it.
@@ -1168,6 +1169,14 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
                 value = target
         quote = prop["quotes"][0]
         anchor = event_by_name.get(prop.get("at_event") or "")
+        basis = "model" if prop.get("at_event") else "nearest"
+        if property_id == STORYLINE_PROGRESS:
+            # 大事件进展说的是**这一场读完时的样子**，所以锚在这一场最后一步，
+            # 而不是模型随手引的那句。引文仍在场景之内，位置照旧记着。
+            scene_events = scene_children.get(scene_name_by_id.get(node_id or "", "")) or []
+            if scene_events:
+                anchor = max(scene_events, key=lambda item: order_key(item) or (999,))
+                basis = "scene_end"
         if not anchor:
             anchor = _checkpoint_at(prop["start"], checkpoint_order)
         if not anchor:
@@ -1195,7 +1204,7 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
         }
         # Who chose the anchor, not what it proves: "model" means the model named
         # the event; it still only locates the disclosure, not the story change.
-        record["anchor_basis"] = "model" if prop.get("at_event") else "nearest"
+        record["anchor_basis"] = basis
         if prop.get("source"):
             record["source"] = str(prop["source"])
         # The category the model chose. It is a suggestion: a human can move the

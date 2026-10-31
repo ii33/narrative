@@ -130,14 +130,16 @@ def test_a_node_starts_with_no_cards_and_a_timeline_to_pick_from(workspace) -> N
     material = _value(page.property("material"))
     assert material["cards"] == []
     assert material["hidden_count"] == 0
-    # 生效/失效挑的是「哪一步」：一列一层，粗的在前。
-    assert [row["label"] for row in material["moments"]["levels"]] == ["场景", "事件"]
-    assert [row["label_id"] for row in material["moments"]["nodes"]] == ["E3", "S5", "E4"]
-    assert _value(page.momentRows(0, "")) == [
-        {"id": "5", "label_id": "S5", "name": "房间冲突", "level": "scene",
-         "kind_label": "场景", "parent_id": "", "rank": 0},
-    ]
-    assert [row["id"] for row in _value(page.momentRows(1, "5"))] == ["3", "4"]
+    # 生效/失效挑的是「哪一步」：大事件 → 场景 → 事件，一列一层。
+    # 这个工程没有大事件，所以第一列只有「未归入大事件」那个桶——场景不会跑上来。
+    assert [row["label"] for row in material["moments"]["levels"]] == ["大事件", "场景", "事件"]
+    first = _value(page.momentRows(0, ""))
+    assert [row["name"] for row in first] == ["未归入大事件"]
+    assert first[0]["synthetic"] is True
+    scenes = _value(page.momentRows(1, "~orphan"))
+    assert [row["label_id"] for row in scenes] == ["S5"]
+    assert scenes[0]["parent_id"] == "~orphan"
+    assert [row["id"] for row in _value(page.momentRows(2, "5"))] == ["3", "4"]
 
     del results[:]
     page.select("2")

@@ -346,18 +346,32 @@ Item {
         return node ? (node.label_id + " " + node.name) : id
     }
 
-    // 某一列的候选：这一层里挂在 parentId 下面的；没有上级的（例如不属于任何场景的
-    // 事件）也列在这一列，否则它们永远选不到。
+    // 某一列的候选：只取这一层、并且挂在上一个选择下面的。
+    // 层级是硬的——第一列只有大事件，场景一定在大事件下，事件一定在场景下。
+    // 没有归属的进「未归入大事件 / 未归入场景」两个桶，它们只用来展开。
     function momentRows(rank, parentId) {
         var nodes = (page.material.moments || {}).nodes || []
         var out = []
         for (var i = 0; i < nodes.length; ++i) {
             var node = nodes[i]
             if (node.rank !== rank) continue
-            var parent = node.parent_id || ""
-            if (parent === (parentId || "") || (rank > 0 && parent === "")) out.push(node)
+            if ((node.parent_id || "") === (parentId || "")) out.push(node)
         }
         return out
+    }
+
+    function pickMoment(rank, id) {
+        var path = page.pickedPath.slice(0, rank)
+        path.push(id)
+        page.pickedPath = path
+        page.pickedId = id
+    }
+
+    // 桶不是一条数据，点它只展开下一列，不改变已选中的阅读位置。
+    function expandMoment(rank, id) {
+        var path = page.pickedPath.slice(0, rank)
+        path.push(id)
+        page.pickedPath = path
     }
 
     // 一张卡的有效区间，折叠时就写在标题旁边。
@@ -491,13 +505,6 @@ Item {
         momentPicker.open()
     }
 
-    function pickMoment(rank, id) {
-        var path = page.pickedPath.slice(0, rank)
-        path.push(id)
-        page.pickedPath = path
-        page.pickedId = id
-    }
-
     function pickedAt(rank) {
         return rank < page.pickedPath.length ? page.pickedPath[rank] : ""
     }
@@ -556,6 +563,10 @@ Item {
                 || (item.holder_id ? page.nameOf(item.holder_id) : ""),
             // 有效与否是记录上的显式标记，不是算出来的区间：这里只说披露在哪儿。
             disclosedText: item.retracted ? "" : ("披露于 " + (item.disclosed_at || "—")),
+            // 大事件这一行是从场景借来的：说清出处，读者才知道它是跟着阅读位置变的。
+            derivedText: item.derived === true
+                ? ("来自场景 " + ((item.from_scene || {}).name || "—") + "，随阅读位置更新")
+                : "",
             records: records
         }
     }
@@ -2181,8 +2192,8 @@ Item {
         objectName: "materialMomentPicker"
         modal: true
         anchors.centerIn: parent
-        width: 560
-        height: 380
+        width: 720
+        height: 420
         padding: 12
 
         contentItem: ColumnLayout {
@@ -2227,6 +2238,7 @@ Item {
                         border.color: t.line
 
                         ListView {
+                            id: momentColumn
                             anchors.fill: parent
                             anchors.margins: 4
                             clip: true
@@ -2235,24 +2247,62 @@ Item {
                             delegate: Rectangle {
                                 required property var modelData
                                 width: ListView.view.width
-                                height: 26
+                                // 大事件多一行：读者此刻知道它走到哪了。这句话来自
+                                // 已经读过的场景，往后读会自己变长，不是写死的一条。
+                                height: (modelData.summary || "").length > 0 ? 44 : 26
                                 radius: 3
                                 color: page.pickedId === modelData.id ? t.accentSoft : "transparent"
-                                Label {
-                                    anchors.fill: parent
+
+                                Column {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
                                     anchors.leftMargin: 6
                                     anchors.rightMargin: 6
-                                    verticalAlignment: Text.AlignVCenter
-                                    text: modelData.label_id + "  " + modelData.name
-                                    color: page.pickedId === modelData.id ? t.accent : t.body
-                                    font.pixelSize: 11
-                                    elide: Text.ElideRight
+                                    spacing: 1
+
+                                    Label {
+                                        width: parent.width
+                                        text: (modelData.label_id ? modelData.label_id + "  " : "")
+                                            + modelData.name
+                                            + (modelData.provisional === true ? "（暂称）" : "")
+                                        color: page.pickedId === modelData.id
+                                            ? t.accent
+                                            : (modelData.synthetic === true ? t.muted : t.body)
+                                        font.pixelSize: 11
+                                        font.italic: modelData.synthetic === true
+                                        elide: Text.ElideRight
+                                    }
+                                    Label {
+                                        width: parent.width
+                                        visible: (modelData.summary || "").length > 0
+                                        text: modelData.summary || ""
+                                        color: t.muted
+                                        font.pixelSize: 10
+                                        elide: Text.ElideRight
+                                    }
                                 }
                                 MouseArea {
                                     anchors.fill: parent
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: page.pickMoment(index, modelData.id)
+                                    onClicked: modelData.synthetic === true
+                                        ? page.expandMoment(index, modelData.id)
+                                        : page.pickMoment(index, modelData.id)
                                 }
+                            }
+
+                            // 空列要说清为什么空：第一列空了是这个工程还没大事件，
+                            // 后面两列空了是还没选上一层——层级是硬的，不猜。
+                            Label {
+                                anchors.centerIn: parent
+                                width: parent.width - 16
+                                horizontalAlignment: Text.AlignHCenter
+                                wrapMode: Text.WordWrap
+                                visible: momentColumn.count === 0
+                                text: index === 0 ? "还没有大事件"
+                                    : (index === 1 ? "先选一个大事件" : "先选一个场景")
+                                color: t.muted
+                                font.pixelSize: 10
                             }
                         }
                     }

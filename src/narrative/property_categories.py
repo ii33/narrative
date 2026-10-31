@@ -45,8 +45,12 @@ DEFAULT_CATEGORIES: dict[str, list[str]] = {
     "location": [
         "基本信息", "环境与外观", "位置与范围", "势力与居住者", "状态", FALLBACK,
     ],
+    # 事件只讲「发生了什么」，不挂状态；它那一栏留着，是因为老工程里还有。
     "event": ["基本信息", "参与者", "过程与结果", FALLBACK],
-    "scene": ["基本信息", "内容", FALLBACK],
+    # 场景是这一层唯一带属性的：它说的不是自己，而是「大事件走到这里的样子」。
+    "scene": ["基本信息", "大事件", "内容", FALLBACK],
+    # 大事件自己不写属性——界面上那一行是从场景借来的（见 node_properties）。
+    "storyline": ["大事件", FALLBACK],
     "other": ["基本信息", FALLBACK],
 }
 
@@ -145,6 +149,7 @@ _NAME_HINTS: dict[str, dict[str, str]] = {
         "effect": "过程与结果",
     },
     "scene": {
+        "storyline_progress": "大事件",
         "name": "基本信息", "location": "基本信息", "time": "基本信息",
         "content": "内容", "events": "内容",
     },

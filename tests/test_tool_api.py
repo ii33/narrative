@@ -146,10 +146,13 @@ def test_the_documented_table_covers_every_tool() -> None:
 
 
 def test_moments_are_grouped_by_granularity(project: Path) -> None:
+    """三级固定：大事件 → 场景 → 事件。没有大事件的场景进桶，不占第一列。"""
     moments = tool_api.call("list_moments", {}, project=project)
-    assert [level["key"] for level in moments["levels"]] == ["scene", "event"]
+    assert [level["key"] for level in moments["levels"]] == ["storyline", "scene", "event"]
     scene = next(row for row in moments["nodes"] if row["id"] == "4")
-    assert scene["parent_id"] == ""
+    assert scene["parent_id"] == "~orphan"
+    bucket = next(row for row in moments["nodes"] if row["id"] == "~orphan")
+    assert bucket["synthetic"] is True
     assert [row["id"] for row in moments["nodes"] if row["parent_id"] == "4"] == ["2", "3"]
 
 

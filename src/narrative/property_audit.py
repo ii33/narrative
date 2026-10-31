@@ -329,6 +329,64 @@ def audit_properties(
                 suggestion="节点撤回时一并撤回它的属性记录，或恢复该节点",
             ))
 
+    # 属性属于**东西**和**场景**，不属于一次发生。事件只讲发生了什么；给它挂
+    # 一条状态，等于把「这一刻的样子」记在了时间点上，下一次披露就没地方放。
+    for record in values:
+        node = names.get(record.get("node_id") or "") or {}
+        if node.get("node_type") == "event":
+            issues.append(_issue(
+                "property_on_event", INFO,
+                f"事件「{node.get('name')}」上挂了属性「{record.get('property_id')}」，"
+                "事件不该带属性",
+                node=node,
+                property_id=record.get("property_id"),
+                records=[record],
+                suggestion="状态记在人物/物品/地点上，或者记在它所属的场景上；"
+                           "事件名本身已经说了发生了什么",
+            ))
+
+    # 场景必须归到一个大事件下面。没有归属的场景在界面里只能进「未归入大事件」
+    # 那个桶——它不是错，但它说明这一章还没读出大事件的边界。
+    parents: dict[str, list[dict]] = {}
+    for node in nodes:
+        for child in node.get("events") or []:
+            parents.setdefault(child, []).append(node)
+    for node in nodes:
+        if node.get("node_type") != "scene":
+            continue
+        owners = [item for item in parents.get(node["id"], [])
+                  if item.get("node_type") == "storyline"]
+        if owners:
+            continue
+        issues.append(_issue(
+            "scene_without_storyline", INFO,
+            f"场景「{node.get('name')}」没有归入任何大事件",
+            node=node,
+            suggestion="在场景的 `storyline` 里写它属于哪个大事件；跨章还没走完的用暂称",
+        ))
+
+    # 大事件在每个场景里往前走一步：场景没给出那句话，读者就永远看不到进展。
+    for node in nodes:
+        if node.get("node_type") != "storyline":
+            continue
+        scenes = {
+            child for child in node.get("events") or []
+            if (names.get(child) or {}).get("node_type") == "scene"
+        }
+        spoken = {
+            record.get("node_id") for record in values
+            if str(record.get("property_id") or "") == property_labels.STORYLINE_PROGRESS
+        }
+        silent = sorted(scenes - spoken)
+        if scenes and silent:
+            issues.append(_issue(
+                "scene_without_progress", INFO,
+                f"大事件「{node.get('name')}」有 {len(silent)} 个场景没写进展，"
+                "读者读到这里看不到它走到哪了",
+                node=node,
+                suggestion="每个场景给一条 `storyline_progress`，一句话概括到这个场景为止的部分",
+            ))
+
     # 属性名要在界面上显示中文。英文标识符没有对照时，读者会看到「身份」和
     # `office` 并排——中英混着，一眼就看出来这行不是给人写的。
     for property_id, definition in definitions.items():

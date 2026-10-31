@@ -133,8 +133,9 @@ Column {
             Label {
                 Layout.fillWidth: true
                 visible: item.row.disclosedText.length > 0 || item.splitHint.length > 0
+                    || (item.row.derivedText || "").length > 0
                 // 只说这句是哪一次披露的。失效的不在这里出现，所以也不提。
-                text: [item.row.disclosedText, item.splitHint]
+                text: [item.row.disclosedText, item.row.derivedText || "", item.splitHint]
                     .filter(function (part) { return part.length > 0 }).join(" · ")
                 color: item.t.muted
                 font.pixelSize: 10
