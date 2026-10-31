@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import threading
 import time
 from collections.abc import Callable
@@ -456,6 +457,52 @@ class NativeBridge(QObject):
             return {"items": items}
 
         self._submit("recent_projects", work)
+
+    @Slot(str, bool)
+    def removeProject(self, path: str, delete_files: bool) -> None:
+        """从列表移除；勾了「删除文件」就一并删掉磁盘上的工程包。
+
+        删除是不可恢复的，所以只认**看着像工程包**的目录（有 `graph.sqlite3` 或
+        `project.json`），别的路径一律不碰；正在打开的那个先关掉，否则 Windows 上
+        库还开着，删不动。
+        """
+        from PySide6.QtCore import QUrl
+
+        target = Path(QUrl(path).toLocalFile() or path)
+        if self._project_path is not None and Path(self._project_path) == target:
+            self.closeProject()
+        rows = [row for row in self._recent_paths() if Path(row) != target]
+        try:
+            ProviderStore().put(
+                GLOBAL_SCOPE, "recent_projects", json.dumps(rows, ensure_ascii=False)
+            )
+        except Exception:
+            pass
+        removed: list[str] = []
+        if delete_files:
+            looks_like_project = target.is_dir() and (
+                (target / project_package.DB_NAME).is_file()
+                or (target / project_package.PROJECT_FILE).is_file()
+            )
+            if not looks_like_project:
+                self.errorOccurred.emit("project", f"这不是工程包，没有删除：{target}")
+            else:
+                # 缓存和会话在包旁边，名字跟着包走；不一起删就是一堆没人认领的目录。
+                for extra in (
+                    target,
+                    target.parent / f"{target.stem}_extraction",
+                    target.parent / f"{target.stem}_chats",
+                ):
+                    if not extra.exists():
+                        continue
+                    try:
+                        shutil.rmtree(extra)
+                        removed.append(str(extra))
+                    except OSError as exc:
+                        self.errorOccurred.emit("project", f"删不掉 {extra.name}：{exc}")
+        if removed:
+            self.errorOccurred.emit("project", "已删除：" + "；".join(removed))
+        self.loadRecentProjects()
 
     @Slot(str)
     def forgetRecentProject(self, path: str) -> None:

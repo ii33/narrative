@@ -7,6 +7,7 @@ import QtQuick.Layouts
 // 只有从这里打开工程，才会进入操作界面。
 Item {
     id: page
+    objectName: "launcherPage"
     property var app
     readonly property var t: app.theme
 
@@ -217,6 +218,8 @@ Item {
                     radius: t.radius
 
                     ListView {
+                        id: projectList
+                        objectName: "projectList"
                         anchors.fill: parent
                         anchors.margins: 8
                         clip: true
@@ -237,6 +240,14 @@ Item {
                             color: rowHover.hovered && openable ? t.accentSoft : "transparent"
 
                             HoverHandler { id: rowHover }
+
+                            // 行点击必须**先声明**：后声明的 MouseArea 盖在上面，
+                            // 会把「移除」和「打开」的点击全吞掉（之前就是这样）。
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: openable
+                                onClicked: bridge.openProject(path)
+                            }
 
                             RowLayout {
                                 anchors.fill: parent
@@ -278,9 +289,10 @@ Item {
                                     font.pixelSize: 11
                                     font.underline: true
                                     MouseArea {
+                                        objectName: "forgetRecentArea"
                                         anchors.fill: parent
                                         cursorShape: Qt.PointingHandCursor
-                                        onClicked: bridge.forgetRecentProject(path)
+                                        onClicked: page.askRemove(path, title || name)
                                     }
                                 }
                                 Button {
@@ -289,11 +301,6 @@ Item {
                                     enabled: openable && !app.busy
                                     onClicked: bridge.openProject(path)
                                 }
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                enabled: openable
-                                onClicked: bridge.openProject(path)
                             }
                         }
 
@@ -551,6 +558,107 @@ Item {
         id: packageDialog
         title: "打开工程（.nproj 文件夹）"
         onAccepted: bridge.openProjectUrl(selectedFolder)
+    }
+
+    // 移除工程：默认只从列表拿掉；勾了才动磁盘，且删之前把路径写清楚。
+    // 第一行里「铺满整行的点击区」排第几：0 = 在控件下面（对的），更大 = 盖住了控件。
+    // delegate 不在 QObject 树上，Python 拿不到它，所以留一个能问的小口子。
+    function rowClickIndex() {
+        var content = projectList.contentItem
+        if (!content || content.children.length === 0) return -1
+        var row = content.children[0]
+        for (var i = 0; i < row.children.length; ++i) {
+            var child = row.children[i]
+            if (child.width === row.width && child.height === row.height) return i
+        }
+        return -1
+    }
+
+    function confirmRemove() {
+        bridge.removeProject(removeDialog.targetPath, deleteCheck.checked)
+        removeDialog.close()
+    }
+
+    function askRemove(path, title) {
+        removeDialog.targetPath = path
+        removeDialog.targetTitle = title || path
+        deleteCheck.checked = false
+        removeDialog.open()
+    }
+
+    Popup {
+        id: removeDialog
+        objectName: "removeProjectDialog"
+        property string targetPath: ""
+        property string targetTitle: ""
+
+        modal: true
+        anchors.centerIn: parent
+        width: 460
+        padding: 16
+
+        background: Rectangle {
+            color: page.t.color
+            border.color: page.t.line
+            radius: page.t.radius
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 10
+
+            Label {
+                text: "移除工程"
+                color: page.t.ink
+                font.pixelSize: 14
+                font.weight: Font.DemiBold
+            }
+            Label {
+                Layout.fillWidth: true
+                text: removeDialog.targetTitle
+                color: page.t.ink
+                font.pixelSize: 12
+                elide: Text.ElideRight
+            }
+            Label {
+                Layout.fillWidth: true
+                objectName: "removeProjectPath"
+                text: removeDialog.targetPath
+                color: page.t.muted
+                font.pixelSize: 10
+                elide: Text.ElideMiddle
+            }
+
+            CheckBox {
+                id: deleteCheck
+                objectName: "removeDeleteFiles"
+                text: "同时删除磁盘上的工程文件"
+            }
+            Label {
+                Layout.fillWidth: true
+                visible: deleteCheck.checked
+                wrapMode: Text.Wrap
+                text: "工程包会连同它的提取缓存、会话目录一起删除，不可恢复。"
+                color: page.t.bad
+                font.pixelSize: 10
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: "取消"
+                    flat: true
+                    onClicked: removeDialog.close()
+                }
+                Button {
+                    objectName: "removeConfirm"
+                    text: deleteCheck.checked ? "删除并移除" : "从列表移除"
+                    highlighted: true
+                    onClicked: page.confirmRemove()
+                }
+            }
+        }
     }
 
     // 新建工程放哪：没有默认工程目录，让用户选。
