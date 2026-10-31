@@ -195,10 +195,12 @@ def test_the_graph_can_stop_at_a_reading_position(page) -> None:
         "cut_name": "",
     })
 
-    # 下拉里是「最新」加每一场
-    options = _value(view.property("cutOptions"))
-    assert [row["id"] for row in options] == ["", "S1", "S2"]
-    assert options[0]["label"].startswith("最新")
+    # 三层菜单：第一列是大事件，第二列是它下面的场景，第三列是事件
+    tops = [row["id"] for row in _value(view.momentRows(0, ""))]
+    assert tops == ["T1"]
+    scenes = [row["id"] for row in _value(view.momentRows(1, "T1"))]
+    assert scenes == ["S1", "S2"]
 
-    view.pickCut(2)
+    view.chooseCut("S2", "第二场")
     assert view.property("cutId") == "S2"
+    assert view.property("cutName") == "第二场"

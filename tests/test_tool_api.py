@@ -470,7 +470,8 @@ def test_relations_stop_at_the_reading_position(tmp_path) -> None:
                 {"kind": "node", "id": "3", "node_type": "person", "name": "苏娘"},
                 {"kind": "node", "id": "4", "node_type": "scene", "name": "第一场",
                  "events": ["5"]},
-                {"kind": "node", "id": "5", "node_type": "event", "name": "交钥匙"},
+                {"kind": "node", "id": "5", "node_type": "event", "name": "交钥匙",
+                 "participants": ["1", "2"]},
                 {"kind": "node", "id": "6", "node_type": "scene", "name": "第二场",
                  "events": ["7"]},
                 {"kind": "node", "id": "7", "node_type": "event", "name": "结仇"},
@@ -504,3 +505,28 @@ def test_relations_stop_at_the_reading_position(tmp_path) -> None:
     early = _relation_map(ops, {"cut": "4"})
     assert [edge["kind"] for edge in early["edges"]] == ["朋友"]
     assert {person["name"] for person in early["persons"]} == {"林舟", "老周"}
+
+    # 只看相关：两头都得在这一场里。第一场只有林舟和老周，苏娘不该出现。
+    only = _relation_map(ops, {"cut": "4", "related_only": True})
+    assert [edge["kind"] for edge in only["edges"]] == ["朋友"]
+    assert {person["name"] for person in only["persons"]} == {"林舟", "老周"}
+
+
+    # 只看相关：两头都得在这一场里。第一场只有林舟和老周，苏娘不该出现。
+    only = _relation_map(ops, {"cut": "4", "related_only": True})
+    assert [edge["kind"] for edge in only["edges"]] == ["朋友"]
+    assert {person["name"] for person in only["persons"]} == {"林舟", "老周"}
+
+    # 一个人出场的场景：就画一个人，不把她的其他关系拖进来。
+    ops.graph_accept(
+        ops.graph_propose(
+            [{"kind": "node", "id": "8", "node_type": "scene", "name": "第三场",
+              "events": ["9"]},
+             {"kind": "node", "id": "9", "node_type": "event", "name": "一个人待着"}],
+            ops.graph_project_info()["revision"],
+        ),
+        1,
+    )
+    alone = _relation_map(ops, {"cut": "8", "related_only": True})
+    assert alone["edges"] == []
+    assert alone["persons"] == []

@@ -617,13 +617,19 @@ def _relation_map(ops, params: dict) -> dict:
             item for item in related_nodes(snapshot, cut, ops.property_records())
             if nodes.get(item, {}).get("node_type") == "person"
         }
-        # 只要一头相关就画：读者想看的是「这一步里的人跟谁有关系」，
-        # 两头都要求相关会把这一步里的人的关系全剪掉。
-        edges = [e for e in edges if e["from"] in related_ids or e["to"] in related_ids]
+        # 两头都得是这一步里的人：只要一头相关，枢纽人物的所有关系都会被拖进来，
+        # 图上又出现这一场根本没出场的人。
+        edges = [
+            e for e in edges
+            if e["from"] in related_ids and e["to"] in related_ids
+        ]
 
     # 没写阅读位置、也没开筛选时，全书的人都画（孤点说明「书里没写他和谁有关」）；
     # 一旦按位置或相关收窄，就只留连线两端——筛选后还摆一屏孤点，等于没筛。
-    if cut_key is not None or related_only:
+    if related_only and cut:
+        # 只看相关时，「相关的人」本身就是答案：一个人出场的场景就画一个人。
+        persons = [item for item in persons if item["id"] in related_ids]
+    elif cut_key is not None:
         linked = {e["from"] for e in edges} | {e["to"] for e in edges}
         persons = [item for item in persons if item["id"] in linked]
     return {

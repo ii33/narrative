@@ -221,21 +221,20 @@ Item {
                 color: page.muted
                 font.pixelSize: 11
             }
-            ComboBox {
-                id: cutBox
+            Button {
+                id: cutButton
                 objectName: "relationCut"
                 Layout.preferredWidth: 240
                 font.pixelSize: 11
-                model: page.cutOptions
-                textRole: "label"
-                currentIndex: page.cutIndex
-                onActivated: page.pickCut(index)
+                text: page.cutName || "最新（读到末尾）"
+                onClicked: cutPopup.open()
             }
             CheckBox {
                 id: relatedBox
                 objectName: "relationRelatedOnly"
                 text: "只看相关"
-                checked: page.relatedOnly
+                enabled: page.cutId !== ""
+                checked: page.relatedOnly && page.cutId !== ""
                 font.pixelSize: 11
                 onToggled: {
                     page.relatedOnly = checked
@@ -587,6 +586,163 @@ Item {
             }
         }
         return true
+    }
+
+    // 时间点：与「数据浏览」同一套三层——大事件 → 场景 → 事件。
+    // 列里放哪些行按 `level` 判断，不按后端算的序号，免得层级错位时串列。
+    function momentRows(rank, parentId) {
+        var levels = page.moments.levels || []
+        var key = rank < levels.length ? levels[rank].key : ""
+        var nodes = page.moments.nodes || []
+        var out = []
+        for (var i = 0; i < nodes.length; ++i) {
+            var node = nodes[i]
+            if (node.level !== key) continue
+            if ((node.parent_id || "") === (parentId || "")) out.push(node)
+        }
+        return out
+    }
+
+    function chooseCut(id, name) {
+        page.cutId = id || ""
+        page.cutName = name || ""
+        page.relatedOnly = page.relatedOnly && page.cutId !== ""
+        page.load()
+        cutPopup.close()
+    }
+
+    Popup {
+        id: cutPopup
+        objectName: "relationCutPopup"
+        modal: true
+        padding: 0
+        width: Math.min(780, page.width - 80)
+        height: Math.min(380, page.height - 120)
+        anchors.centerIn: parent
+        property string firstId: ""
+        property string secondId: ""
+
+        onOpened: {
+            var here = page.momentPath(page.cutId)
+            firstId = here.storyline
+            secondId = here.scene
+            if (firstId === "") {
+                var tops = page.momentRows(0, "")
+                firstId = tops.length > 0 ? tops[0].id : ""
+            }
+            if (secondId === "") {
+                var kids = page.momentRows(1, firstId)
+                secondId = kids.length > 0 ? kids[0].id : ""
+            }
+        }
+
+        background: Rectangle {
+            color: page.t.panel
+            border.color: page.t.line
+            radius: page.t.radius
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 0
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 32
+                spacing: 8
+                Button {
+                    text: "最新（读到末尾）"
+                    flat: true
+                    font.pixelSize: 11
+                    onClicked: page.chooseCut("", "")
+                }
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: "关闭"
+                    flat: true
+                    font.pixelSize: 11
+                    onClicked: cutPopup.close()
+                }
+            }
+            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: page.t.line }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 0
+
+                Repeater {
+                    model: page.moments.levels || []
+                    delegate: Item {
+                        required property var modelData
+                        required property int index
+                        Layout.preferredWidth: index === 0 ? 280 : (index === 1 ? 260 : -1)
+                        Layout.fillWidth: index === 2
+                        Layout.fillHeight: true
+
+                        ListView {
+                            id: cutList
+                            objectName: "relationCutLevel" + index
+                            anchors.fill: parent
+                            anchors.margins: 4
+                            clip: true
+                            spacing: 2
+                            model: index === 0
+                                ? page.momentRows(0, "")
+                                : page.momentRows(index,
+                                                  index === 1 ? cutPopup.firstId : cutPopup.secondId)
+                            delegate: ItemDelegate {
+                                id: cutRow
+                                required property var modelData
+                                width: ListView.view.width
+                                readonly property bool picked: page.cutId === modelData.id
+                                onClicked: {
+                                    if (index === 0) cutPopup.firstId = modelData.id
+                                    if (index === 1) cutPopup.secondId = modelData.id
+                                    page.chooseCut(modelData.id, modelData.name)
+                                }
+                                background: Rectangle {
+                                    radius: 4
+                                    color: cutRow.picked ? page.t.accentSoft
+                                        : (cutRow.hovered ? page.t.panelAlt : "transparent")
+                                }
+                                contentItem: Label {
+                                    leftPadding: 8
+                                    text: (modelData.label_id ? modelData.label_id + "　" : "")
+                                        + modelData.name
+                                        + (modelData.provisional === true ? "（暂称）" : "")
+                                    elide: Text.ElideRight
+                                    font.pixelSize: 11
+                                    font.italic: modelData.synthetic === true
+                                    font.weight: cutRow.picked ? Font.DemiBold : Font.Normal
+                                    color: cutRow.picked ? page.t.accent
+                                        : (modelData.synthetic === true ? page.t.muted : page.t.body)
+                                }
+                            }
+                        }
+
+                        Label {
+                            anchors.centerIn: parent
+                            width: parent.width - 16
+                            horizontalAlignment: Text.AlignHCenter
+                            wrapMode: Text.WordWrap
+                            visible: cutList.count === 0
+                            text: index === 0 ? "还没有大事件"
+                                : (index === 1 ? "先选一个大事件" : "先选一个场景")
+                            color: page.t.muted
+                            font.pixelSize: 10
+                        }
+
+                        Rectangle {
+                            visible: index < 2
+                            anchors.right: parent.right
+                            width: 1
+                            height: parent.height
+                            color: page.t.line
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // 从圆心朝 (qx,qy) 走 r 的那一点：边要落在圆周上。
