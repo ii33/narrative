@@ -72,6 +72,7 @@ Item {
     property var inboundRows: []       // 别的节点指向本节点的记录
     property var claimRows: []         // 本节点说过的、关于别人的说法
     property var heardRows: []         // 别人说的、关于本节点的话
+    property var moments: ({ levels: [], nodes: [] })   // 阅读位置的三层（后端给）
     property var childRows: []         // 下一级时间点：大事件→场景→事件
     // 节点资料：一张张资料卡，各有生效/失效时间。它和属性是同一类东西——
     // 「从这一步起成立，到那一步起不成立」——只是没有引文，所以不进属性记录。
@@ -137,6 +138,7 @@ Item {
         steps = payload.steps || []
         events = payload.events || []
         timeline = payload.timeline || []
+        moments = payload.moments || ({ levels: [], nodes: [] })
         counts = payload.counts || ({})
         projectTotal = payload.project_total === undefined ? 0 : payload.project_total
         total = payload.total || 0
@@ -328,8 +330,10 @@ Item {
     // 层级表来自后端（`browse_view.MOMENT_LEVELS`），这里不写死「场景→事件」，
     // 多一层（卷、章，或者事件里的动作）只是多一列。
 
-    function momentLevels() {
-        return (page.material.moments || {}).levels || []
+    // 层级表跟着**传进来的那棵树**走：阅读位置菜单用它自己那份（browse 载荷），
+    // 资料卡用它那份（material 载荷）。写死读 material 会让菜单一列都没有。
+    function momentLevels(tree) {
+        return (tree || page.moments || ({})).levels || []
     }
 
     function momentNode(id) {
@@ -346,15 +350,20 @@ Item {
         return node ? (node.label_id + " " + node.name) : id
     }
 
-    // 某一列的候选：只取这一层、并且挂在上一个选择下面的。
-    // 层级是硬的——第一列只有大事件，场景一定在大事件下，事件一定在场景下。
-    // 没有归属的进「未归入大事件 / 未归入场景」两个桶，它们只用来展开。
-    function momentRows(rank, parentId) {
-        var nodes = (page.material.moments || {}).nodes || []
+    // 某一列的候选：只取**这一层**、并且挂在上一个选择下面的。
+    //
+    // 按 `level`（节点类型）筛，不按 `rank` 数字筛：数字是后端算出来的位置，
+    // 一旦后端与界面版本对不上（或者老数据里场景没有大事件），数字就会把场景
+    // 排进第一列。层级名是稳定的，宁可空着也不许串列。
+    function momentRows(tree, rank, parentId) {
+        var source = tree || ({})
+        var levels = source.levels || []
+        var key = rank < levels.length ? levels[rank].key : ""
+        var nodes = source.nodes || []
         var out = []
         for (var i = 0; i < nodes.length; ++i) {
             var node = nodes[i]
-            if (node.rank !== rank) continue
+            if (node.level !== key) continue
             if ((node.parent_id || "") === (parentId || "")) out.push(node)
         }
         return out
@@ -918,34 +927,34 @@ Item {
             height: Math.min(420, page.height - 140)
             x: Math.round((page.width - width) / 2)
             y: 76
-            property int first: 0
-            property int second: -1
-            property int third: -1
+            // 选中的是三层的**编号**，不是列表下标：下标会被排序和桶搅乱，
+            // 编号不会。桶（未归入大事件 / 未归入场景）只能展开，不能当阅读位置。
+            property string firstId: ""
+            property string secondId: ""
+            property string thirdId: ""
 
-            // 打开时先落在第一段的第一个场景上：右边那列立刻有东西，不用先点一下。
+            // 打开时落在第一段的第一个场景上：右边那列立刻有东西，不用先点一下。
             onOpened: {
-                var top = page.timelineTop()
-                first = top.length > 0 ? top[0] : -1
-                var kids = page.timelineChildren(first)
-                second = kids.length > 0 ? kids[0] : -1
-                third = -1
+                var tops = page.momentRows(page.moments, 0, "")
+                firstId = tops.length > 0 ? tops[0].id : ""
+                var kids = page.momentRows(page.moments, 1, firstId)
+                secondId = kids.length > 0 ? kids[0].id : ""
+                thirdId = ""
             }
 
-            function choose(level, index) {
-                var row = page.timeline[index]
-                if (!row) return
+            function choose(level, id, synthetic) {
                 if (level === 0) {
-                    first = index
-                    var kids = page.timelineChildren(index)
-                    second = kids.length > 0 ? kids[0] : -1
-                    third = -1
+                    firstId = id
+                    var kids = page.momentRows(page.moments, 1, id)
+                    secondId = kids.length > 0 ? kids[0].id : ""
+                    thirdId = ""
                 } else if (level === 1) {
-                    second = index
-                    third = -1
+                    secondId = id
+                    thirdId = ""
                 } else {
-                    third = index
+                    thirdId = id
                 }
-                page.pickCutById(row.id)
+                if (!synthetic) page.pickCutById(id)
             }
 
             background: Rectangle {
@@ -963,29 +972,20 @@ Item {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 30
                     spacing: 0
-                    Label {
-                        text: "大事件"
-                        Layout.preferredWidth: 300
-                        leftPadding: 12
-                        color: t.muted
-                        font.pixelSize: 11
-                        font.weight: Font.DemiBold
-                    }
-                    Label {
-                        text: "场景"
-                        Layout.preferredWidth: 280
-                        leftPadding: 12
-                        color: t.muted
-                        font.pixelSize: 11
-                        font.weight: Font.DemiBold
-                    }
-                    Label {
-                        text: "事件"
-                        Layout.fillWidth: true
-                        leftPadding: 12
-                        color: t.muted
-                        font.pixelSize: 11
-                        font.weight: Font.DemiBold
+                    Repeater {
+                        model: page.momentLevels(page.moments)
+                        delegate: Label {
+                            required property var modelData
+                            required property int index
+                            text: modelData.label
+                            Layout.preferredWidth: index === 0 ? 300
+                                : (index === 1 ? 280 : -1)
+                            Layout.fillWidth: index === 2
+                            leftPadding: 12
+                            color: t.muted
+                            font.pixelSize: 11
+                            font.weight: Font.DemiBold
+                        }
                     }
                 }
                 Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: t.line }
@@ -995,65 +995,64 @@ Item {
                     Layout.fillHeight: true
                     spacing: 0
 
-                    ListView {
-                        objectName: "browseTimelineLevel0"
-                        Layout.preferredWidth: 300
-                        Layout.fillHeight: true
-                        clip: true
-                        model: page.timelineTop()
-                        delegate: ItemDelegate {
+                    Repeater {
+                        model: page.momentLevels(page.moments)
+                        delegate: Item {
                             required property var modelData
-                            width: ListView.view.width
-                            highlighted: timelinePopup.first === modelData
-                            onClicked: timelinePopup.choose(0, modelData)
-                            contentItem: Label {
-                                text: page.timeline[modelData].label_id + "　"
-                                    + page.timeline[modelData].name
-                                elide: Text.ElideRight
-                                font.pixelSize: 12
-                                color: t.body
+                            required property int index
+                            Layout.preferredWidth: index === 0 ? 300 : (index === 1 ? 280 : -1)
+                            Layout.fillWidth: index === 2
+                            Layout.fillHeight: true
+
+                            ListView {
+                                id: columnList
+                                objectName: "browseTimelineLevel" + index
+                                anchors.fill: parent
+                                clip: true
+                                model: index === 0
+                                    ? page.momentRows(page.moments, 0, "")
+                                    : page.momentRows(page.moments, index,
+                                                      index === 1 ? timelinePopup.firstId
+                                                                  : timelinePopup.secondId)
+                                delegate: ItemDelegate {
+                                    required property var modelData
+                                    width: ListView.view.width
+                                    highlighted: index === 0 ? timelinePopup.firstId === modelData.id
+                                        : (index === 1 ? timelinePopup.secondId === modelData.id
+                                                       : timelinePopup.thirdId === modelData.id)
+                                    onClicked: timelinePopup.choose(index, modelData.id,
+                                                                    modelData.synthetic === true)
+                                    contentItem: Label {
+                                        text: (modelData.label_id ? modelData.label_id + "　" : "")
+                                            + modelData.name
+                                            + (modelData.provisional === true ? "（暂称）" : "")
+                                        elide: Text.ElideRight
+                                        font.pixelSize: 12
+                                        font.italic: modelData.synthetic === true
+                                        color: modelData.synthetic === true ? t.muted : t.body
+                                    }
+                                }
                             }
-                        }
-                    }
-                    Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: t.line }
-                    ListView {
-                        objectName: "browseTimelineLevel1"
-                        Layout.preferredWidth: 280
-                        Layout.fillHeight: true
-                        clip: true
-                        model: page.timelineChildren(timelinePopup.first)
-                        delegate: ItemDelegate {
-                            required property var modelData
-                            width: ListView.view.width
-                            highlighted: timelinePopup.second === modelData
-                            onClicked: timelinePopup.choose(1, modelData)
-                            contentItem: Label {
-                                text: page.timeline[modelData].label_id + "　"
-                                    + page.timeline[modelData].name
-                                elide: Text.ElideRight
-                                font.pixelSize: 12
-                                color: t.body
+
+                            // 空列要说清为什么空，不然看起来像坏了。
+                            Label {
+                                anchors.centerIn: parent
+                                width: parent.width - 16
+                                horizontalAlignment: Text.AlignHCenter
+                                wrapMode: Text.WordWrap
+                                visible: columnList.count === 0
+                                text: index === 0 ? "还没有大事件"
+                                    : (index === 1 ? "先选一个大事件" : "先选一个场景")
+                                color: t.muted
+                                font.pixelSize: 10
                             }
-                        }
-                    }
-                    Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: t.line }
-                    ListView {
-                        objectName: "browseTimelineLevel2"
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        clip: true
-                        model: page.timelineChildren(timelinePopup.second)
-                        delegate: ItemDelegate {
-                            required property var modelData
-                            width: ListView.view.width
-                            highlighted: timelinePopup.third === modelData
-                            onClicked: timelinePopup.choose(2, modelData)
-                            contentItem: Label {
-                                text: page.timeline[modelData].label_id + "　"
-                                    + page.timeline[modelData].name
-                                elide: Text.ElideRight
-                                font.pixelSize: 12
-                                color: t.body
+
+                            Rectangle {
+                                visible: index < 2
+                                anchors.right: parent.right
+                                width: 1
+                                height: parent.height
+                                color: t.line
                             }
                         }
                     }
@@ -2211,7 +2210,7 @@ Item {
                 Layout.fillWidth: true
                 spacing: 8
                 Repeater {
-                    model: page.momentLevels()
+                    model: page.momentLevels(page.material.moments)
                     delegate: Label {
                         required property var modelData
                         Layout.fillWidth: true
@@ -2227,7 +2226,7 @@ Item {
                 Layout.fillHeight: true
                 spacing: 8
                 Repeater {
-                    model: page.momentLevels()
+                    model: page.momentLevels(page.material.moments)
                     delegate: Rectangle {
                         required property var modelData
                         required property int index
@@ -2243,7 +2242,8 @@ Item {
                             anchors.margins: 4
                             clip: true
                             spacing: 2
-                            model: page.momentRows(index, index === 0 ? "" : page.pickedAt(index - 1))
+                            model: page.momentRows(page.material.moments, index,
+                                                   index === 0 ? "" : page.pickedAt(index - 1))
                             delegate: Rectangle {
                                 required property var modelData
                                 width: ListView.view.width

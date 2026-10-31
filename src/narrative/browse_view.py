@@ -549,6 +549,9 @@ def browse_view(
         "steps": steps(snapshot, granularity),
         # 时间点的层级：大事件 → 场景 → 事件。菜单按这个缩进展开，点哪一级就停在哪一级。
         "timeline": timeline_tree(snapshot),
+        # 阅读位置的三列菜单与资料卡的时间点选择器用**同一份**树：两套结构早晚
+        # 会说出两种层级，而层级只有一个。
+        "moments": moment_tree(snapshot),
         # Pickers that need an event (补录) get the full list whatever the
         # granularity is — the reading position is not the only use of events.
         "events": steps(snapshot, "event"),

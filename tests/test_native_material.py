@@ -133,13 +133,13 @@ def test_a_node_starts_with_no_cards_and_a_timeline_to_pick_from(workspace) -> N
     # 生效/失效挑的是「哪一步」：大事件 → 场景 → 事件，一列一层。
     # 这个工程没有大事件，所以第一列只有「未归入大事件」那个桶——场景不会跑上来。
     assert [row["label"] for row in material["moments"]["levels"]] == ["大事件", "场景", "事件"]
-    first = _value(page.momentRows(0, ""))
+    first = _value(page.momentRows(_value(page.property("material"))["moments"], 0, ""))
     assert [row["name"] for row in first] == ["未归入大事件"]
     assert first[0]["synthetic"] is True
-    scenes = _value(page.momentRows(1, "~orphan"))
+    scenes = _value(page.momentRows(_value(page.property("material"))["moments"], 1, "~orphan"))
     assert [row["label_id"] for row in scenes] == ["S5"]
     assert scenes[0]["parent_id"] == "~orphan"
-    assert [row["id"] for row in _value(page.momentRows(2, "5"))] == ["3", "4"]
+    assert [row["id"] for row in _value(page.momentRows(_value(page.property("material"))["moments"], 2, "5"))] == ["3", "4"]
 
     del results[:]
     page.select("2")
@@ -317,3 +317,37 @@ def test_cards_belong_to_the_node_not_the_page(workspace) -> None:
     _pump(app, results, "material", "2")
     app.processEvents()
     assert [card["title"] for card in _value(page.property("material"))["cards"]] == ["认主之后"]
+
+
+def test_a_scene_can_never_land_in_the_storyline_column(workspace) -> None:
+    """第一列按**层级名**筛，不按后端算的序号筛。
+
+    序号是位置，后端与界面版本对不上（或老数据里场景没有大事件）时会把场景排进
+    第一列——那正是「多级下拉列表还是不对」的样子。层级名是稳定的。
+    """
+    app, _bridge, page, _results, _errors = workspace
+    app.processEvents()
+    page.setProperty("material", {
+        "cards": [], "hidden_count": 0,
+        "moments": {
+            "levels": [
+                {"key": "storyline", "label": "大事件"},
+                {"key": "scene", "label": "场景"},
+                {"key": "event", "label": "事件"},
+            ],
+            "nodes": [
+                # 后端把场景的 rank 算成了 0（老数据 / 版本不一致）
+                {"id": "T1", "label_id": "T1", "name": "一段过程", "level": "storyline",
+                 "parent_id": "", "rank": 0, "kind_label": "大事件", "synthetic": False},
+                {"id": "S1", "label_id": "S1", "name": "一个场景", "level": "scene",
+                 "parent_id": "", "rank": 0, "kind_label": "场景", "synthetic": False},
+            ],
+        },
+    })
+
+    tree = _value(page.property("material"))["moments"]
+    first = [row["id"] for row in _value(page.momentRows(tree, 0, ""))]
+    assert first == ["T1"]
+    # 场景就算没有父，也只出现在场景那一列
+    scenes = [row["id"] for row in _value(page.momentRows(tree, 1, ""))]
+    assert scenes == ["S1"]
