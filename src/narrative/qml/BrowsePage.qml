@@ -330,6 +330,33 @@ Item {
     // 层级表来自后端（`browse_view.MOMENT_LEVELS`），这里不写死「场景→事件」，
     // 多一层（卷、章，或者事件里的动作）只是多一列。
 
+    // 一个节点在这三层里的位置：{storyline, scene, event}。
+    // 给的是事件就往上找它的场景，给的是场景就往上找它的大事件；找不到的层留空。
+    function momentPath(id) {
+        var out = { storyline: "", scene: "", event: "" }
+        if (!id) return out
+        var rows = page.moments.nodes || []
+        var byId = ({})
+        for (var i = 0; i < rows.length; ++i) byId[rows[i].id] = rows[i]
+        var node = byId[id]
+        if (!node) return out
+        if (node.level === "event") {
+            out.event = node.id
+            out.scene = node.parent_id || ""
+        } else if (node.level === "scene") {
+            out.scene = node.id
+        } else if (node.level === "storyline") {
+            out.storyline = node.id
+        }
+        if (out.scene) {
+            var scene = byId[out.scene]
+            if (scene && scene.parent_id) out.storyline = scene.parent_id
+        }
+        // 桶（未归入大事件）不是真正的选择，只用来展开。
+        if (out.storyline.indexOf("~") === 0) out.storyline = ""
+        return out
+    }
+
     // 层级表跟着**传进来的那棵树**走：阅读位置菜单用它自己那份（browse 载荷），
     // 资料卡用它那份（material 载荷）。写死读 material 会让菜单一列都没有。
     function momentLevels(tree) {
@@ -933,8 +960,14 @@ Item {
             property string secondId: ""
             property string thirdId: ""
 
-            // 打开时落在第一段的第一个场景上：右边那列立刻有东西，不用先点一下。
+            // 打开时接着**当前阅读位置**展开：用户已经选到哪一步，菜单就停在哪一步。
+            // 每次都回到第一段的话，等于每次都要重新找一遍自己读到哪了。
             onOpened: {
+                var here = page.momentPath(page.cutId)
+                firstId = here.storyline
+                secondId = here.scene
+                thirdId = here.event
+                if (firstId !== "") return
                 var tops = page.momentRows(page.moments, 0, "")
                 firstId = tops.length > 0 ? tops[0].id : ""
                 var kids = page.momentRows(page.moments, 1, firstId)

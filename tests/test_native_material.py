@@ -351,3 +351,40 @@ def test_a_scene_can_never_land_in_the_storyline_column(workspace) -> None:
     # 场景就算没有父，也只出现在场景那一列
     scenes = [row["id"] for row in _value(page.momentRows(tree, 1, ""))]
     assert scenes == ["S1"]
+
+
+def test_the_time_menu_keeps_where_you_are(workspace) -> None:
+    """再打开时间点菜单，应该停在当前阅读位置，而不是回到第一段。"""
+    app, _bridge, page, _results, _errors = workspace
+    app.processEvents()
+    page.setProperty("moments", {
+        "levels": [
+            {"key": "storyline", "label": "大事件"},
+            {"key": "scene", "label": "场景"},
+            {"key": "event", "label": "事件"},
+        ],
+        "nodes": [
+            {"id": "T1", "label_id": "T1", "name": "第一段", "level": "storyline",
+             "parent_id": "", "rank": 0, "synthetic": False},
+            {"id": "T2", "label_id": "T2", "name": "第二段", "level": "storyline",
+             "parent_id": "", "rank": 0, "synthetic": False},
+            {"id": "S1", "label_id": "S1", "name": "第一场", "level": "scene",
+             "parent_id": "T1", "rank": 1, "synthetic": False},
+            {"id": "S5", "label_id": "S5", "name": "第二段的一场", "level": "scene",
+             "parent_id": "T2", "rank": 1, "synthetic": False},
+            {"id": "E9", "label_id": "E9", "name": "那一步", "level": "event",
+             "parent_id": "S5", "rank": 2, "synthetic": False},
+        ],
+    })
+
+    # 停在事件上：三层都要对得上
+    path = _value(page.momentPath("E9"))
+    assert path == {"storyline": "T2", "scene": "S5", "event": "E9"}
+
+    # 停在场景上：大事件跟着它的父节点
+    path = _value(page.momentPath("S5"))
+    assert path["storyline"] == "T2" and path["scene"] == "S5" and path["event"] == ""
+
+    # 不认识的位置：空，菜单会退回第一段
+    path = _value(page.momentPath(""))
+    assert path["storyline"] == ""

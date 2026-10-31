@@ -446,12 +446,20 @@ def related_nodes(
             participant for participant in item.get("participants") or []
             if participant in nodes
         )
+    # 属性从哪里往外扩：这一步本身（场景/事件），加上参与其中的**物和地点**——
+    # 「这一场里手镯在谁手上」正是相关的事。
+    # 但**人物**的档案不扩：「身份」「司机」是他自己的资料，顺着它走会把全书的人都
+    # 拉进来，选一个大事件却列出没出场的人，就是这么来的。
+    structural = {
+        node_id for node_id in found
+        if (nodes.get(node_id) or {}).get("node_type") != "person"
+    }
     # 属性指到的人 / 物：谁拿着这把钥匙、这一场里谁和谁是仇敌。
     if records:
         for record in records:
             if record.get("kind") != "property_value":
                 continue
-            if str(record.get("node_id") or "") not in found:
+            if str(record.get("node_id") or "") not in structural:
                 continue
             for target in [record.get("value"), *(record.get("related_nodes") or [])]:
                 if isinstance(target, str) and target in nodes and target != step_id:

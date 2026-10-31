@@ -237,3 +237,32 @@ def test_a_storyline_is_related_to_the_scenes_it_spans() -> None:
     assert "I1" in found
     # 只走一步：被指到的节点不会再把自己的关系拉进来
     assert {"P1", "P2"} <= found
+
+
+def test_a_participants_own_profile_does_not_widen_the_step() -> None:
+    """属性只从这一步（场景/事件）往外扩，不从参与者身上扩。
+
+    顺着人物节点的「身份」「司机」扩下去，会把全书的人都算成「相关」——选一个大事件
+    却列出没出场的人，就是这么来的。
+    """
+    from narrative.browse_view import related_nodes
+
+    snapshot = {
+        "nodes": [
+            {"id": "S1", "node_type": "scene", "name": "一场", "events": ["E1"]},
+            {"id": "E1", "node_type": "event", "name": "一件事", "participants": ["P1"]},
+            {"id": "P1", "node_type": "person", "name": "林舟"},
+            {"id": "I1", "node_type": "item", "name": "铜钥匙"},
+            {"id": "P9", "node_type": "person", "name": "路人"},
+        ],
+    }
+    records = [
+        # 事件上的属性：这一场里钥匙在谁手上 → 算相关
+        {"kind": "property_value", "node_id": "E1", "property_id": "持有者", "value": "I1"},
+        # 人物自己的档案：他的司机是谁 → 不该把司机拉进这一场
+        {"kind": "property_value", "node_id": "P1", "property_id": "司机", "value": "P9"},
+    ]
+
+    found = set(related_nodes(snapshot, "S1", records))
+    assert "I1" in found
+    assert "P9" not in found
