@@ -21,7 +21,7 @@ from .property_labels import STORYLINE_PROGRESS
 from .property_store import record_position
 
 # 提示词改一次，这个号跟着动；缓存的提取结果里会写下来，便于对照。
-PROMPT_VERSION = "extract/15"
+PROMPT_VERSION = "extract/16"
 
 NODE_TYPES = ("person", "group", "item", "location", "scene", "event", "storyline")
 
@@ -202,7 +202,8 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
 
 {known}
 
-输出一个 JSON 对象，不要任何解释文字：
+输出一个 JSON 对象，不要任何解释文字。**`nodes` 和 `properties` 是两个并列的数组**：
+节点进 `nodes`，属性进 `properties`，属性行（`node` / `property` / `value`）不要塞进 `nodes`。
 
 {{"nodes": [
   {{"name": "林舟", "type": "person", "quotes": ["原文逐字引文"], "aliases": ["林总"]}},
@@ -408,6 +409,23 @@ def parse_nodes(raw: str, text: str) -> dict:
     if not isinstance(rows, list):
         raise ValueError("模型回复缺少 nodes 数组")
 
+    # 模型偶尔把属性行写进 `nodes` 里（长章节更容易）：一行有 node/property 没有 type，
+    # 那就是属性，不是节点。按**形状**认，不按数组位置认——否则这些行会被当成
+    # 「类型无效」丢掉，整章的属性、关系、大事件进展一起消失，还不报错。
+    strays: list[dict] = []
+    kept_rows: list = []
+    for row in rows:
+        if (
+            isinstance(row, dict)
+            and not str(row.get("type") or "").strip()
+            and str(row.get("node") or "").strip()
+            and str(row.get("property") or "").strip()
+        ):
+            strays.append(row)
+        else:
+            kept_rows.append(row)
+    rows = kept_rows
+
     nodes: list[dict] = []
     rejected: list[dict] = []
     for row in rows:
@@ -458,7 +476,11 @@ def parse_nodes(raw: str, text: str) -> dict:
     grouped: dict[str, list[dict]] = {node_type: [] for node_type in NODE_TYPES}
     for node in nodes:
         grouped[node["type"]].append(node)
-    properties = _parse_properties(payload.get("properties"), text, {item["name"] for item in nodes}, rejected)
+    declared = payload.get("properties")
+    declared = declared if isinstance(declared, list) else []
+    if strays:
+        declared = declared + strays
+    properties = _parse_properties(declared, text, {item["name"] for item in nodes}, rejected)
     scenes = {item["name"] for item in grouped["scene"]}
     for event in grouped["event"]:
         if event["scene"] and event["scene"] not in scenes:

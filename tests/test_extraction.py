@@ -1025,3 +1025,33 @@ def test_a_target_already_retracted_is_left_alone() -> None:
          "event_id": "E0", "basis": "review"},
     ]
     assert _dedupe_retractions(records, accepted) == []
+
+
+def test_a_property_row_in_the_nodes_array_is_read_as_a_property() -> None:
+    """模型偶尔把属性行写进 `nodes`（长章节更容易）。
+
+    按数组位置认就会把它们判成「类型无效」丢掉——整章的属性、关系、大事件进展
+    一起消失，还不报错。按形状认：有 node/property 没有 type 就是属性。
+    """
+    from narrative.extraction import parse_nodes
+
+    text = "林舟来了。老周把铜钥匙递给他。"
+    raw = json.dumps(
+        {
+            "nodes": [
+                {"name": "林舟", "type": "person", "quotes": ["林舟来了。"]},
+                {"name": "老周", "type": "person", "quotes": ["老周把铜钥匙递给他。"]},
+                # 形状是属性，位置在 nodes 里
+                {"node": "林舟", "property": "年龄", "value": 29, "value_type": "number",
+                 "quotes": ["林舟来了。"]},
+            ],
+            # properties 键干脆没有：整批属性都在上面那一堆里
+        },
+        ensure_ascii=False,
+    )
+
+    result = parse_nodes(raw, text)
+
+    assert [node["name"] for node in result["nodes"]] == ["林舟", "老周"]
+    assert [row["property"] for row in result["properties"]] == ["年龄"]
+    assert not [row for row in result["rejected"] if "类型无效" in row["reason"]]
