@@ -440,3 +440,34 @@ def test_the_prompt_carries_what_the_book_already_has(tmp_path: Path) -> None:
     prompt = build_prompt("第二章", "天亮时两人穿过铁门。", None, context)
     assert "这本书已经读到哪儿" in prompt
     assert "林舟随老周离开" in prompt
+
+
+def test_a_scene_may_have_no_progress_but_the_arc_may_not() -> None:
+    """一场没有实质推进就不写进展句；整条大事件一句都没有才是缺口。"""
+    from narrative.property_audit import audit_properties
+
+    first_arc = [
+        {"id": "T1", "node_type": "storyline", "name": "一段过程", "events": ["S1", "S2", "S3"]},
+        {"id": "S1", "node_type": "scene", "name": "第一场", "events": []},
+        {"id": "S2", "node_type": "scene", "name": "过场", "events": []},
+        {"id": "S3", "node_type": "scene", "name": "第三场", "events": []},
+    ]
+    with_second = first_arc + [
+        {"id": "T2", "node_type": "storyline", "name": "另一段", "events": ["S4"]},
+        {"id": "S4", "node_type": "scene", "name": "第四场", "events": []},
+    ]
+
+    def progress(scene: str, text: str) -> dict:
+        return {"kind": "property_value", "id": f"v_{scene}", "node_id": scene,
+                "property_id": STORYLINE_PROGRESS, "value": text}
+
+    # 只有两场写了：第三场是过场，没写也不该报
+    report = audit_properties([progress("S1", "开头"), progress("S3", "结尾")], first_arc)
+    codes = [issue["code"] for issue in report["issues"]]
+    assert "storyline_without_progress" not in codes
+    assert "scene_without_progress" not in codes
+
+    # 另一段一句都没有：这才是读者看不到进展
+    report = audit_properties([progress("S1", "开头")], with_second)
+    issues = [i for i in report["issues"] if i["code"] == "storyline_without_progress"]
+    assert [i["node_id"] for i in issues] == ["T2"]

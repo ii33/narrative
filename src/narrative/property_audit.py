@@ -454,7 +454,8 @@ def audit_properties(
             suggestion="在场景的 `storyline` 里写它属于哪个大事件；跨章还没走完的用暂称",
         ))
 
-    # 大事件在每个场景里往前走一步：场景没给出那句话，读者就永远看不到进展。
+    # 一场没写进展是正常的：那一场没有实质推进，硬写就是拿上一句换了个说法。
+    # 真正的缺口是**整条大事件一句都没有**——读者从头到尾不知道它走到哪了。
     for node in nodes:
         if node.get("node_type") != "storyline":
             continue
@@ -462,19 +463,22 @@ def audit_properties(
             child for child in node.get("events") or []
             if (names.get(child) or {}).get("node_type") == "scene"
         }
+        if not scenes:
+            continue
         spoken = {
             record.get("node_id") for record in values
             if str(record.get("property_id") or "") == property_labels.STORYLINE_PROGRESS
         }
-        silent = sorted(scenes - spoken)
-        if scenes and silent:
-            issues.append(_issue(
-                "scene_without_progress", INFO,
-                f"大事件「{node.get('name')}」有 {len(silent)} 个场景没写进展，"
-                "读者读到这里看不到它走到哪了",
-                node=node,
-                suggestion="每个场景给一条 `storyline_progress`，一句话概括到这个场景为止的部分",
-            ))
+        if scenes & spoken:
+            continue
+        issues.append(_issue(
+            "storyline_without_progress", INFO,
+            f"大事件「{node.get('name')}」下面 {len(scenes)} 个场景一句进展都没写，"
+            "读者看不到它走到哪了",
+            node=node,
+            suggestion="在真正让它往前走的那几场上各写一句 `storyline_progress`；"
+                       "没有实质推进的场景可以不写",
+        ))
 
     # 属性名要在界面上显示中文。英文标识符没有对照时，读者会看到「身份」和
     # `office` 并排——中英混着，一眼就看出来这行不是给人写的。
