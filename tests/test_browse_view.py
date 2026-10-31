@@ -202,3 +202,38 @@ def test_a_storyline_sits_above_its_scenes(tmp_path: Path) -> None:
         (1, "老周现身"), (2, "老周出场"),
     ]
 
+
+
+def test_a_storyline_is_related_to_the_scenes_it_spans() -> None:
+    """大事件是一段，不是一点：选中它，相关节点要覆盖它下面每一场和那些场的事件。
+
+    之前这里只返回它自己，于是「相关节点」打开后页面是空的，看起来像这个大事件
+    谁都没提到。
+    """
+    from narrative.browse_view import related_nodes
+
+    snapshot = {
+        "nodes": [
+            {"id": "T1", "node_type": "storyline", "name": "一段过程", "events": ["S1", "S2"]},
+            {"id": "S1", "node_type": "scene", "name": "第一场", "events": ["E1"]},
+            {"id": "S2", "node_type": "scene", "name": "第二场", "events": ["E2"]},
+            {"id": "E1", "node_type": "event", "name": "第一件事", "participants": ["P1"]},
+            {"id": "E2", "node_type": "event", "name": "第二件事", "participants": ["P2"]},
+            {"id": "P1", "node_type": "person", "name": "林舟"},
+            {"id": "P2", "node_type": "person", "name": "老周"},
+            {"id": "I1", "node_type": "item", "name": "铜钥匙"},
+        ],
+    }
+
+    found = set(related_nodes(snapshot, "T1"))
+    assert {"T1", "S1", "S2", "E1", "E2", "P1", "P2"} <= found
+
+    # 属性指到的也算：这一场里谁拿着钥匙
+    records = [
+        {"kind": "property_value", "node_id": "E1", "property_id": "持有者", "value": "I1"},
+        {"kind": "property_value", "node_id": "P2", "property_id": "仇敌", "value": "P1"},
+    ]
+    found = set(related_nodes(snapshot, "T1", records))
+    assert "I1" in found
+    # 只走一步：被指到的节点不会再把自己的关系拉进来
+    assert {"P1", "P2"} <= found

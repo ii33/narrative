@@ -1015,21 +1015,37 @@ Item {
                                                       index === 1 ? timelinePopup.firstId
                                                                   : timelinePopup.secondId)
                                 delegate: ItemDelegate {
+                                    id: rowItem
                                     required property var modelData
                                     width: ListView.view.width
-                                    highlighted: index === 0 ? timelinePopup.firstId === modelData.id
+                                    readonly property bool picked: index === 0
+                                        ? timelinePopup.firstId === modelData.id
                                         : (index === 1 ? timelinePopup.secondId === modelData.id
                                                        : timelinePopup.thirdId === modelData.id)
+                                    highlighted: picked
                                     onClicked: timelinePopup.choose(index, modelData.id,
                                                                     modelData.synthetic === true)
+
+                                    // 选中项要有明确底色和字色：默认高亮配深色正文，
+                                    // 一选中反而看不清自己选的是哪一行。
+                                    background: Rectangle {
+                                        radius: 4
+                                        color: rowItem.picked
+                                            ? t.accentSoft
+                                            : (rowItem.hovered ? t.panelAlt : "transparent")
+                                    }
                                     contentItem: Label {
+                                        leftPadding: 8
                                         text: (modelData.label_id ? modelData.label_id + "　" : "")
                                             + modelData.name
                                             + (modelData.provisional === true ? "（暂称）" : "")
                                         elide: Text.ElideRight
                                         font.pixelSize: 12
                                         font.italic: modelData.synthetic === true
-                                        color: modelData.synthetic === true ? t.muted : t.body
+                                        font.weight: rowItem.picked ? Font.DemiBold : Font.Normal
+                                        color: rowItem.picked
+                                            ? t.accent
+                                            : (modelData.synthetic === true ? t.muted : t.body)
                                     }
                                 }
                             }

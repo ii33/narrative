@@ -282,6 +282,8 @@ Item {
                 }
 
                 // 先画线，再把标签压在线上面：标签带白底，压在线上也读得清。
+                // `placed` 记住已经放下的标签，后面挑位置时避开它们。
+                var placed = []
                 for (var e = 0; e < links.length; ++e) {
                     var edge = links[e]
                     var a = pos[edge.from]
@@ -307,10 +309,27 @@ Item {
                     var bow = len * spread
                     var cx = (a.x + b.x) / 2 + nx * bow
                     var cy = (a.y + b.y) / 2 + ny * bow
+                    // 弧别从别的圈里穿过去：穿过去就被节点盖住，读者以为这条线断了。
+                    // 往同一侧加大弯曲，最多试六次；实在绕不开就让它从下面走。
+                    var tries = 0
+                    while (tries < 6 && !page.curveIsClear(a, b, cx, cy, pos, edge.from, edge.to)) {
+                        bow *= 1.45
+                        cx = (a.x + b.x) / 2 + nx * bow
+                        cy = (a.y + b.y) / 2 + ny * bow
+                        tries += 1
+                    }
 
                     // 端点落在圆周上，不是圆心：箭头要贴着圈。
                     var start = circleToward(a.x, a.y, cx, cy, a.r + 2)
                     var end = circleToward(b.x, b.y, cx, cy, b.r + 6)
+
+                    // 先描一条白边：两条线交叉时能看出谁在上面，不会糊成一团。
+                    ctx.beginPath()
+                    ctx.lineWidth = 3.4
+                    ctx.strokeStyle = "#ffffff"
+                    ctx.moveTo(start.x, start.y)
+                    ctx.quadraticCurveTo(cx, cy, end.x, end.y)
+                    ctx.stroke()
 
                     ctx.beginPath()
                     ctx.lineWidth = 1.2
@@ -326,9 +345,12 @@ Item {
                     var label = edge.kind + (edge.state ? "（" + edge.state + "）" : "")
                     ctx.font = "11px sans-serif"
                     var lw = ctx.measureText(label).width
-                    // 弧线中点：二次贝塞尔 t=0.5
-                    var mx = 0.25 * start.x + 0.5 * cx + 0.25 * end.x
-                    var my = 0.25 * start.y + 0.5 * cy + 0.25 * end.y
+                    // 标签别压在圈上：中点被挡住就沿着弧往两头挪。
+                    var spot = page.labelSpot(start, cx, cy, end, pos, edge.from, edge.to,
+                                              placed, lw)
+                    var mx = spot.x
+                    var my = spot.y
+                    placed.push({ x: mx - lw / 2 - 4, y: my - 8, w: lw + 8, h: 16 })
                     ctx.fillStyle = "#ffffff"
                     ctx.fillRect(mx - lw / 2 - 4, my - 8, lw + 8, 16)
                     ctx.fillStyle = page.muted
@@ -429,6 +451,60 @@ Item {
         if (event.x !== undefined)
             return { x: event.x, y: event.y }
         return { x: canvas.width / 2, y: canvas.height / 2 }
+    }
+
+    // 标签放在弧上哪一点：优先中点，被圈挡住就依次往两头挪。
+    function labelSpot(start, cx, cy, end, pos, skipA, skipB, placed, width) {
+        var tries = [0.5, 0.42, 0.58, 0.34, 0.66, 0.26, 0.74, 0.2, 0.8]
+        for (var i = 0; i < tries.length; ++i) {
+            var t = tries[i]
+            var u = 1 - t
+            var px = u * u * start.x + 2 * u * t * cx + t * t * end.x
+            var py = u * u * start.y + 2 * u * t * cy + t * t * end.y
+            var blocked = false
+            for (var id in pos) {
+                if (id === skipA || id === skipB) continue
+                var other = pos[id]
+                var dx = px - other.x
+                var dy = py - other.y
+                if (dx * dx + dy * dy < (other.r + 12) * (other.r + 12)) {
+                    blocked = true
+                    break
+                }
+            }
+            if (!blocked && !page.labelHits(placed, px, py, width)) return { x: px, y: py }
+        }
+        return { x: 0.25 * start.x + 0.5 * cx + 0.25 * end.x,
+                 y: 0.25 * start.y + 0.5 * cy + 0.25 * end.y }
+    }
+
+    // 这个位置会不会压到已经放下的标签。
+    function labelHits(placed, x, y, width) {
+        var left = x - width / 2 - 4
+        var top = y - 8
+        for (var i = 0; i < (placed || []).length; ++i) {
+            var box = placed[i]
+            if (left < box.x + box.w && box.x < left + width + 8
+                && top < box.y + box.h && box.y < top + 16) return true
+        }
+        return false
+    }
+
+    // 这条弧有没有从别的圈里穿过去。只采样中间段：两端本来就贴着端点。
+    function curveIsClear(a, b, cx, cy, pos, skipA, skipB) {
+        for (var t = 0.18; t <= 0.83; t += 0.1) {
+            var u = 1 - t
+            var px = u * u * a.x + 2 * u * t * cx + t * t * b.x
+            var py = u * u * a.y + 2 * u * t * cy + t * t * b.y
+            for (var id in pos) {
+                if (id === skipA || id === skipB) continue
+                var other = pos[id]
+                var dx = px - other.x
+                var dy = py - other.y
+                if (dx * dx + dy * dy < (other.r + 8) * (other.r + 8)) return false
+            }
+        }
+        return true
     }
 
     // 从圆心朝 (qx,qy) 走 r 的那一点：边要落在圆周上。

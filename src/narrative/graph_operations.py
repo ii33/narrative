@@ -401,6 +401,8 @@ class GraphOperations:
         """
         from .browse_view import browse_view
 
+        # 记录要一起给：相关节点靠它算出「这一场里谁拿着钥匙、谁和谁是仇敌」。
+        spec.setdefault("records", self.property_records())
         return browse_view(self.graph_snapshot(), **spec)
 
     @property

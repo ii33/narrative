@@ -396,23 +396,46 @@ def _members(nodes: dict[str, dict], node: dict) -> list[dict]:
     return out
 
 
-def related_nodes(snapshot: dict, step_id: str) -> list[str]:
+def related_nodes(
+    snapshot: dict, step_id: str, records: list[dict] | None = None
+) -> list[str]:
     """Nodes the step is about: itself, what it is made of, and who takes part.
 
     A scene has no participants of its own, so it takes the union over the events
     it contains — and those events belong to it, so they are related too: reading
     a scene means reading its events. An event is related to the scene that holds
     it, for the same reason, so the two granularities agree about the same step.
+
+    A 大事件 is a span, not a point: it is related to every scene it holds and to
+    those scenes' events. Without that, selecting one showed a page with nothing
+    in it, which read as "this arc mentions nobody".
+
+    Property records widen it further — the holder of an item, the person a
+    relation points at. Those are what the reader means by 相关. One step only:
+    a relation's target does not drag in its own relations.
     """
     nodes = _by_id(snapshot)
     node = nodes.get(step_id)
     if node is None:
         return []
     found = {step_id}
-    members = _members(nodes, node) if node.get("node_type") == "scene" else []
+    kind = node.get("node_type")
+    if kind == "scene":
+        members = _members(nodes, node)
+    elif kind == "storyline":
+        # 大事件 → 它下面每一场 → 那些场里的事件
+        scenes = [
+            child for child in node.get("events") or []
+            if (nodes.get(child) or {}).get("node_type") == "scene"
+        ]
+        members = [nodes[child] for child in scenes]
+        for scene in list(members):
+            members.extend(_members(nodes, scene))
+    else:
+        members = []
     found.update(member["id"] for member in members)
     # The container is related too: an event belongs to its scene.
-    if node.get("node_type") == "event":
+    if kind == "event":
         found.update(
             scene["id"] for scene in snapshot.get("nodes", [])
             if scene.get("node_type") == "scene"
@@ -423,6 +446,16 @@ def related_nodes(snapshot: dict, step_id: str) -> list[str]:
             participant for participant in item.get("participants") or []
             if participant in nodes
         )
+    # 属性指到的人 / 物：谁拿着这把钥匙、这一场里谁和谁是仇敌。
+    if records:
+        for record in records:
+            if record.get("kind") != "property_value":
+                continue
+            if str(record.get("node_id") or "") not in found:
+                continue
+            for target in [record.get("value"), *(record.get("related_nodes") or [])]:
+                if isinstance(target, str) and target in nodes and target != step_id:
+                    found.add(target)
     return sorted(found, key=lambda node_id: _key(nodes[node_id]))
 
 
@@ -512,6 +545,7 @@ def browse_view(
     query: str = "",
     related_only: bool = False,
     time_filter: bool = False,
+    records: list[dict] | None = None,
 ) -> dict:
     """One answer for the browsing page: nodes, counts, steps and the cut.
 
@@ -525,7 +559,10 @@ def browse_view(
     """
     cut = cut_for(snapshot, cut_id) if cut_id else None
     nodes = visible_nodes(snapshot, cut if (cut is not None and time_filter) else None)
-    related = set(related_nodes(snapshot, cut_id)) if (related_only and cut_id) else None
+    related = (
+        set(related_nodes(snapshot, cut_id, records))
+        if (related_only and cut_id) else None
+    )
     needle = query.strip()
     candidates = [
         node for node in nodes
