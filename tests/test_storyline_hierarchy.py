@@ -343,3 +343,100 @@ def test_progress_written_against_a_location_lands_on_its_scene(tmp_path: Path) 
         if obj.get("kind") == "node" and obj.get("node_type") == "scene"
     )
     assert record["node_id"] == scene_id
+
+
+def test_a_scene_can_join_a_storyline_from_an_earlier_chapter(tmp_path: Path) -> None:
+    """跨章的一段过程：第二章的场景挂到第一章建的大事件上，不是再造一个同名的。"""
+    from narrative.extraction import build_candidate
+    from narrative.project_catalog import create_graph_project
+
+    ops = create_graph_project(tmp_path / "cross.nproj")
+    first = "两人到了旧站台。老周打开铁门。"
+    sid1 = ops.import_source("第一章", first)
+    ops.graph_accept(
+        ops.graph_propose(
+            [
+                {"kind": "node", "id": "1", "node_type": "storyline",
+                 "name": "林舟随老周离开", "events": ["2"]},
+                {"kind": "node", "id": "2", "node_type": "scene", "name": "旧站台",
+                 "events": ["3"]},
+                {"kind": "node", "id": "3", "node_type": "event", "name": "老周打开铁门"},
+            ],
+            ops.graph_project_info()["revision"],
+        ),
+        1,
+    )
+    # 让第一章的节点有披露位置，读起来像真的
+    ops.graph_accept(
+        ops.graph_propose(
+            [{"kind": "source_order", "id": "o1", "source_id": sid1, "ordinal": 1}],
+            ops.graph_project_info()["revision"],
+        ),
+        1,
+    )
+
+    second = "天亮时两人穿过铁门。"
+    sid2 = ops.import_source("第二章", second)
+    data = {
+        "source_id": sid2,
+        "nodes": [
+            # 场景照抄上一章大事件的名字
+            {"type": "scene", "name": "穿过铁门", "start": 0, "quotes": ["天亮时两人穿过铁门。"],
+             "scene": "", "storyline": "林舟随老周离开", "provisional_name": ""},
+            {"type": "event", "name": "天亮时两人穿过铁门", "start": 0,
+             "quotes": ["天亮时两人穿过铁门。"], "scene": "穿过铁门",
+             "storyline": "", "participants": []},
+        ],
+        "properties": [],
+        "rejected": [],
+    }
+
+    built = build_candidate(ops, data)
+    nodes = [obj for obj in built["objects"] if obj.get("kind") == "node"]
+
+    # 只有那个已有的大事件被更新，没有新建同名的
+    assert [obj["id"] for obj in nodes if obj.get("node_type") == "storyline"] == ["1"]
+    story = next(obj for obj in nodes if obj["id"] == "1")
+    assert len(story["events"]) == 2
+    assert story["events"][0] == "2"
+
+
+def test_the_prompt_carries_what_the_book_already_has(tmp_path: Path) -> None:
+    from narrative.extraction import build_prompt, graph_context
+    from narrative.project_catalog import create_graph_project
+
+    ops = create_graph_project(tmp_path / "ctx.nproj")
+    assert graph_context(ops) == ""  # 第一章没有可接的东西
+
+    text = "两人到了旧站台。老周打开铁门。"
+    sid = ops.import_source("第一章", text)
+    ops.graph_accept(
+        ops.graph_propose(
+            [
+                {"kind": "node", "id": "1", "node_type": "storyline",
+                 "name": "林舟随老周离开", "events": ["2"]},
+                {"kind": "node", "id": "2", "node_type": "scene", "name": "旧站台",
+                 "events": ["3"]},
+                {"kind": "node", "id": "3", "node_type": "event", "name": "老周打开铁门"},
+            ],
+            ops.graph_project_info()["revision"],
+        ),
+        1,
+    )
+    ops.graph_accept(
+        ops.graph_propose(
+            [{"kind": "source_order", "id": "o1", "source_id": sid, "ordinal": 1}],
+            ops.graph_project_info()["revision"],
+        ),
+        1,
+    )
+
+    context = graph_context(ops)
+    assert "林舟随老周离开" in context
+    assert "旧站台" in context
+    assert "老周打开铁门" in context
+    assert "storyline_progress" in context
+
+    prompt = build_prompt("第二章", "天亮时两人穿过铁门。", None, context)
+    assert "这本书已经读到哪儿" in prompt
+    assert "林舟随老周离开" in prompt

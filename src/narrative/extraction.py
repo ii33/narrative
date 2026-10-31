@@ -21,7 +21,7 @@ from .property_labels import STORYLINE_PROGRESS
 from .property_store import record_position
 
 # 提示词改一次，这个号跟着动；缓存的提取结果里会写下来，便于对照。
-PROMPT_VERSION = "extract/17"
+PROMPT_VERSION = "extract/18"
 
 NODE_TYPES = ("person", "group", "item", "location", "scene", "event", "storyline")
 
@@ -48,7 +48,9 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
 
 原文是一层套一层的。判断某个东西该放哪一层，看它「改变了什么」的范围有多大：
 
-- **大事件**（storyline 节点）：跨多个场景、甚至跨章的一段完整过程，有起因有结果
+- **大事件**（storyline 节点）：跨多个场景、甚至跨章的一段完整过程，有起因有结果。
+  上一章已经在走的那段过程，`storyline` **照抄它的名字**，不要另起一个——上面「这本书
+  已经读到哪儿」列着它们
   （「老周把林舟带进另一个世界」）。它下面挂的是**场景**，而且**每个场景都要有归属**。
   一章里这段过程还没走完、或者看不出边界，就建一个用**暂称**的大事件——后面的章节会
   把它补完、定下正式名。不要为了凑一个节点把半截故事硬切出来，但也不要让场景悬空。
@@ -200,6 +202,8 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
 `state = 衣服破烂` 归外貌，`state = 身受重伤` 归能力与身体状态，`state = 心情烦躁` 归心理与意图。
 拿不准就写「其他」，不要为了分类把一条记录拆成两条。
 
+{context}
+
 ## 已有属性名（优先沿用）
 
 {known}
@@ -267,9 +271,12 @@ def _known_property_lines(known: list[dict] | None) -> str:
     return "\n".join(lines)
 
 
-def build_prompt(title: str, text: str, known: list[dict] | None = None) -> str:
+def build_prompt(
+    title: str, text: str, known: list[dict] | None = None, context: str = ""
+) -> str:
     return PROMPT.format(
-        title=title, chars=len(text), text=text, known=_known_property_lines(known)
+        title=title, chars=len(text), text=text, known=_known_property_lines(known),
+        context=context or "## 这本书已经读到哪儿\n\n（还没有读过任何章节，这是第一章。）",
     )
 
 
@@ -500,6 +507,79 @@ def parse_nodes(raw: str, text: str) -> dict:
     }
 
 
+def graph_context(ops, *, tail_scenes: int = 8, tail_events: int = 12) -> str:
+    """这本书已经读到哪儿：大事件、场景、最近事件。
+
+    模型看不到前几章，所以会为同一段过程再造一个大事件、把「走到哪了」重说一遍。
+    这里把**结构**（不是全文）交给它：每个大事件连同最后两场和那两场的进展，最近
+    若干场景名与事件名。够它接着写，又不会把提示词撑成全书。
+
+    空工程返回空串——第一章不需要这段。
+    """
+    from .order_ids import order_key
+
+    snapshot = ops.graph_snapshot()
+    nodes = {node["id"]: node for node in snapshot.get("nodes", [])}
+    if not nodes:
+        return ""
+    progress = {}
+    for record in ops.property_records():
+        if record.get("kind") == "property_value" and str(
+            record.get("property_id") or ""
+        ) == STORYLINE_PROGRESS:
+            progress.setdefault(str(record.get("node_id")), str(record.get("value") or ""))
+
+    def key(node: dict) -> tuple:
+        return order_key(node.get("id") or "") or (999,)
+
+    storylines = sorted(
+        (node for node in nodes.values() if node.get("node_type") == "storyline"), key=key
+    )
+    scenes = sorted(
+        (node for node in nodes.values() if node.get("node_type") == "scene"), key=key
+    )
+    events = sorted(
+        (node for node in nodes.values() if node.get("node_type") == "event"), key=key
+    )
+
+    lines = ["## 这本书已经读到哪儿", "",
+             "接着往下写，**不要重来**：同一段过程不要另起一个大事件，同一个场景不要重复建。", ""]
+    if storylines:
+        lines.append("已有的大事件（`storyline` 就写这里的名字，新场景挂到它下面）：")
+        for story in storylines:
+            lines.append(f"- {story.get('name')}")
+            children = [
+                nodes[child] for child in story.get("events") or []
+                if child in nodes and nodes[child].get("node_type") == "scene"
+            ]
+            children.sort(key=key)
+            for scene in children[-2:]:
+                said = progress.get(scene["id"]) or "（还没写进展）"
+                lines.append(f"    · {scene.get('name')} —— {said}")
+            if not children:
+                lines.append("    （还没有场景）")
+    else:
+        lines.append("已有的大事件：还没有。这一章如果是一段完整过程，就建一个；跨章没走完的用暂称。")
+
+    if scenes:
+        lines.append("")
+        lines.append("最近的场景（名字照这个写法，本章不要重复建）：")
+        lines.append("、".join(scene.get("name") or scene["id"] for scene in scenes[-tail_scenes:]))
+
+    if events:
+        lines.append("")
+        lines.append("最近的事件（按阅读顺序，接着这个往下走）：")
+        for event in events[-tail_events:]:
+            lines.append(f"- {event.get('name') or event['id']}")
+
+    lines.append("")
+    lines.append(
+        "`storyline_progress` 写的是**到这一场为止的总结**：接着上面那句话往下说，"
+        "让读者只看这一句就知道这件事走到哪了，不要只写这一场的新动作。"
+    )
+    return "\n".join(lines)
+
+
 def known_properties(ops) -> list[dict]:
     """Property names already in the project, with the type they are used on.
 
@@ -551,6 +631,7 @@ def read_chapter(
     """
     runner = HarnessRunner(settings, api_key, workdir)
     known = known_properties(ops) if ops is not None else None
+    context = graph_context(ops) if ops is not None else ""
     session = f"extract-{uuid4().hex}"
     raws: list[str] = []
 
@@ -562,7 +643,9 @@ def read_chapter(
         raise ValueError(f"模型没有返回内容：{problem or '空回复'}")
 
     try:
-        reply: HarnessReply = runner.agent_turn(build_prompt(title, text, known), session)
+        reply: HarnessReply = runner.agent_turn(
+            build_prompt(title, text, known, context), session
+        )
         raws.append(reply.raw)
         _check(reply)
         # 先落盘再解析：解析失败时，磁盘上留着的必须是**这次**的回复。
@@ -1018,16 +1101,37 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
             )
 
     # 场景说自己属于哪个大事件：反过来给大事件填上它的场景。
+    # 那个大事件可能是**前面章节**建的（跨章的一段过程），这时不是新建一个同名节点，
+    # 而是把场景追加到已有的那个上——模型看到「这本书已经读到哪儿」就能照名字接上。
     storyline_children: dict[str, list[str]] = {}
+    attach: dict[str, list[str]] = {}
     for scene in nodes:
         if scene["type"] != "scene":
             continue
         parent = str(scene.get("storyline") or "")
-        if parent and ("storyline", parent) in ids:
-            quote = scene["quotes"][0] if scene["quotes"] else ""
-            storyline_children.setdefault(parent, []).append(
-                mention_ids[("scene", scene["name"], quote)]
-            )
+        if not parent:
+            continue
+        quote = scene["quotes"][0] if scene["quotes"] else ""
+        scene_id = mention_ids[("scene", scene["name"], quote)]
+        if ("storyline", parent) in ids:
+            storyline_children.setdefault(parent, []).append(scene_id)
+        elif ("storyline", parent) in existing:
+            attach.setdefault(parent, []).append(scene_id)
+
+    # 追加场景是**改一个已有对象**，只有修订候选能这么做（change_service 的规矩），
+    # 所以这一批要标成修订；否则预检过不去，整章退回候选。
+    cross_chapter = False
+    for name, scene_ids in attach.items():
+        story = next(
+            (item for item in snapshot["nodes"] if item["id"] == existing[("storyline", name)]),
+            None,
+        )
+        if story is None:
+            continue
+        merged = list(dict.fromkeys([*(story.get("events") or []), *scene_ids]))
+        if merged != list(story.get("events") or []):
+            objects.append(dict(story) | {"events": merged})
+            cross_chapter = True
 
     existing_ids = {item["id"] for item in snapshot["nodes"]}
     for item in nodes:
@@ -1332,6 +1436,7 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
     return {
         "objects": objects,
         "property_records": records,
+        "requires_correction": cross_chapter,
         "diagnostics": diagnostics,
         "errors": errors,
         "revision": revision,
