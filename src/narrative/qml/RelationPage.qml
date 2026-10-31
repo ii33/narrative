@@ -385,9 +385,10 @@ Item {
                         page.panBy(px.x, px.y)
                     } else {
                         var steps = event.angleDelta.y / 120
-                        if (steps !== 0)
-                            page.zoomAt(event.position.x, event.position.y,
-                                        Math.pow(1.18, steps))
+                        if (steps !== 0) {
+                            var at = page.wheelPoint(event)
+                            page.zoomAt(at.x, at.y, Math.pow(1.18, steps))
+                        }
                     }
                     event.accepted = true
                 }
@@ -415,6 +416,19 @@ Item {
             color: page.muted
             font.pixelSize: 11
         }
+    }
+
+    // 滚轮事件在哪一点上。Qt 6.6 起是 `point.position`，更早是 `position`；
+    // 拿不到就退回画布中心——缩放照样能用，只是不以光标为锚。
+    function wheelPoint(event) {
+        if (event.position !== undefined && event.position !== null)
+            return event.position
+        if (event.point !== undefined && event.point !== null
+            && event.point.position !== undefined)
+            return event.point.position
+        if (event.x !== undefined)
+            return { x: event.x, y: event.y }
+        return { x: canvas.width / 2, y: canvas.height / 2 }
     }
 
     // 从圆心朝 (qx,qy) 走 r 的那一点：边要落在圆周上。
