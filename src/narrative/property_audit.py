@@ -25,6 +25,19 @@ INFO = "info"
 
 _SCOPE_LABELS = {"world": "世界", "cognition": "认知", "claim": "声称"}
 
+# 关系名说的是「对方是我的什么人」，所以一个名字只能站一边。成对的叫法（父子、
+# 夫妻、师徒、上下级）是**一个对子**，不是某一方的身份——写上去就读不出谁是谁的
+# 父亲。单边称呼（父亲、儿子）写两侧各一次是对的，但两次都写同一个词就是反了。
+PAIR_RELATIONS = {
+    "父子", "父女", "母子", "母女", "夫妻", "师徒", "上下级", "主仆",
+    "兄弟", "姐妹", "叔侄", "翁婿", "妯娌",
+}
+ROLE_RELATIONS = {
+    "父亲", "母亲", "儿子", "女儿", "丈夫", "妻子", "师父", "师傅", "徒弟",
+    "老师", "学生", "上司", "下属", "主人", "仆人", "叔父", "伯父", "侄",
+    "侄儿", "兄", "弟", "姐", "妹", "祖父", "祖母", "孙", "岳父", "岳母",
+}
+
 
 def _text(value: object) -> str:
     if value is None:
@@ -49,6 +62,19 @@ def _position(record: dict) -> tuple:
     disclosure = record.get("disclosure")
     offset = disclosure.get("start") if isinstance(disclosure, dict) else None
     return (key or (999,), offset if isinstance(offset, int) else 0)
+
+
+_INVERSE = {
+    "父亲": "儿子", "母亲": "女儿", "儿子": "父亲", "女儿": "母亲",
+    "丈夫": "妻子", "妻子": "丈夫", "师父": "徒弟", "师傅": "徒弟",
+    "徒弟": "师父", "老师": "学生", "学生": "老师", "上司": "下属",
+    "下属": "上司", "主人": "仆人", "仆人": "主人", "叔父": "侄",
+    "侄": "叔父", "兄": "弟", "弟": "兄", "姐": "妹", "妹": "姐",
+}
+
+
+def _inverse_hint(kind: str) -> str:
+    return _INVERSE.get(kind, "相反的称呼")
 
 
 def _issue(code, severity, message, *, node=None, property_id=None, records=None, suggestion=""):
@@ -363,6 +389,50 @@ def audit_properties(
             suggestion="把这条改挂到它对应的场景上（场景的 `storyline_progress`），"
                        "大事件会自己汇总",
         ))
+
+    # 关系名要指清是哪一边。成对的叫法（父子）读不出谁是谁的父亲；单边称呼
+    # （父亲）写两侧各一次是对的，但两侧都写同一个词，方向就没了。
+    people = {
+        node_id_: node for node_id_, node in names.items()
+        if node.get("node_type") == "person"
+    }
+    relations: dict[tuple[str, str], list[dict]] = {}
+    for record in values:
+        left, right = str(record.get("node_id") or ""), str(record.get("value") or "")
+        if left not in people or right not in people or left == right:
+            continue
+        kind = str(record.get("property_id") or "")
+        relations.setdefault((left, right), []).append(record)
+        if kind in PAIR_RELATIONS:
+            issues.append(_issue(
+                "relation_pair_name", INFO,
+                f"「{people[left].get('name')} —{kind}→ {people[right].get('name')}」"
+                f"用的是成对的叫法，读不出谁是谁的哪一边",
+                node=people[left],
+                property_id=kind,
+                records=[record],
+                suggestion="写成两边各自的身份：父亲 / 儿子、丈夫 / 妻子、上司 / 下属",
+            ))
+    for (left, right), rows in relations.items():
+        for record in rows:
+            kind = str(record.get("property_id") or "")
+            if kind not in ROLE_RELATIONS:
+                continue
+            twin = [
+                other for other in relations.get((right, left), [])
+                if str(other.get("property_id") or "") == kind
+            ]
+            if not twin:
+                continue
+            issues.append(_issue(
+                "relation_same_both_ways", INFO,
+                f"「{people[left].get('name')}」和「{people[right].get('name')}」"
+                f"两侧都写成了「{kind}」，方向没了",
+                node=people[left],
+                property_id=kind,
+                records=[record] + twin[:1],
+                suggestion=f"改成 A —{kind}→ B 和 B —{_inverse_hint(kind)}→ A 两条",
+            ))
 
     # 场景必须归到一个大事件下面。没有归属的场景在界面里只能进「未归入大事件」
     # 那个桶——它不是错，但它说明这一章还没读出大事件的边界。
