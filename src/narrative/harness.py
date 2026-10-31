@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from pydantic import Field, StrictInt, model_validator
 
 from .base_model import Model
-from .model_gateway import COMPACTION_MODEL, ModelGateway
+from .model_gateway import COMPACTION_MODEL, RUNTIME_EFFORTS, ModelGateway
 from .providers import preset
 
 SDK_VERSION = "0.2.1rc2"
@@ -309,10 +309,12 @@ class HarnessRunner:
             model=settings.model,
             base_url=self._gateway.base_url,
             api_key=self._gateway.token,
-            # 运行时只认 low/medium/high，"off" 由网关翻成供应商的 thinking 开关。
+            # 运行时只认 low/medium/high。off / minimal 这类档它不认，由网关
+            # 自己写进请求体（off 是 thinking 开关，minimal 原样透传给供应商）。
             reasoning_effort=(
-                None if str(settings.reasoning_effort or "") == "off"
-                else settings.reasoning_effort
+                settings.reasoning_effort
+                if str(settings.reasoning_effort or "") in RUNTIME_EFFORTS
+                else None
             ),
             max_tokens=settings.max_tokens,
             initialize_timeout_seconds=30,

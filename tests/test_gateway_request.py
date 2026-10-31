@@ -47,3 +47,21 @@ def test_a_normal_level_still_goes_through_as_itself() -> None:
     body = adapt_request({"model": "whatever", "messages": []}, settings)
     assert body["reasoning_effort"] == "low"
     assert "thinking" not in body
+
+
+def test_a_level_the_runtime_rejects_is_written_by_the_gateway() -> None:
+    """minimal 运行时也不认，但供应商认——照样透传，不然这个档根本用不了。"""
+    settings = HarnessSettings(
+        provider="ark", model="ark-code-latest", reasoning_effort="minimal"
+    )
+    body = adapt_request({"model": "whatever", "messages": []}, settings)
+    assert body["reasoning_effort"] == "minimal"
+    assert "thinking" not in body
+
+
+def test_runtime_efforts_are_the_three_it_accepts() -> None:
+    from narrative.model_gateway import RUNTIME_EFFORTS
+
+    assert RUNTIME_EFFORTS == {"low", "medium", "high"}
+    for effort in ("off", "minimal", "none", ""):
+        assert effort not in RUNTIME_EFFORTS

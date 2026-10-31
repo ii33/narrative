@@ -20,6 +20,9 @@ from urllib.parse import urlsplit
 
 COMPACTION_MODEL = "__narrative_compaction__"
 
+# 运行时（SDK）只认这三档；别的值它直接拒绝，所以这些档由网关自己写进请求体。
+RUNTIME_EFFORTS = {"low", "medium", "high"}
+
 
 def adapt_request(body: dict, settings) -> dict:
     body = dict(body)
