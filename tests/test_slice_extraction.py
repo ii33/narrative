@@ -159,7 +159,9 @@ def test_repeated_commit_of_same_round_reuses_pending_candidate(workspace):
     ops.extract_slice(source_id, part["id"])
     first = ops.commit_slice_extraction(source_id, part["id"], review="all")
     assert first.get("candidate")
-    reopened = Operations.open(ops.project_info().path)
+    from narrative.project_package import layout
+
+    reopened = Operations.open(layout(ops.project_info().path).entry)
     second = reopened.commit_slice_extraction(source_id, part["id"], review="all")
     assert second == first
     assert len(ops.change_candidates("pending")) == 1
@@ -184,7 +186,9 @@ def test_a_busy_slice_lease_blocks_before_model_calls(workspace):
 def test_slice_tools_share_the_operations_surface(workspace):
     ops, source_id, part, _ = workspace
     params = {"source_id": source_id, "slice_id": part["id"]}
-    project = ops.project_info().path
+    from narrative.project_package import layout
+
+    project = layout(ops.project_info().path).entry
     assert tool_api.call("get_slice_extraction", params, project=project)["missing"]
     assert tool_api.call("extract_slice", params, project=project)["round"] == 1
     assert tool_api.call("review_slice", params, project=project)["round"] == 2

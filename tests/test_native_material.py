@@ -237,7 +237,7 @@ def test_an_image_carries_its_own_caption(workspace, tmp_path: Path) -> None:
     assert image["caption"] == "正面"
     copied = Path(image["path"])
     assert copied.is_file()
-    assert copied.parent.parent.parent == tmp_path / "material.nproj" / "material"
+    assert copied.parent.parent.parent == tmp_path / "material_data" / "material"
 
     del results[:]
     bridge.updateMaterialImageCaption("1", card_id, image["id"], "正面，束发")

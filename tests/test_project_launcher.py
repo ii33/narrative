@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
 from narrative import project_catalog
 from narrative.graph_profile_ops import global_settings, save_global_settings
 from narrative.graph_store import GRAPH_SCHEMA_VERSION
+from narrative.project_package import FORMAT, VERSION, layout
 from narrative.provider_store import ProviderStore
 
 
@@ -26,17 +28,21 @@ def _legacy_project(path: Path, version: int = 5, title: str = "旧工程") -> P
     return path
 
 
-def _legacy_package(root: Path, version: int = 5, title: str = "旧工程") -> Path:
-    """一个旧版工程包：目录里有库，库是旧 schema。"""
-    root.mkdir(parents=True, exist_ok=True)
-    _legacy_project(root / "graph.sqlite3", version, title)
-    return root
+def _legacy_package(entry: Path, version: int = 5, title: str = "旧工程") -> Path:
+    found = layout(entry)
+    found.root.mkdir(parents=True, exist_ok=True)
+    _legacy_project(found.db, version, title)
+    entry.write_text(json.dumps({"format": FORMAT, "version": VERSION,
+        "project": {"id": "old", "title": title},
+        "layout": {"database": f"{entry.stem}_data/graph.sqlite3", "material": f"{entry.stem}_data/material",
+                   "extraction": f"{entry.stem}_extraction", "chats": f"{entry.stem}_chats"}}), encoding="utf-8")
+    return entry
 
 
-def _broken_package(root: Path) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "graph.sqlite3").write_bytes(b"not a database")
-    return root
+def _broken_package(entry: Path) -> Path:
+    _legacy_package(entry)
+    layout(entry).db.write_bytes(b"not a database")
+    return entry
 
 
 def test_project_status_follows_the_current_schema(tmp_path: Path) -> None:
@@ -52,7 +58,7 @@ def test_project_status_follows_the_current_schema(tmp_path: Path) -> None:
     assert rows["broken"]["status"] == "unreadable"
 
 
-def test_clear_incompatible_moves_old_packages_and_keeps_unreadable(tmp_path: Path) -> None:
+def test_clear_incompatible_removes_only_old_entries_and_keeps_data_and_unreadable(tmp_path: Path) -> None:
     project_catalog.create_graph_project(tmp_path / "current.nproj")
     _legacy_package(tmp_path / "old.nproj")
     _broken_package(tmp_path / "broken.nproj")
@@ -65,6 +71,7 @@ def test_clear_incompatible_moves_old_packages_and_keeps_unreadable(tmp_path: Pa
     assert [Path(item["path"]).name for item in result["kept"]] == ["broken.nproj"]
     assert (tmp_path / "current.nproj").exists()
     assert not (tmp_path / "old.nproj").exists()
+    assert (tmp_path / "old_data" / "graph.sqlite3").is_file()
 
 
 def test_clear_incompatible_leaves_a_directory_without_legacy_files_alone(

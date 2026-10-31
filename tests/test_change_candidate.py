@@ -224,7 +224,9 @@ def test_opening_project_does_not_create_change_table(tmp_path):
     path = ops.graph_project_info()["path"]
     with sqlite3.connect(path) as db:
         db.execute("DROP TABLE change_candidates")
-    reopened = Operations.open_graph_project(path)
+    from narrative.project_package import layout
+
+    reopened = Operations.open_graph_project(layout(path).entry)
     with sqlite3.connect(path) as db:
         exists = db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='change_candidates'"
@@ -242,3 +244,60 @@ def test_opening_project_does_not_create_change_table(tmp_path):
         ).fetchone()
     assert exists is not None
     assert reopened.change_candidate(candidate)["status"] == "pending"
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_identical_applied_records_are_audited_without_replaying(tmp_path, partial):
+    import json
+
+    ops = _project(tmp_path)
+    revision = ops.graph_project_info()["revision"]
+    nodes, records = _mixed()
+    revision = ops.change_accept(ops.change_propose(nodes, [], revision), 1)
+    stale = ops.change_propose([], records, revision)
+    first_records = records[:1] if partial else records
+    revision = ops.change_accept(ops.change_propose([], first_records, revision), 1)
+    with sqlite3.connect(ops.graph_project_info()["path"]) as db:
+        before = db.execute("SELECT * FROM property_records WHERE id=?", (records[0]["id"],)).fetchone()
+    state = ops.change_candidate(stale)["application_state"]
+    assert state[0]["state"] == "applied"
+    assert state[-1]["state"] == ("pending" if partial else "applied")
+    assert ops.change_accept(stale, 1) == revision + 1
+    assert ops.change_candidate(stale)["property_records"] == records
+    with sqlite3.connect(ops.graph_project_info()["path"]) as db:
+        assert db.execute("SELECT * FROM property_records WHERE id=?", (records[0]["id"],)).fetchone() == before
+        audit = json.loads(db.execute("SELECT data FROM revisions WHERE candidate_id=?", (stale,)).fetchone()[0])
+    assert len(audit["already_applied"]) == len(first_records)
+    assert len(audit["property_operations"]) == len(records) - len(first_records)
+    with pytest.raises(ValueError):
+        ops.change_accept(stale, 1)
+
+
+def test_same_id_different_content_remains_an_explicit_conflict(tmp_path):
+    ops = _project(tmp_path)
+    revision = ops.graph_project_info()["revision"]
+    original = {"kind": "property_definition", "id": "location", "value_type": "string", "cardinality": "one"}
+    stale = ops.change_propose([], [original], revision)
+    different = original | {"cardinality": "many"}
+    revision = ops.change_accept(ops.change_propose([], [different], revision), 1)
+    assert ops.change_candidate(stale)["application_state"][0]["state"] == "conflict"
+    with pytest.raises(ValueError, match="1 项属性记录已入库.*内容与本候选不同"):
+        ops.change_accept(stale, 1)
+    assert ops.graph_project_info()["revision"] == revision
+    assert ops.change_candidate(stale)["status"] == "pending"
+
+
+def test_stale_retractions_accept_only_the_visible_remainder(tmp_path):
+    ops = _project(tmp_path)
+    revision = ops.graph_project_info()["revision"]
+    nodes, records = _mixed()
+    revision = ops.change_accept(ops.change_propose(nodes, records, revision), 1)
+    retractions = [
+        {"kind": "property_retraction", "id": "retract-init", "target_id": "letter-holder-init", "reason": "人工核对撤回"},
+        {"kind": "property_retraction", "id": "retract-handoff", "target_id": "handoff", "reason": "人工核对撤回"},
+    ]
+    stale = ops.change_propose([], retractions, revision, source="audit")
+    revision = ops.change_accept(ops.change_propose([], retractions[:1], revision, source="audit"), 1)
+    assert [item["state"] for item in ops.change_candidate(stale)["application_state"]] == ["applied", "pending"]
+    assert ops.change_accept(stale, 1) == revision + 1
+    assert ops.change_candidate(stale)["property_records"] == retractions

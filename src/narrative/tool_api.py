@@ -1383,11 +1383,11 @@ def call(name: str, params: dict | None = None, *, project: str | Path | None = 
     if name == "list_projects":
         return tool.handler(None, args)
     if project in (None, ""):
-        raise ToolError("请提供 --project（工程 .sqlite3 文件）")
+        raise ToolError("请提供 --project（.nproj 工程入口文件）")
     path = Path(project)
     if not path.exists():
         raise ToolError(f"工程不存在：{path}")
-    # 裸库和工程包目录都收；`open_graph_project` 会把包目录归到包里的库。
+    # Public tools accept the private entry file; database paths remain internal.
     ops = open_graph_project(path)
     try:
         return tool.handler(ops, args)

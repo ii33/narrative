@@ -34,7 +34,7 @@ Item {
                 title: item.title || item.name,
                 revision: 0,
                 openable: item.exists === true,
-                statusText: item.exists ? "工程包" : "找不到了",
+                statusText: item.exists ? "工程文件" : "找不到了",
                 external: true
             })
         }
@@ -125,10 +125,19 @@ Item {
                         : "没有可清除的不兼容工程", false)
                 }
             } else if (kind === "project_removed") {
+                recentItems = recentItems.filter(function(item) {
+                    return bridge.recentProjectKey(item.path) !== payload.key
+                })
+                page.rebuildProjectRows()
+                if (payload.deletion_error) {
+                    app.toast("已从列表移除；文件未删除：" + payload.deletion_error, true)
+                    return
+                }
                 var gone = (payload.deleted || []).length
-                app.toast(gone > 0
-                    ? "已删除工程文件（" + gone + " 项）"
-                    : "已从列表移除，磁盘上的文件还在", false)
+                app.toast(payload.retained_data === true
+                    ? "仅删除入口文件；原数据、资料和会话保留"
+                    : (gone > 0 ? "已删除工程文件（" + gone + " 项）"
+                        : "已从列表移除"), false)
             } else if (kind === "global_settings") {
                 catalog = payload.catalog || []
                 settingsPath = payload.path || ""
@@ -322,7 +331,7 @@ Item {
                                 Layout.fillWidth: true
                                 horizontalAlignment: Text.AlignHCenter
                                 wrapMode: Text.WordWrap
-                                text: "列表里还没有工程。\n打开一个 .nproj 目录，它就留在这里。"
+                                text: "列表里还没有工程。\n打开一个 .nproj 工程文件，它就留在这里。"
                                 color: t.muted
                                 font.pixelSize: 12
                             }
@@ -358,7 +367,7 @@ Item {
                                 font.weight: Font.DemiBold
                             }
                             Label {
-                                text: "一个工程就是一个 .nproj 目录：库和资料在里面，缓存与会话在旁边。"
+                                text: "工程以 .nproj 信息文件为入口，数据库和资料单独存放。"
                                 color: t.muted
                                 font.pixelSize: 11
                             }
@@ -577,11 +586,14 @@ Item {
         }
     }
 
-    // 打开工程：工程是一个 .nproj 目录，放在哪都行。
-    FolderDialog {
+    // Only private entry information files are project opening targets.
+    FileDialog {
         id: packageDialog
-        title: "打开工程（.nproj 文件夹）"
-        onAccepted: bridge.openProjectUrl(selectedFolder)
+        objectName: "projectEntryPicker"
+        title: "打开工程入口文件"
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["叙事工程 (*.nproj)"]
+        onAccepted: bridge.openProjectUrl(selectedFile.toString())
     }
 
     // 移除工程：默认只从列表拿掉；勾了才动磁盘，且删之前把路径写清楚。

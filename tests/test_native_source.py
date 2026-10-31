@@ -79,7 +79,10 @@ def test_import_file_url_and_reload_files(source_workspace, tmp_path):
     file = tmp_path / "name with spaces.md"
     file.write_text("# Imported\nBody.", encoding="utf-8", newline="\n")
     bridge.importSourceFile("", QUrl.fromLocalFile(str(file)).toString())
-    _wait(app, lambda: bool(errors) or len(_value(page.property("sources"))) == 2)
+    _wait(app, lambda: bool(errors) or (
+        len(_value(page.property("sources"))) == 2
+        and page.property("previewText") == "# Imported\nBody."
+    ))
     assert not errors
     assert page.property("previewText") == "# Imported\nBody."
     _wait(app, lambda: len(_value(page.property("sources"))) == 2)

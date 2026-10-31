@@ -1,8 +1,4 @@
-"""工程就是一个 .nproj 目录，放在哪都行——没有「工程目录」这回事。
-
-启动页的列表是「打开过的工程」，不是扫某个文件夹的结果。这组用例钉住：
-按绝对路径打开、按包打开、新建在指定位置、最近打开记得住、不认的东西明确报错。
-"""
+"""The public project entry is a private .nproj information file, never a directory."""
 
 from __future__ import annotations
 
@@ -16,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 
 from narrative.native_bridge import NativeBridge
 from narrative.project_catalog import create_graph_project
+from narrative.project_package import layout
 
 
 @pytest.fixture()
@@ -55,7 +52,7 @@ def test_a_package_opens_by_absolute_path(bridge, app, tmp_path: Path) -> None:
     bridge.openProject(str(package))
     payload = _wait(app, results, "project")
 
-    assert Path(payload["project"]["path"]).parent == package
+    assert Path(payload["project"]["path"]) == package
 
 
 def test_a_file_url_opens_too(bridge, app, tmp_path: Path) -> None:
@@ -66,7 +63,7 @@ def test_a_file_url_opens_too(bridge, app, tmp_path: Path) -> None:
 
     bridge.openProjectUrl(QUrl.fromLocalFile(str(package)).toString())
     payload = _wait(app, results, "project")
-    assert Path(payload["project"]["path"]).parent == package
+    assert Path(payload["project"]["path"]) == package
 
 
 def test_something_that_is_not_a_package_says_so(bridge, app, tmp_path: Path) -> None:
@@ -98,9 +95,9 @@ def test_a_new_project_goes_where_it_is_told(bridge, app, tmp_path: Path) -> Non
     _wait(app, results, "project")
 
     package = tmp_path / "新工程.nproj"
-    assert package.is_dir()
-    assert (package / "graph.sqlite3").is_file()
-    description = json.loads((package / "project.json").read_text(encoding="utf-8"))
+    assert package.is_file()
+    assert layout(package).db.is_file()
+    description = json.loads(package.read_text(encoding="utf-8"))
     assert description["format"] == "narrative-project"
     assert description["project"]["title"]
 
@@ -155,8 +152,52 @@ def test_a_recent_project_that_moved_is_listed_but_marked_missing(
     bridge.openProject(str(package))
     _wait(app, results, "project")
 
-    (package / "graph.sqlite3").unlink()
+    layout(package).db.unlink()
     del results[:]
     bridge.loadRecentProjects()
     items = _wait(app, results, "recent_projects")["items"]
     assert [row["exists"] for row in items] == [False]
+
+
+def test_directories_and_internal_database_are_not_public_entries(bridge, app, tmp_path):
+    entry = _package(tmp_path, "entry")
+    errors = []
+    bridge.errorOccurred.connect(lambda kind, message: errors.append((kind, message)))
+    for invalid in (entry.parent, layout(entry).root, layout(entry).db):
+        bridge.openProject(str(invalid))
+        app.processEvents()
+    assert len(errors) == 3
+    assert all("入口文件" in message for _kind, message in errors)
+
+
+def test_recent_list_does_not_recognize_a_database_or_directory_as_an_entry(bridge, app, tmp_path):
+    from narrative.provider_store import GLOBAL_SCOPE, ProviderStore
+
+    entry = _package(tmp_path, "private")
+    paths = [str(entry), str(layout(entry).db), str(layout(entry).root)]
+    ProviderStore().put(GLOBAL_SCOPE, "recent_projects", json.dumps(paths))
+    results = []
+    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
+    bridge.loadRecentProjects()
+    rows = _wait(app, results, "recent_projects")["items"]
+    assert [row["exists"] for row in rows] == [True, False, False]
+
+
+def test_launcher_uses_private_file_picker(bridge, app):
+    from PySide6.QtQml import QQmlApplicationEngine
+
+    from narrative.native_app import QML_PATH
+
+    engine = QQmlApplicationEngine()
+    engine.rootContext().setContextProperty("bridge", bridge)
+    engine.load(QUrl.fromLocalFile(str(QML_PATH)))
+    window = engine.rootObjects()[0]
+    try:
+        picker = window.findChild(object, "projectEntryPicker")
+        assert picker is not None
+        assert "*.nproj" in str(picker.property("nameFilters"))
+        assert window.findChild(object, "createEntryButton") is None
+        assert window.findChild(object, "entrySavePicker") is None
+    finally:
+        engine.deleteLater()
+        app.processEvents()

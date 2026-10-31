@@ -216,7 +216,32 @@ class ChangeService:
             "status": row["status"],
             "version": row["version"],
             "result_revision": row["result_revision"],
+            "application_state": self.application_state(payload),
         }
+
+    def application_state(self, change: dict) -> list[dict]:
+        """Expose exact append-only ID matches without changing the payload."""
+        result = []
+        with self.store.connect() as db:
+            for record in change.get("property_records") or []:
+                row = db.execute(
+                    "SELECT data,accepted_revision,candidate_id FROM property_records WHERE id=?",
+                    (record["id"],),
+                ).fetchone()
+                state = "pending" if row is None else (
+                    "applied" if json.loads(row["data"]) == record else "conflict"
+                )
+                result.append({"id": record["id"], "kind": record.get("kind"),
+                               "state": state,
+                               "accepted_revision": row["accepted_revision"] if row else None,
+                               "candidate_id": row["candidate_id"] if row else None})
+        return result
+
+    @staticmethod
+    def _check_conflicts(states: list[dict]) -> None:
+        conflicts = [item for item in states if item["state"] == "conflict"]
+        if conflicts:
+            raise ValueError(f"有 {len(conflicts)} 项属性记录已入库，但内容与本候选不同；请复核冲突项，正式记录不可覆盖")
 
     def accept(self, candidate_id: str, version: int) -> int:
         with self.store.connect() as db:
@@ -233,8 +258,14 @@ class ChangeService:
             )
         # 候选可能是在旧版本上建的（中间又接受过别的东西）。不要求重新建候选：
         # 预检仍在**当前**版本上跑一遍，过得去就应用，过不去就带着诊断拒绝。
-        diagnostics = self.precheck(
-            change.get("graph_objects"), change.get("property_records"), revision
+        states = self.application_state(change)
+        self._check_conflicts(states)
+        applied = [item for item in states if item["state"] == "applied"]
+        all_applied = bool(applied) and len(applied) == len(states) and not change.get("graph_objects")
+        applied_ids = {item["id"] for item in applied}
+        remaining = [item for item in change.get("property_records") or [] if item["id"] not in applied_ids]
+        diagnostics = [] if all_applied else self.precheck(
+            change.get("graph_objects"), remaining, revision
         )
         errors = [item["message"] for item in diagnostics if item["severity"] == "error"]
         if errors:
@@ -245,8 +276,11 @@ class ChangeService:
             )
             raise ValueError(prefix + "；".join(errors))
         graph_objects = change.get("graph_objects") or []
-        property_records = change.get("property_records") or []
+        property_records = remaining
         with self.store.connect(write=True) as db:
+            guard = db.execute("SELECT status,version FROM change_candidates WHERE id=?", (candidate_id,)).fetchone()
+            if guard["status"] != "pending" or guard["version"] != version:
+                raise ValueError("候选状态或版本已变化")
             current = int(
                 db.execute("SELECT value FROM meta WHERE key='revision'").fetchone()[0]
             )
@@ -298,6 +332,7 @@ class ChangeService:
                             "operations": graph_objects,
                             "property_operations": property_records,
                             "audit": audit,
+                            "already_applied": applied,
                         },
                         ensure_ascii=False,
                     ),

@@ -100,6 +100,47 @@ def test_a_change_candidate_shows_up_in_the_review_page(window, app, tmp_path: P
     rows = page.property("changeRows") or []
     assert len(rows) == 1
     assert rows[0]["note"] == "原文提取：第一回"
+    title = page.findChild(object, "reviewCandidateTitle")
+    assert title is not None
+    assert rows[0]["note"] in title.property("text")
+    assert "待审核" in title.property("text")
+    assert rows[0]["id"] not in title.property("text")
+    assert "pending" not in title.property("text")
+    assert page.displayText("13800138000 / 20261101") == "13800138000 / 20261101"
+    assert page.displayText("9" * 40) == "9" * 40
+    assert "ffffffffffff" not in page.displayText("val_ffffffffffff")
+    assert "a" * 32 not in page.displayText("a" * 32)
+
+
+
+def test_partial_candidate_shows_remaining_action(window, app, tmp_path: Path) -> None:
+    window_obj, bridge, results, errors = window
+    project = _project(tmp_path)
+    ops = Operations.open_graph_project(project)
+    records = [
+        {"kind": "property_definition", "id": name, "value_type": "string", "cardinality": "one"}
+        for name in ("颜色", "形状")
+    ]
+    revision = ops.graph_project_info()["revision"]
+    candidate = ops.change_propose([], records, revision)
+    ops.change_accept(ops.change_propose([], records[:1], revision), 1)
+    bridge.openProject(str(project))
+    _wait(app, results, "project")
+    window_obj.setProperty("mode", "workspace")
+    window_obj.setProperty("currentPage", "review")
+    _pump(app, 0.6)
+    page = window_obj.findChild(object, "reviewPage")
+    results.clear()
+    page.pick(candidate)
+    detail = _wait(app, results, "change_candidate")
+    _pump(app, 0.2)
+    assert "已处理" in detail["rows"][0]["extra"]
+    button = window_obj.findChild(object, "acceptCandidateButton")
+    assert button.property("text") == "接受剩余 1 项"
+    button.click()
+    _wait(app, results, "change_review")
+    assert Operations.open_graph_project(project).change_candidate(candidate)["status"] == "accepted"
+    assert not errors
 
 
 def test_accepting_it_from_the_page_fills_the_graph(window, app, tmp_path: Path) -> None:

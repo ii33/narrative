@@ -19,10 +19,13 @@
 
 ## 启动
 
-Windows 可直接双击根目录的 **`start-desktop.cmd`**，打开原生 Qt 窗口。首次使用需在项目目录安装桌面依赖：
+Windows 可直接双击根目录的 **`start-desktop.cmd`**，打开原生 Qt 窗口。普通启动只使用项目内的 `.venv` 和 `.runtime/python`，无需系统 Python、Node、dsh 或 uv，也不从系统环境补找缺失的运行时。
+
+首次准备属于构建步骤：先安装项目依赖，再把受信任的本地 CPython 分发复制进项目。以下命令不会把系统 Python 当作日常启动后备：
 
 ```powershell
 uv sync --extra desktop
+.venv/Scripts/python.exe scripts/localize_python.py
 ```
 
 也可在 PowerShell 中启动：
@@ -32,7 +35,9 @@ uv sync --extra desktop
 ./start-desktop.ps1 -Project my-novel
 ```
 
-`start.cmd` 仍保留为兼容入口，会提示 Streamlit 已停用并转启原生窗口；`narrative ui` 命令现在会明确报错，不再启动浏览器。
+`start.cmd` 与 `start-desktop.cmd` 均启动原生窗口；不再接收旧浏览器入口的端口等参数。`narrative ui` 命令明确报错，不启动浏览器。
+
+`scripts/localize_python.py --source <CPython目录>` 可显式指定待复制的解释器分发；不下载文件、不修改源目录。它保留 `.venv` 内已经安装的依赖，将解释器、标准库及运行库 DLL 放入 `.runtime/python`，并核对所有 Python 基础路径都在项目内。启动器会在移动项目后重新定位本地解释器。二进制目录不纳入 Git；源码仓库尚不是完整的可分发安装器，首次构建仍需准备这些目录。
 
 开发时修改业务模块后，等待活动提取结束，再重启桌面窗口；只刷新界面不能保证已导入的 Python 模块更新。
 
@@ -61,15 +66,16 @@ narrative-mcp --project P                      # MCP over stdio
 
 ```powershell
 uv sync --extra desktop
-uv run narrative-desktop
+.venv/Scripts/python.exe scripts/localize_python.py
+./start-desktop.ps1
 ```
 
-Windows 也可在依赖安装后双击根目录 `start-desktop.cmd`；它会打开可见的 Qt 窗口并在后台记录渲染诊断。首次安装或升级桌面依赖仍需在项目目录运行 `uv sync --extra desktop`。启动脚本要求 `.venv` 中已有 `pythonw.exe`，缺少时会提示先安装依赖。
+Windows 也可在准备好项目环境后双击根目录 `start-desktop.cmd`；它会打开可见的 Qt 窗口并在后台记录渲染诊断。升级依赖属于构建步骤；若重建了 `.venv`，应重新运行本地化脚本。启动脚本缺少本地解释器时明确报错，不调用系统工具修补环境。
 
 也可在启动时直接打开某个工程包：
 
 ```powershell
-uv run narrative-desktop --project D:/小说/my-novel.nproj
+./start-desktop.ps1 -Project D:/小说/my-novel.nproj
 ```
 
 窗口分两级：
@@ -79,7 +85,7 @@ uv run narrative-desktop --project D:/小说/my-novel.nproj
 ```
 
 **工程列表**是唯一入口：列出打开过的工程包（打不开的标「找不到了」，可以移除）、「打开工程…」选一个
-`.nproj` 目录、新建工程时选一个位置；
+`.nproj` 工程入口文件；新建工程时选一个保存位置；
 右侧是**全局设置**——模型服务地址、模型 ID、密钥变量、推理强度、token 预算与超时。
 全局设置存在应用级配置库（默认 `~/.narrative/provider-settings.sqlite3`），不进工程库；
 工程没有单独配置时沿用全局值。
@@ -138,24 +144,19 @@ Windows 上删不掉页面正开着的图片，所以删除是尽力而为：记
 runtime-bin 两个包）。0.2 起运行时改说 Anthropic Messages（`POST /v1/messages`、`x-api-key`），
 而供应商只认 chat/completions——本地网关两种都收，翻译在 `messages_bridge.py`，请求和流式事件一一对应。
 
-工程就是一个**包**：`<名字>.nproj/` 里装着一份 `project.json`、库和资料。私有格式就是那**一个
-JSON 文件**——它说清格式名与版本、这份作品是谁、数据放在哪；图片是二进制，只能当文件。
+工程通过一个实际的 **`.nproj` 信息文件**打开，不识别目录或裸数据库作为入口，所在目录不要求后缀。信息文件记录格式、版本、工程信息及数据的相对位置。
 
 ```
-<名字>.nproj/
-  project.json      格式描述：format / version / project{id,title,schema_version,…} / layout / parts
-  graph.sqlite3     图
-  material/         资料卡 JSON + 图片
-
-<名字>_extraction/  提取缓存（能重跑，不进包）
-<名字>_chats/       协作者会话（聊天记录，不进包）
+任意目录/
+  作品.nproj           工程入口信息文件
+  作品_data/
+    graph.sqlite3      图数据与原文
+    material/          资料卡及图片
+  作品_extraction/     提取历史与会话
+  作品_chats/          协作者会话
 ```
 
-包里只放「这份作品」：库和资料。缓存重跑就有，会话是聊天记录——两者都在包旁边，
-跟着包一起被复制、备份、发给别人是不合适的。
-
-工程只有这一种形态：新建时选一个位置，就在那里建出 `<名字>.nproj/`。没有「工程目录」要维护，
-启动页列的是你打开过的那些包；`--project` 给包目录、或给包里的 `graph.sqlite3` 都行，读写是同一套路径。
+新建工程选择保存位置和名称；打开工程只选择当前格式的 `.nproj` 文件。目录、裸数据库、`project.json`、旧版入口一律拒绝，不提供兼容、登记、修补或迁移。命令行 `--project` 也只传当前入口文件。
 
 属性分类的完整约定见 [`docs/PROPERTY_CATEGORIES.md`](docs/PROPERTY_CATEGORIES.md)：
 大类只管显示位置，与 `scope`（世界／认知／声称）各管一件事；移动分类不改变取值、

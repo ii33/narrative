@@ -112,8 +112,14 @@ def test_slices_move_with_project_database_without_entering_graph_history(ops, t
     source_id = ops.import_source("原文", "完整的原文")
     rows = ops.create_source_slices(source_id, [{"title": "一片", "start": 0, "end": 2}])
     assert "source_slices" not in str(ops.graph_snapshot())
-    package = tmp_path / "copied.nproj"
-    shutil.copytree(ops._store.path.parent, package)
+    from narrative.project_package import layout
+
+    found = layout(ops.project_info().path)
+    relocated = tmp_path / "relocated"
+    relocated.mkdir()
+    package = relocated / found.entry.name
+    shutil.copy2(found.entry, package)
+    shutil.copytree(found.root, relocated / found.root.name)
     from narrative.project_catalog import open_graph_project
 
     copied = open_graph_project(package)

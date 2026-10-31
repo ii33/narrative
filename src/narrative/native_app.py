@@ -21,7 +21,7 @@ QML_PATH = Path(__file__).with_name("qml") / "Main.qml"
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="叙事图原生工作台（Qt Quick）")
-    parser.add_argument("--project", help="启动后打开这个工程包（.nproj 目录）")
+    parser.add_argument("--project", help="启动后打开这个工程入口文件（.nproj）")
     parser.add_argument("--render-log", type=Path, help="记录真实 Qt Quick 渲染后端及 Qt RHI 适配器日志")
     parser.add_argument("--qa-snapshot", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--qa-exit-after-seconds", type=float, help=argparse.SUPPRESS)

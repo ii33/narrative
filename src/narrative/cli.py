@@ -41,7 +41,7 @@ def _at_argument(value):
 
 def main():
     parser = argparse.ArgumentParser(description="叙事证据工作台")
-    parser.add_argument("--db", default="data/demo.sqlite3", help="项目数据库；新图项目使用独立 .sqlite3 文件")
+    parser.add_argument("--db", default="data/demo.nproj", help=".nproj 工程入口信息文件")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("graph-create", help="创建工程包（节点 + 属性记录 + 原文）")
     graph_import = commands.add_parser("graph-import", help="向图项目导入 UTF-8 原文")

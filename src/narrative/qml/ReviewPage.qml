@@ -26,6 +26,38 @@ Item {
     property var graphRows: []
     property var changeRows: []
 
+    function countState(state) {
+        var rows = (current.candidate || {}).application_state || []
+        return rows.filter(function(row) { return row.state === state }).length
+    }
+
+    readonly property int appliedCount: countState("applied")
+    readonly property int conflictCount: countState("conflict")
+    readonly property int pendingCount: {
+        var rows = (current.candidate || {}).application_state || []
+        return rows.length > 0 ? countState("pending") + (current.objects || []).length
+                               : objectRows.count
+    }
+
+    function displayText(value) {
+        return String(value || "")
+            .replace(/\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi, "内部引用")
+            .replace(/\b(?:val|ret|candidate|change|source|src|node|event|person|context|timeline|order|record|property|batch|run|extract)_[0-9a-f]{8,}\b/gi, "内部引用")
+            .replace(/\b(?=[0-9a-f]*[a-f])(?:[0-9a-f]{64}|[0-9a-f]{40}|[0-9a-f]{32})\b/gi, "内部引用")
+    }
+
+    function statusText(status) {
+        return ({pending: "待审核", accepted: "已接受", rejected: "已拒绝"})[status] || "状态未知"
+    }
+
+    function sourceText(source) {
+        return ({manual: "手工录入", model: "模型提取", correction: "修正"})[source] || "候选变更"
+    }
+
+    function candidateTitle(candidate) {
+        return displayText(candidate.note) || sourceText(candidate.source)
+    }
+
     function load() {
         bridge.loadChangeCandidates(filter)
         bridge.loadCandidates(filter)
@@ -38,7 +70,7 @@ Item {
             candidateRows.append({
                 id: c.id || "",
                 kind: "change",
-                note: c.note || c.id || "",
+                note: page.candidateTitle(c),
                 status: c.status || "",
                 source: c.source || "",
                 counts: (c.graph_count || 0) + " 节点 · " + (c.property_count || 0) + " 属性",
@@ -50,7 +82,7 @@ Item {
             candidateRows.append({
                 id: g.id || "",
                 kind: "graph",
-                note: g.note || g.id || "",
+                note: page.candidateTitle(g),
                 status: g.status || "",
                 source: g.source || "",
                 counts: (g.operation_count || g.graph_count || 0) + " 项",
@@ -97,7 +129,7 @@ Item {
                 objectRows.append({
                     id: rows[r].id || "",
                     kind: rows[r].kind || "",
-                    label: rows[r].label || "",
+                    label: rows[r].label || "未命名对象",
                     extra: rows[r].extra || ""
                 })
             }
@@ -109,7 +141,7 @@ Item {
             objectRows.append({
                 id: obj.id || "",
                 kind: obj.kind || "",
-                label: obj.name || obj.label || obj.id || "",
+                label: page.displayText(obj.name || obj.label || "未命名对象"),
                 extra: obj.node_type || obj.value_type || ""
             })
         }
@@ -133,7 +165,7 @@ Item {
                 page.changeRows = payload.items || []
                 page.rebuildCandidates()
             } else if (kind === "candidate") {
-                current = payload
+                current = payload.preview || payload
                 page.rebuildObjects()
             } else if (kind === "change_candidate") {
                 var detail = payload.candidate || ({})
@@ -233,7 +265,7 @@ Item {
                                 width: 220
                             }
                             Label {
-                                text: (kind === "change" ? "变更" : "图") + " · " + status
+                                text: (kind === "change" ? "变更" : "图") + " · " + page.statusText(status)
                                     + " · " + counts
                                 color: t.muted
                                 font.pixelSize: 10
@@ -264,8 +296,11 @@ Item {
             RowLayout {
                 Layout.fillWidth: true
                 Label {
+                    objectName: "reviewCandidateTitle"
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
                     text: current.candidate
-                        ? "候选 " + current.candidate.id + " · " + current.candidate.status
+                        ? page.candidateTitle(current.candidate) + " · " + page.statusText(current.candidate.status)
                         : "未选择候选"
                     font.pixelSize: 14
                     font.weight: Font.DemiBold
@@ -274,9 +309,12 @@ Item {
                 Item { Layout.fillWidth: true }
                 Button {
                     objectName: "acceptCandidateButton"
-                    text: "接受"
+                    text: page.appliedCount > 0
+                        ? (page.pendingCount > 0 ? "接受剩余 " + page.pendingCount + " 项" : "确认已处理")
+                        : "接受"
                     highlighted: true
                     enabled: current.candidate !== undefined && current.candidate !== null
+                        && current.candidate.status === "pending" && page.conflictCount === 0
                     onClicked: current.kind === "change"
                         ? bridge.acceptChangeCandidate(current.candidate.id, current.candidate.version)
                         : bridge.acceptCandidate(current.candidate.id, current.candidate.version)
@@ -285,6 +323,7 @@ Item {
                     objectName: "rejectCandidateButton"
                     text: "拒绝"
                     enabled: current.candidate !== undefined && current.candidate !== null
+                        && current.candidate.status === "pending"
                     onClicked: current.kind === "change"
                         ? bridge.rejectChangeCandidate(current.candidate.id, current.candidate.version)
                         : bridge.rejectCandidate(current.candidate.id, current.candidate.version)
@@ -310,32 +349,42 @@ Item {
                         required property string label
                         required property string extra
                         width: ListView.view.width
-                        height: 36
+                        height: rowContent.implicitHeight + 14
                         radius: 4
                         color: t.paper
-                        RowLayout {
-                            anchors.fill: parent
+                        ColumnLayout {
+                            id: rowContent
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
                             anchors.leftMargin: 10
                             anchors.rightMargin: 10
-                            spacing: 10
-                            Label {
-                                text: kind
-                                color: t.accent
-                                font.pixelSize: 11
-                                Layout.preferredWidth: 40
+                            spacing: 4
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 10
+                                Label {
+                                    text: kind
+                                    color: t.accent
+                                    font.pixelSize: 11
+                                    Layout.preferredWidth: 48
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
+                                    text: label
+                                    color: t.ink
+                                    font.pixelSize: 12
+                                    wrapMode: Text.Wrap
+                                }
                             }
                             Label {
                                 Layout.fillWidth: true
-                                Layout.minimumWidth: 0
-                                text: label
-                                color: t.ink
-                                font.pixelSize: 12
-                                elide: Text.ElideRight
-                            }
-                            Label {
+                                visible: extra.length > 0
                                 text: extra
                                 color: t.muted
                                 font.pixelSize: 11
+                                wrapMode: Text.Wrap
                             }
                         }
                     }
@@ -402,7 +451,7 @@ Item {
                                     : modelData.severity === "warning" ? t.warn : t.muted
                                 text: (modelData.severity === "error" ? "错误 "
                                         : modelData.severity === "warning" ? "待确认 " : "提示 ")
-                                    + (modelData.node_name || "") + " · " + (modelData.message || "")
+                                    + page.displayText(modelData.node_name || "") + " · " + page.displayText(modelData.message || "")
                             }
                             Label {
                                 width: parent.width
@@ -410,7 +459,7 @@ Item {
                                 font.pixelSize: 10
                                 color: t.muted
                                 wrapMode: Text.Wrap
-                                text: "→ " + (modelData.suggestion || "")
+                                text: "→ " + page.displayText(modelData.suggestion || "")
                             }
                         }
                         Label {
@@ -443,7 +492,7 @@ Item {
                         font.pixelSize: 11
                         elide: Text.ElideRight
                         color: modelData.severity === "error" ? t.bad : t.warn
-                        text: (modelData.code || "") + " " + (modelData.message || "")
+                        text: page.displayText(modelData.message || "检查未通过")
                     }
                 }
             }

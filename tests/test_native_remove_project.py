@@ -69,7 +69,7 @@ def test_removing_from_the_list_keeps_the_files(bridge, app, tmp_path: Path) -> 
     bridge.removeProject(str(package), False)
     app.processEvents()
 
-    assert package.is_dir()
+    assert package.is_file()
     # 只从列表拿掉也要说清楚，否则人会以为删过了
     removed = [payload for kind, payload in results if kind == "project_removed"]
     assert removed and removed[-1]["kept"] is True
@@ -97,7 +97,8 @@ def test_removing_with_delete_takes_the_package_and_its_side_dirs(
     assert not package.exists()
     removed = [payload for kind, payload in results if kind == "project_removed"]
     assert removed and removed[-1]["kept"] is False
-    assert len(removed[-1]["deleted"]) == 3
+    assert len(removed[-1]["deleted"]) == 4
+    assert not (tmp_path / "book_data").exists()
     assert not (tmp_path / "book_extraction").exists()
     assert not (tmp_path / "book_chats").exists()
 
@@ -114,7 +115,7 @@ def test_a_directory_that_is_not_a_project_is_never_deleted(bridge, app,
     app.processEvents()
 
     assert (junk / "draft.txt").is_file()
-    assert errors and "不是工程包" in errors[0][1]
+    assert errors and "工程入口文件" in errors[0][1]
 
 
 def test_the_row_click_area_sits_below_its_controls(bridge, app, tmp_path: Path) -> None:
@@ -211,3 +212,184 @@ def app():
 def bridge(tmp_path: Path, app, monkeypatch):
     monkeypatch.setenv("NARRATIVE_PROVIDER_DB", str(tmp_path / "settings.sqlite3"))
     return NativeBridge()
+
+
+def test_deleting_entry_keeps_parent_and_unrelated_files(bridge, app, tmp_path):
+    entry = _package(tmp_path, "owned")
+    unrelated = tmp_path / "notes.txt"
+    unrelated.write_text("keep", encoding="utf-8")
+    bridge.removeProject(str(entry), True)
+    app.processEvents()
+    assert unrelated.read_text(encoding="utf-8") == "keep"
+    assert tmp_path.is_dir()
+    assert not entry.exists()
+    assert not (tmp_path / "owned_data").exists()
+
+
+@pytest.mark.parametrize("other_folder", [False, True])
+def test_deleting_current_entry_retains_external_project_data(bridge, app, tmp_path, other_folder):
+    import json
+    import os
+
+    from narrative.project_package import layout
+
+    original = _package(tmp_path, "shared")
+    found = layout(original)
+    source = json.loads(original.read_text(encoding="utf-8"))
+    other = tmp_path / "another-folder" if other_folder else tmp_path
+    other.mkdir(exist_ok=True)
+    external = other / "reference.nproj"
+    source["layout"] = {
+        key: Path(os.path.relpath(original.parent / value, other)).as_posix()
+        for key, value in source["layout"].items()
+    }
+    external.write_text(json.dumps(source), encoding="utf-8")
+    results = []
+    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
+    bridge.removeProject(str(external), True)
+    app.processEvents()
+    removed = [payload for kind, payload in results if kind == "project_removed"][-1]
+    assert removed["retained_data"] is True
+    assert removed["deleted"] == [str(external)]
+    assert found.db.is_file() and original.is_file() and not external.exists()
+
+
+@pytest.mark.parametrize("recent_only", [False, True])
+def test_deleting_original_entry_keeps_data_referenced_by_an_alias(bridge, app, tmp_path, recent_only):
+    import json
+    import shutil
+
+    from narrative.project_catalog import open_graph_project
+    from narrative.project_package import layout
+    from narrative.provider_store import GLOBAL_SCOPE, ProviderStore
+
+    entry = _package(tmp_path, "original")
+    if recent_only:
+        other = tmp_path / "aliases"
+        other.mkdir()
+        alias = other / "copy.nproj"
+        description = json.loads(entry.read_text(encoding="utf-8"))
+        description["layout"] = {key: "../" + value for key, value in description["layout"].items()}
+        alias.write_text(json.dumps(description), encoding="utf-8")
+        ProviderStore().put(GLOBAL_SCOPE, "recent_projects", json.dumps([str(entry), str(alias)]))
+    else:
+        alias = tmp_path / "copy.nproj"
+        shutil.copyfile(entry, alias)
+    database = layout(entry).db
+    results = []
+    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
+    bridge.removeProject(str(entry), True)
+    app.processEvents()
+    removed = [payload for kind, payload in results if kind == "project_removed"][-1]
+    assert removed["retained_data"] is True
+    assert removed["deleted"] == [str(entry)]
+    assert not entry.exists() and database.is_file() and alias.is_file()
+    assert open_graph_project(alias).graph_project_info()["revision"] == 0
+
+
+@pytest.mark.parametrize("delete_files", [False, True])
+@pytest.mark.parametrize("existing_directory", [False, True])
+def test_forget_missing_or_legacy_directory_without_opening(
+    bridge, app, tmp_path, monkeypatch, delete_files, existing_directory
+):
+    import json
+
+    from narrative.provider_store import GLOBAL_SCOPE, ProviderStore
+
+    target = tmp_path / "legacy"
+    if existing_directory:
+        target.mkdir()
+        (target / "project.json").write_text("legacy untouched", encoding="utf-8")
+    alias = QUrl.fromLocalFile(str(target)).toString()
+    ProviderStore().put(GLOBAL_SCOPE, "recent_projects", json.dumps([alias, str(target)]))
+    monkeypatch.setattr("narrative.project_package.layout", lambda path: pytest.fail("must not open legacy entries"))
+    results = []
+    errors = []
+    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
+    bridge.errorOccurred.connect(lambda kind, message: errors.append((kind, message)))
+    bridge.removeProject(str(target).upper() if os.name == "nt" else str(target), delete_files)
+    removed = [payload for kind, payload in results if kind == "project_removed"]
+    assert len(removed) == 1
+    assert json.loads(ProviderStore().get(GLOBAL_SCOPE, "recent_projects")) == []
+    assert bool(errors) == (existing_directory and delete_files)
+    if existing_directory:
+        assert (target / "project.json").read_text(encoding="utf-8") == "legacy untouched"
+
+
+@pytest.mark.parametrize("failure", ["get", "put"])
+def test_storage_failure_never_reports_removal_or_deletes_files(
+    bridge, app, tmp_path, monkeypatch, failure
+):
+    import json
+
+    from narrative.provider_store import GLOBAL_SCOPE, ProviderStore
+
+    entry = _package(tmp_path, "save-failure")
+    ProviderStore().put(GLOBAL_SCOPE, "recent_projects", json.dumps([str(entry)]))
+    results, errors = [], []
+    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
+    bridge.errorOccurred.connect(lambda kind, message: errors.append((kind, message)))
+    def fail(*args, **kwargs):
+        raise OSError("storage unavailable")
+    with monkeypatch.context() as patch:
+        patch.setattr(ProviderStore, failure, fail)
+        bridge.removeProject(str(entry), True)
+    assert errors and "storage unavailable" in errors[-1][1]
+    assert not any(kind == "project_removed" for kind, _ in results)
+    assert entry.is_file()
+    assert json.loads(ProviderStore().get(GLOBAL_SCOPE, "recent_projects")) == [str(entry)]
+
+
+def test_old_recent_response_cannot_restore_removed_entry(bridge, app, tmp_path, monkeypatch):
+    import json
+
+    from narrative.provider_store import GLOBAL_SCOPE, ProviderStore
+
+    entry = tmp_path / "missing.nproj"
+    ProviderStore().put(GLOBAL_SCOPE, "recent_projects", json.dumps([str(entry)]))
+    jobs, results = [], []
+    monkeypatch.setattr(bridge, "_submit", lambda kind, work: jobs.append((kind, work)))
+    bridge.resultReady.connect(lambda kind, payload: results.append((kind, payload)))
+    bridge.loadRecentProjects()
+    stale = jobs[0][1]()
+    bridge.forgetRecentProject(QUrl.fromLocalFile(str(entry)).toString())
+    current = jobs[-1][1]()
+    def finish(request_id, payload):
+        bridge._requests[request_id] = ("recent_projects", bridge._epoch, None, None, time.perf_counter())
+        bridge._on_worker_done(request_id, payload, None)
+    finish(9001, current)
+    finish(9002, stale)
+    recent = [payload for kind, payload in results if kind == "recent_projects"]
+    assert len(recent) == 1 and recent[0]["items"] == []
+
+
+def test_launcher_removes_row_before_async_refresh(bridge, app, tmp_path, monkeypatch):
+    import json
+
+    from narrative.provider_store import GLOBAL_SCOPE, ProviderStore
+
+    entry = tmp_path / "missing.nproj"
+    ProviderStore().put(GLOBAL_SCOPE, "recent_projects", json.dumps([str(entry)]))
+    engine = QQmlApplicationEngine()
+    engine.rootContext().setContextProperty("bridge", bridge)
+    engine.load(QUrl.fromLocalFile(str(QML_PATH)))
+    window = engine.rootObjects()[0]
+    window.setProperty("mode", "launcher")
+    try:
+        deadline = time.monotonic() + 5
+        page = None
+        while time.monotonic() < deadline:
+            app.processEvents()
+            page = window.findChild(object, "launcherPage")
+            if page is not None and page.property("projectCount") == 1:
+                break
+            time.sleep(0.01)
+        assert page is not None and page.property("projectCount") == 1
+        monkeypatch.setattr(bridge, "loadRecentProjects", lambda: None)
+        bridge.removeProject(str(entry), False)
+        assert page.property("projectCount") == 0
+        assert page.property("recentItems").toVariant() == []
+    finally:
+        engine.deleteLater()
+        bridge.close()
+        app.processEvents()

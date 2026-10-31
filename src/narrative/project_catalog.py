@@ -48,22 +48,26 @@ def _describe(db: Path, *, name: str, path: Path, package: bool) -> dict:
 
 
 def list_projects(directory: str | Path) -> list[dict]:
-    """List projects read-only; never opens/migrates or writes them.
-
-    只列工程包（`<名字>.nproj/`），读的是包里 `graph.sqlite3` 的元信息。
-    """
-    from .project_package import DB_NAME, PACKAGE_SUFFIX
+    """Discover actual private entry files; directories/databases are not entries."""
+    from .project_package import PACKAGE_SUFFIX, layout, read_entry
 
     root = Path(directory).resolve()
     if not root.is_dir():
         return []
-    projects: list[dict] = []
-    for package in root.glob(f"*{PACKAGE_SUFFIX}"):
-        db = package / DB_NAME
-        if package.is_dir() and db.is_file():
-            projects.append(
-                _describe(db, name=package.stem, path=package, package=True)
-            )
+    entries = set(root.glob(f"*{PACKAGE_SUFFIX}")) | set(root.glob(f"*/*{PACKAGE_SUFFIX}"))
+    projects = []
+    for entry in sorted(entries):
+        if not entry.is_file():
+            continue
+        try:
+            read_entry(entry)
+            found = layout(entry)
+            projects.append(_describe(found.db, name=entry.stem, path=entry, package=True))
+        except ValueError:
+            projects.append({"name": entry.stem, "path": str(entry), "db": "", "package": True,
+                             "title": entry.stem, "version": None, "revision": None,
+                             "status": "unreadable", "last_opened": None,
+                             "modified_at": entry.stat().st_mtime})
     return sorted(projects, key=lambda item: item["modified_at"], reverse=True)
 
 
@@ -108,29 +112,35 @@ def clear_incompatible(directory: str | Path) -> dict:
 
 
 def _database(path: str | Path) -> Path:
-    """工程可能是包目录，也可能是包里的 graph.sqlite3：都归到库文件。
+    """Resolve only a valid private project entry; no implicit migration."""
+    from .project_package import layout, read_entry
 
-    顺手把旧包的 `manifest.json` 补成 `project.json`——只做一次，之后就只剩一个描述文件。
-    """
-    from .project_package import layout, migrate
-
-    found = layout(path)
-    migrate(found.root)
-    return found.db
+    read_entry(path)
+    return layout(path).db
 
 
 def create_graph_project(path: str | Path) -> GraphOperations:
-    """建一个工程包：目录、库、描述文件一次到位。"""
-    from .project_package import layout as _layout
-    from .project_package import write_project
+    """Create a private information file with separate, uniquely named data."""
+    from .project_package import layout, write_project
 
-    target = _layout(path)
+    entry = Path(path).resolve()
+    if entry.exists():
+        raise ValueError("工程入口已存在，不能覆盖")
+    target = layout(entry)
+    if target.root.exists() and any(target.root.iterdir()):
+        raise ValueError("工程数据目录已存在，不能覆盖")
     target.db.parent.mkdir(parents=True, exist_ok=True)
     ops = GraphOperations(target.db, create=True)
     info = ops.graph_project_info()
-    write_project(target.root, title=info["title"], project_id=info["project_id"])
+    write_project(entry, title=info["title"], project_id=info["project_id"], locations=target)
     return ops
 
 
 def open_graph_project(path: str | Path) -> GraphOperations:
-    return GraphOperations(_database(path))
+    from .project_package import read_entry
+
+    description = read_entry(path)
+    ops = GraphOperations(_database(path))
+    if ops.graph_project_info()["project_id"] != description["project"]["id"]:
+        raise ValueError("工程入口标识与数据库不一致，拒绝打开")
+    return ops

@@ -68,6 +68,7 @@ class NativeBridge(QObject):
         self._next_request = 0
         self._epoch = 0
         self._query_epoch = 0
+        self._recent_generation = 0
         self._query_spec: dict = {}
         self._query_canvas: dict | None = None
         self._unified_active = False
@@ -150,6 +151,8 @@ class NativeBridge(QObject):
             return
         try:
             result = payload if isinstance(payload, dict) else {}
+            if kind == "recent_projects" and result.get("generation") != self._recent_generation:
+                return
             if kind == "detail" and result.get("node", {}).get("id") != self._detail_node:
                 return
             if apply is not None:
@@ -237,32 +240,24 @@ class NativeBridge(QObject):
         return normalized
 
     def _path_for(self, name_or_path: str) -> Path:
-        """名字按图项目目录解析，绝对路径就地接受。
-
-        绝对路径是「打开工程…」用的：工程可以放在任何地方，没必要为了打开它先把
-        文件搬进 projects 目录。工程包（`.nproj/`）、包里的 `graph.sqlite3`、裸库
-        都收——`layout()` 认得后两者。
-        """
+        """Public opening accepts only the private entry information file."""
         text = name_or_path.strip()
         if not text:
-            raise ValueError("请选择项目")
+            raise ValueError("请选择工程入口文件")
         supplied = Path(text)
         if not supplied.is_absolute():
-            raise ValueError("请给出工程的完整路径（.nproj 目录）")
+            raise ValueError("请给出工程入口文件的完整路径（.nproj 文件）")
         resolved = supplied.expanduser()
-        if resolved.suffix.lower() == project_package.PACKAGE_SUFFIX:
-            if not resolved.is_dir():
-                raise ValueError("找不到这个工程包")
-            return resolved.resolve()
-        if resolved.name == project_package.DB_NAME and (
-            resolved.parent / project_package.PROJECT_FILE
-        ).is_file():
-            return resolved.parent.resolve()
-        raise ValueError("工程是一个 .nproj 目录，请选择它")
+        if resolved.suffix.lower() != project_package.PACKAGE_SUFFIX or resolved.is_dir():
+            raise ValueError("请选择 .nproj 工程入口文件，不是文件夹或数据库")
+        if not resolved.is_file():
+            raise ValueError("找不到这个 .nproj 工程入口文件")
+        return resolved.resolve()
 
     @staticmethod
     def _project_view(ops: GraphOperations) -> dict:
         info = ops.graph_project_info()
+        info = info | {"path": str(project_package.layout(ops.project_info().path).entry)}
         return {
             "project": info,
             "sources": ops.sources(),
@@ -398,17 +393,23 @@ class NativeBridge(QObject):
 
     RECENT_LIMIT = 8
 
-    def _recent_paths(self) -> list[str]:
+    def _recent_paths(self, *, strict: bool = False) -> list[str]:
         try:
             raw = ProviderStore().get(GLOBAL_SCOPE, "recent_projects")
         except Exception:  # 存储坏了不该连累启动
+            if strict:
+                raise
             return []
         if not raw:
             return []
         try:
             rows = json.loads(raw)
         except ValueError:
+            if strict:
+                raise
             return []
+        if strict and not isinstance(rows, list):
+            raise ValueError("最近工程列表格式无效")
         return [row for row in rows if isinstance(row, str)] if isinstance(rows, list) else []
 
     def _remember_project(self, path: Path) -> None:
@@ -432,94 +433,113 @@ class NativeBridge(QObject):
         local = QUrl(url).toLocalFile()
         self.openProject(local or url)
 
+    @Slot(str, result=str)
+    def recentProjectKey(self, path: str) -> str:
+        from PySide6.QtCore import QUrl
+
+        return os.path.normcase(str(Path(QUrl(path).toLocalFile() or path).resolve()))
+
     @Slot()
     def loadRecentProjects(self) -> None:
         """最近打开过的工程，带「还在不在」——搬走或删掉的不该点进去才报错。"""
 
+        self._recent_generation += 1
+        generation = self._recent_generation
+
         def work() -> dict:
             items = []
             for text in self._recent_paths():
-                path = Path(text)
-                if path.suffix.lower() == project_package.PACKAGE_SUFFIX:
-                    name, db = path.stem, path / project_package.DB_NAME
-                elif path.name == project_package.DB_NAME:
-                    # 包里的库：名字该是包的名字，不是 "graph"。
-                    name, db = path.parent.stem, path
-                else:
-                    name, db = path.stem, path
-                # 列表上该显示工程自己的标题；读不到就用名字。
-                title = project_package._meta(db)["title"] if db.is_file() else ""
-                if not title or title == db.stem:  # 读不到时 _meta 回落到文件名
-                    title = name
-                # 看库在不在，不看目录：包还在、库被删了，点进去只会报错。
+                path = Path(self.urlToPath(text))
+                name, title, exists = path.stem, path.stem, False
+                if path.is_file() and path.suffix.lower() == project_package.PACKAGE_SUFFIX:
+                    try:
+                        found = project_package.layout(path)
+                        exists = found.db.is_file()
+                        title = project_package.project(found)["project"]["title"] or name
+                    except (OSError, ValueError, KeyError):
+                        pass
                 items.append(
-                    {"path": text, "name": name, "title": title, "exists": db.is_file()}
+                    {"path": text, "name": name, "title": title, "exists": exists}
                 )
-            return {"items": items}
+            return {"items": items, "generation": generation}
 
         self._submit("recent_projects", work)
 
     @Slot(str, bool)
     def removeProject(self, path: str, delete_files: bool) -> None:
-        """从列表移除；勾了「删除文件」就一并删掉磁盘上的工程包。
-
-        删除是不可恢复的，所以只认**看着像工程包**的目录（有 `graph.sqlite3` 或
-        `project.json`），别的路径一律不碰；正在打开的那个先关掉，否则 Windows 上
-        库还开着，删不动。
-        """
+        """Forget the entry; explicit deletion only removes its validated owned files."""
         from PySide6.QtCore import QUrl
 
-        target = Path(QUrl(path).toLocalFile() or path)
-        if self._project_path is not None and Path(self._project_path) == target:
-            self.closeProject()
-        rows = [row for row in self._recent_paths() if Path(row) != target]
+        target = Path(QUrl(path).toLocalFile() or path).resolve()
+        key = self.recentProjectKey(path)
         try:
+            rows = [row for row in self._recent_paths(strict=True)
+                    if self.recentProjectKey(row) != key]
             ProviderStore().put(
                 GLOBAL_SCOPE, "recent_projects", json.dumps(rows, ensure_ascii=False)
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            self.errorOccurred.emit("project", f"无法保存最近工程列表：{exc}")
+            return
+        self._recent_generation += 1
+        if self._project_path is not None and self.recentProjectKey(str(self._project_path)) == key:
+            self.closeProject()
         removed: list[str] = []
-        if delete_files:
-            looks_like_project = target.is_dir() and (
-                (target / project_package.DB_NAME).is_file()
-                or (target / project_package.PROJECT_FILE).is_file()
-            )
-            if not looks_like_project:
-                self.errorOccurred.emit("project", f"这不是工程包，没有删除：{target}")
-            else:
-                # 缓存和会话在包旁边，名字跟着包走；不一起删就是一堆没人认领的目录。
-                for extra in (
-                    target,
-                    target.parent / f"{target.stem}_extraction",
-                    target.parent / f"{target.stem}_chats",
-                ):
-                    if not extra.exists():
+        retained_data = False
+        deletion_error = ""
+        if delete_files and target.exists():
+            try:
+                if not target.is_file() or target.suffix.lower() != project_package.PACKAGE_SUFFIX:
+                    raise ValueError("这不是有效的 .nproj 工程入口文件，没有删除")
+                found = project_package.layout(target)
+                parent = target.parent.resolve()
+                directories = list(dict.fromkeys(
+                    item.resolve() for item in (found.root, found.extraction, found.chats)
+                ))
+                owned = [parent / f"{target.stem}{suffix}"
+                         for suffix in ("_data", "_extraction", "_chats")]
+                shared = False
+                other_entries = set(parent.glob("*.nproj")) | {Path(self.urlToPath(row)) for row in rows}
+                for other in other_entries:
+                    if other.resolve() == target or not other.is_file():
                         continue
                     try:
-                        shutil.rmtree(extra)
-                        removed.append(str(extra))
-                    except OSError as exc:
-                        self.errorOccurred.emit("project", f"删不掉 {extra.name}：{exc}")
-        # 说清楚到底做了什么：只从列表拿掉和删了文件是两件事，不提示的话
-        # 人会以为删过了，回头发现磁盘上还在。
+                        referenced = project_package.layout(other)
+                    except (OSError, ValueError):
+                        continue
+                    references = (referenced.db, referenced.material,
+                                  referenced.extraction, referenced.chats)
+                    if any(directory == reference.resolve()
+                           or directory in reference.resolve().parents
+                           or reference.resolve() in directory.parents
+                           for directory in directories for reference in references):
+                        shared = True
+                        break
+                if (shared or any(item == parent or item.parent != parent for item in directories)
+                    or directories != [item.resolve() for item in owned]
+                    or found.material.resolve() != found.root.resolve() / "material"):
+                    # An entry may reference shared/external data: only unlink the entry.
+                    directories = []
+                    retained_data = True
+                for directory in directories:
+                    if directory.exists():
+                        shutil.rmtree(directory)
+                        removed.append(str(directory))
+                target.unlink()
+                removed.append(str(target))
+            except (OSError, ValueError) as exc:
+                deletion_error = str(exc)
+                self.errorOccurred.emit("project", deletion_error)
         self.resultReady.emit("project_removed", {
-            "path": str(target),
-            "deleted": removed,
-            "kept": not removed,
+            "path": str(target), "deleted": removed, "kept": not removed,
+            "retained_data": retained_data, "key": key,
+            "deletion_error": deletion_error,
         })
         self.loadRecentProjects()
 
     @Slot(str)
     def forgetRecentProject(self, path: str) -> None:
-        rows = [row for row in self._recent_paths() if row != path]
-        try:
-            ProviderStore().put(
-                GLOBAL_SCOPE, "recent_projects", json.dumps(rows, ensure_ascii=False)
-            )
-        except Exception:
-            pass
-        self.loadRecentProjects()
+        self.removeProject(path, False)
 
     @Slot()
     def loadGraph(self) -> None:
@@ -661,7 +681,11 @@ class NativeBridge(QObject):
     @Slot()
     def auditProperties(self) -> None:
         """Whole-graph property audit; the review page shows the findings."""
-        self._project_task("property_audit", lambda ops: ops.property_audit())
+        from .review_display import humanize_report
+
+        self._project_task("property_audit", lambda ops: humanize_report(
+            ops.graph_snapshot(), ops.property_records(), ops.property_audit(),
+        ))
 
     @Slot()
     @Slot(str, bool)
@@ -1416,7 +1440,7 @@ class NativeBridge(QObject):
             def ask(instruction) -> str:
                 return runner.agent_turn(instruction, session).raw
 
-            result = run_turn(ask, message, project=path, image=image)
+            result = run_turn(ask, message, project=project_package.layout(path).entry, image=image)
             saved = store.append(
                 chat_id, "assistant", result.get("answer") or "",
                 steps=result.get("steps") or [],
@@ -1495,11 +1519,13 @@ class NativeBridge(QObject):
     @Slot(str)
     def changeCandidateDetail(self, candidate_id: str) -> None:
         """候选详情，附一份人能读的行（可能只有几条属性，节点已经在图里了）。"""
-        from .graph_display import candidate_rows
+        from .review_display import candidate_rows
 
         def work(ops) -> dict:
             detail = ops.change_candidate(candidate_id)
-            return {"candidate": detail, "rows": candidate_rows(ops.graph_snapshot(), detail)}
+            return {"candidate": detail, "rows": candidate_rows(
+                ops.graph_snapshot(), detail, ops.property_records(),
+            )}
 
         self._project_task("change_candidate", work)
 
@@ -1555,9 +1581,21 @@ class NativeBridge(QObject):
 
     @Slot(str)
     def candidateDetail(self, candidate_id: str) -> None:
-        self._project_task(
-            "candidate", lambda ops: {"preview": ops.graph_candidate_preview(candidate_id)},
-        )
+        from .review_display import candidate_rows, humanize_report
+
+        def work(ops) -> dict:
+            detail = ops.graph_candidate(candidate_id)
+            snapshot, records = ops.graph_snapshot(), ops.property_records()
+            return {
+                "candidate": detail, "objects": detail.get("objects") or [],
+                "rows": candidate_rows(snapshot, detail, records),
+                "diagnostics": humanize_report(
+                    snapshot, records, {"issues": detail.get("diagnostics") or []},
+                )["issues"],
+                "kind": "graph",
+            }
+
+        self._project_task("candidate", work)
 
     @Slot(str, int)
     def acceptCandidate(self, candidate_id: str, version: int) -> None:
