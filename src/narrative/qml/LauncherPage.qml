@@ -124,6 +124,11 @@ Item {
                           + (kept > 0 ? "，保留 " + kept + " 个无法读取的文件" : "")
                         : "没有可清除的不兼容工程", false)
                 }
+            } else if (kind === "project_removed") {
+                var gone = (payload.deleted || []).length
+                app.toast(gone > 0
+                    ? "已删除工程文件（" + gone + " 项）"
+                    : "已从列表移除，磁盘上的文件还在", false)
             } else if (kind === "global_settings") {
                 catalog = payload.catalog || []
                 settingsPath = payload.path || ""

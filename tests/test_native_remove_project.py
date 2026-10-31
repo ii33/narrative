@@ -67,8 +67,13 @@ def test_removing_from_the_list_keeps_the_files(bridge, app, tmp_path: Path) -> 
     _wait(app, results, "project")
 
     bridge.removeProject(str(package), False)
+    app.processEvents()
 
     assert package.is_dir()
+    # 只从列表拿掉也要说清楚，否则人会以为删过了
+    removed = [payload for kind, payload in results if kind == "project_removed"]
+    assert removed and removed[-1]["kept"] is True
+    assert removed[-1]["deleted"] == []
     del results[:]
     bridge.loadRecentProjects()
     items = _wait(app, results, "recent_projects")["items"]
@@ -87,8 +92,12 @@ def test_removing_with_delete_takes_the_package_and_its_side_dirs(
     _wait(app, results, "project")
 
     bridge.removeProject(str(package), True)
+    app.processEvents()
 
     assert not package.exists()
+    removed = [payload for kind, payload in results if kind == "project_removed"]
+    assert removed and removed[-1]["kept"] is False
+    assert len(removed[-1]["deleted"]) == 3
     assert not (tmp_path / "book_extraction").exists()
     assert not (tmp_path / "book_chats").exists()
 

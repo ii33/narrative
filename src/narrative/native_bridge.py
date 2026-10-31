@@ -500,8 +500,13 @@ class NativeBridge(QObject):
                         removed.append(str(extra))
                     except OSError as exc:
                         self.errorOccurred.emit("project", f"删不掉 {extra.name}：{exc}")
-        if removed:
-            self.errorOccurred.emit("project", "已删除：" + "；".join(removed))
+        # 说清楚到底做了什么：只从列表拿掉和删了文件是两件事，不提示的话
+        # 人会以为删过了，回头发现磁盘上还在。
+        self.resultReady.emit("project_removed", {
+            "path": str(target),
+            "deleted": removed,
+            "kept": not removed,
+        })
         self.loadRecentProjects()
 
     @Slot(str)
