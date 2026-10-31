@@ -430,10 +430,10 @@ class GraphOperations:
             for node in self.graph_snapshot().get("nodes", [])
         }
         for item in summary.get("properties", []):
-            derived = next(
-                (record for record in item.get("records") or [] if record.get("derived")),
-                None,
-            )
+            # 只看最后一条：模型有时把同一句话直接写在大事件上，那一条才是当下值，
+            # 这时把它标成「借来的」就是撒谎。
+            records = item.get("records") or []
+            derived = records[-1] if records and records[-1].get("derived") else None
             if derived is None:
                 continue
             item["derived"] = True

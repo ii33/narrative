@@ -345,6 +345,25 @@ def audit_properties(
                            "事件名本身已经说了发生了什么",
             ))
 
+    # 大事件不写属性：它的样子由场景那句 `storyline_progress` 攒出来。模型偶尔
+    # 还是把总结直接写在它身上，那样读者看到的就是一句静态结论，不随阅读位置变。
+    for record in values:
+        node = names.get(record.get("node_id") or "") or {}
+        if node.get("node_type") != "storyline":
+            continue
+        if str(record.get("property_id") or "") != property_labels.STORYLINE_PROGRESS:
+            continue
+        issues.append(_issue(
+            "property_on_storyline", INFO,
+            f"大事件「{node.get('name')}」自己写了一条进展，"
+            "这句话应该属于某个场景",
+            node=node,
+            property_id=record.get("property_id"),
+            records=[record],
+            suggestion="把这条改挂到它对应的场景上（场景的 `storyline_progress`），"
+                       "大事件会自己汇总",
+        ))
+
     # 场景必须归到一个大事件下面。没有归属的场景在界面里只能进「未归入大事件」
     # 那个桶——它不是错，但它说明这一章还没读出大事件的边界。
     parents: dict[str, list[dict]] = {}

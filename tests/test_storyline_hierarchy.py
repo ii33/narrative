@@ -241,3 +241,53 @@ def test_orphan_events_get_a_bucket_of_their_own(tmp_path: Path) -> None:
     assert ORPHAN_SCENE in {row["id"] for row in _rows(tree, 1)}
     loose = next(row for row in _rows(tree, 2) if row["id"] == "3")
     assert loose["parent_id"] == ORPHAN_SCENE
+
+
+def test_the_progress_sentence_is_anchored_on_the_scenes_last_event(
+    tmp_path: Path,
+) -> None:
+    """一句话说的是「这一场读完时的样子」，所以锚在最后一步，不是模型引的那一步。
+
+    模型给了 `at_event`（它引文所在的事件），但那一步之后这一场还没走完；照它锚，
+    读者读到一半就看到整场的总结。
+    """
+    from narrative.extraction import build_candidate
+    from narrative.project_catalog import create_graph_project
+
+    ops = create_graph_project(tmp_path / "anchor.nproj")
+    text = "老周敲门。林舟接过铜钥匙。"
+    source_id = ops.import_source("雨夜", text)
+    data = {
+        "source_id": source_id,
+        "nodes": [
+            {"type": "storyline", "name": "林舟被带走", "start": 0,
+             "quotes": ["老周敲门。"], "scene": "", "storyline": "",
+             "provisional_name": "有人找上门"},
+            {"type": "scene", "name": "雨夜的门口", "start": 0,
+             "quotes": ["老周敲门。"], "scene": "", "storyline": "林舟被带走",
+             "provisional_name": ""},
+            {"type": "event", "name": "老周敲门", "start": 0,
+             "quotes": ["老周敲门。"], "scene": "雨夜的门口", "storyline": "",
+             "participants": []},
+            {"type": "event", "name": "林舟接过铜钥匙", "start": 5,
+             "quotes": ["林舟接过铜钥匙。"], "scene": "雨夜的门口", "storyline": "",
+             "participants": []},
+        ],
+        "properties": [
+            {"node": "雨夜的门口", "property": STORYLINE_PROGRESS,
+             "value": "老周找上门", "value_type": "string",
+             "quotes": ["老周敲门。"], "start": 0, "at_event": "老周敲门",
+             "scope": "world", "holder": "", "source": "narration",
+             "related_nodes": [], "category": "大事件"},
+        ],
+        "rejected": [],
+    }
+
+    built = build_candidate(ops, data)
+    record = next(
+        item for item in built["property_records"]
+        if item.get("property_id") == STORYLINE_PROGRESS
+    )
+    assert record["anchor_basis"] == "scene_end"
+    # E2 是这一场最后一步；模型说的 E1 不是。
+    assert record["event_id"] == "E2"

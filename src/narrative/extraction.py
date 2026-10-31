@@ -21,7 +21,7 @@ from .property_labels import STORYLINE_PROGRESS
 from .property_store import record_position
 
 # 提示词改一次，这个号跟着动；缓存的提取结果里会写下来，便于对照。
-PROMPT_VERSION = "extract/14"
+PROMPT_VERSION = "extract/15"
 
 NODE_TYPES = ("person", "group", "item", "location", "scene", "event", "storyline")
 
@@ -233,7 +233,13 @@ PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
     "category": "其他",
     "quotes": ["原文逐字引文"], "scope": "cognition", "holder": "林舟",
     "source": "thought", "related_nodes": ["苏娘"],
-    "at_event": "苏娘施展落英阵，老周以铁尺破解"}}
+    "at_event": "苏娘施展落英阵，老周以铁尺破解"}},
+  {{"node": "雨夜的门口", "property": "storyline_progress",
+    "value": "老周找上门，说林舟得跟他走", "value_type": "string",
+    "category": "大事件",
+    "quotes": ["原文逐字引文"], "scope": "world", "holder": null,
+    "source": "narration", "related_nodes": [],
+    "at_event": "林舟接过铜钥匙"}}
 ]}}
 
 章节正文：
