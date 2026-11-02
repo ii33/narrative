@@ -22,7 +22,7 @@ class GraphModel(BaseModel):
 
 
 type NodeType = Literal[
-    "person", "item", "location", "event", "scene", "storyline", "group", "other"
+    "person", "item", "location", "event", "action", "scene", "big_event", "storyline", "group", "other"
 ]
 type Origin = Literal["original", "inference", "creative", "production"]
 
@@ -85,11 +85,31 @@ class DisclosureRef(GraphModel):
     start: int = Field(ge=0)
 
 
+class CompletionRef(GraphModel):
+    source_id: str
+    start: int = Field(ge=0, strict=True)
+
+
 class NodeEvidence(GraphModel):
     """The exact sentence a node was extracted from."""
 
     source_id: str
     quote: str = Field(min_length=1)
+
+
+class NodeEvidenceSpan(GraphModel):
+    """One exact, addressable source passage supporting a node."""
+
+    source_id: str
+    start: int = Field(ge=0, strict=True)
+    end: int = Field(ge=1, strict=True)
+    quote: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def check_span(self) -> NodeEvidenceSpan:
+        if self.end <= self.start or self.end - self.start != len(self.quote):
+            raise ValueError("证据跨度须与逐字引文长度一致")
+        return self
 
 
 class Node(GraphModel):
@@ -101,16 +121,15 @@ class Node(GraphModel):
     subtype: str | None = None
     context_id: str = "canon"
     identity_note: str = ""
-    # 大事件常常到结尾才有名字：过程里叫「暂称」，收尾时定下正式名。
-    # 阅读位置还在跨度之内时显示暂称，读到跨度末尾之后显示正式名。
-    provisional_name: str = ""
     occurrence: TimeExtent | None = None
     # Where the reader first meets this node in the source. Story time and
     # reading position are different axes; this one needs no inference.
     disclosure: DisclosureRef | None = None
+    completion: CompletionRef | None = None
     # The sentence it came from. Without this a node is just a name plus an
     # offset; the quote is what makes it checkable.
     evidence: NodeEvidence | None = None
+    evidence_spans: list[NodeEvidenceSpan] = Field(default_factory=list)
     # Who and what takes part. Kept on the event itself: a participant list is
     # part of what the event is, not a separate assertion family.
     participants: list[str] = Field(default_factory=list)
@@ -125,13 +144,17 @@ class Node(GraphModel):
     # Chapter boundaries are marks on the reading chain, not separate nodes and
     # not hard breaks: a chapter starts or ends at an event, and the chain runs on.
     source_marks: list[dict] = Field(default_factory=list)
-    # Retraction keeps history: the record stays, the projection drops it.
+    # Current activity flag only; editing it does not retain an earlier node version.
     retracted: bool = False
 
     @model_validator(mode="after")
     def check_occurrence(self) -> Node:
-        if self.occurrence and self.node_type != "event":
-            raise ValueError("只有事件节点有发生区间；其他对象的状态变化记成属性记录")
+        if self.completion is not None and self.node_type != "storyline":
+            raise ValueError("completion只用于已结束主要故事的原文闭合右边界")
+        if self.node_type in {"storyline", "big_event"} and self.name.rstrip().endswith(("（暂称）", "(暂称)")):
+            raise ValueError("大事件名称不使用暂称标识，请直接写清晰概括名")
+        if self.occurrence and self.node_type not in {"event", "action"}:
+            raise ValueError("只有事件和动作有发生区间；其他对象的状态变化记成属性记录")
         for mark in self.source_marks:
             if not isinstance(mark, dict) or not isinstance(mark.get("source_id"), str):
                 raise ValueError("章节标记须含 source_id")

@@ -21,8 +21,6 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
-from .order_ids import order_key
-
 ALLOWED_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
@@ -47,37 +45,27 @@ def _empty(node_id: str) -> dict:
     return {"node_id": node_id, "cards": [], "updated_at": ""}
 
 
-def _moment(value: object) -> tuple[int, ...] | None:
-    """生效/失效时刻：空串是「不限制」，否则必须是个场景或事件的编号。"""
-    text = str(value or "").strip()
-    if not text:
+def _position(moment: str, snapshot: dict) -> tuple | None:
+    if not moment:
         return None
-    return order_key(text)
+    from .browse_view import anchor_event
+    from .temporal_state import boundary_at, position
+    node = next((node for node in snapshot["nodes"] if node["id"] == moment and not node.get("retracted")), None)
+    if node is None:
+        raise ValueError(f"资料卡时间点不存在：{moment}")
+    result = position(boundary_at(snapshot, anchor_event(snapshot, node)["id"]), snapshot)
+    if result is None:
+        raise ValueError(f"资料卡时间点没有原文披露坐标，无法排序：{moment}")
+    return result
 
 
-def _key(card: dict) -> tuple:
-    """先按生效时刻排（从头开始的最前），同一时刻按创建顺序。"""
-    start = _moment(card.get("valid_from"))
-    return (start if start is not None else (0,), str(card.get("created_at") or ""))
-
-
-def holds_at(card: dict, cut: str = "") -> bool:
-    """这张卡在阅读位置 `cut` 上算不算数。
-
-    空 cut 表示「最新」：那是全书读完的位置，所以只在没有失效时刻的卡还算数。
-    """
-    start = _moment(card.get("valid_from"))
-    end = _moment(card.get("valid_to"))
+def holds_at(card: dict, cut: str, *, snapshot: dict) -> bool:
+    start = _position(str(card.get("valid_from") or ""), snapshot)
+    end = _position(str(card.get("valid_to") or ""), snapshot)
     if not cut:
         return end is None
-    position = order_key(cut)
-    if position is None:
-        return end is None
-    if start is not None and start > position:
-        return False
-    if end is not None and end <= position:
-        return False
-    return True
+    current = _position(cut, snapshot)
+    return current is not None and (start is None or start <= current) and (end is None or current < end)
 
 
 class MaterialStore:
@@ -178,11 +166,12 @@ class MaterialStore:
         valid_from: str = "",
         valid_to: str = "",
         images: list[dict] | None = None,
+        *, snapshot: dict,
     ) -> dict:
         title = (title or "").strip()
         if not title:
             raise ValueError("资料需要一个标题")
-        self._check_window(valid_from, valid_to)
+        self._check_window(valid_from, valid_to, snapshot)
         data = self.load(node_id)
         card = {
             "id": f"card_{uuid4().hex[:8]}",
@@ -200,8 +189,9 @@ class MaterialStore:
         return card
 
     @staticmethod
-    def _check_window(valid_from: object, valid_to: object) -> None:
-        start, end = _moment(valid_from), _moment(valid_to)
+    def _check_window(valid_from: object, valid_to: object, snapshot: dict) -> None:
+        start = _position(str(valid_from or ""), snapshot)
+        end = _position(str(valid_to or ""), snapshot)
         if start is None or end is None:
             return
         if start >= end:
@@ -212,6 +202,7 @@ class MaterialStore:
         node_id: str,
         card_id: str,
         *,
+        snapshot: dict,
         title: str | None = None,
         detail: str | None = None,
         valid_from: str | None = None,
@@ -230,7 +221,7 @@ class MaterialStore:
             card["valid_from"] = str(valid_from)
         if valid_to is not None:
             card["valid_to"] = str(valid_to)
-        self._check_window(card["valid_from"], card["valid_to"])
+        self._check_window(card["valid_from"], card["valid_to"], snapshot)
         self._sync_images(node_id, card, images)
         self._save(node_id, data)
         return card
@@ -349,14 +340,25 @@ class MaterialStore:
 
     # -- 给界面用的一份投影 --------------------------------------------
 
-    def view(self, node_id: str, cut: str = "") -> dict:
+    def view(self, node_id: str, cut: str = "", *, snapshot: dict) -> dict:
         """这个阅读位置上有效的资料卡；别的时间点的只报个数。"""
         data = self.load(node_id)
         self._sweep(node_id, data)
         shown: list[dict] = []
         hidden = 0
-        for card in sorted(data["cards"], key=_key):
-            if not holds_at(card, cut):
+        diagnostics, unpositioned = [], []
+        positioned = []
+        for card in data["cards"]:
+            try:
+                start = _position(str(card.get("valid_from") or ""), snapshot)
+                visible = holds_at(card, cut, snapshot=snapshot)
+            except ValueError as exc:
+                diagnostics.append({"code": "MATERIAL_POSITION", "message": str(exc), "card_id": card["id"]})
+                unpositioned.append(card)
+                continue
+            positioned.append((start or (-1, -1), str(card.get("created_at") or ""), card, visible))
+        for _start, _created, card, visible in sorted(positioned, key=lambda item: item[:2]):
+            if not visible:
                 hidden += 1
                 continue
             images = []
@@ -369,6 +371,8 @@ class MaterialStore:
             "cut": cut,
             "cards": shown,
             "hidden_count": hidden,
+            "diagnostics": diagnostics,
+            "unpositioned_cards": unpositioned,
             "root": str(self.root),
             "updated_at": data.get("updated_at", ""),
         }

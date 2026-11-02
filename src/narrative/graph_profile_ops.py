@@ -91,7 +91,17 @@ class ProfileService:
         return providers.catalog()
 
     def set_title(self, title: str) -> None:
-        if not title.strip():
-            raise ValueError("项目标题不能为空")
-        with self.store.connect(write=True) as db:
-            db.execute("UPDATE meta SET value=? WHERE key='title'", (title.strip(),))
+        normalized = title.strip()
+        if not normalized:
+            raise ValueError("工程名称不能为空")
+        from . import project_package
+
+        layout = project_package.layout(self.store.path)
+        previous = self.store.info()["title"]
+        project_package.update_title(layout.entry, normalized)
+        try:
+            with self.store.connect(write=True) as db:
+                db.execute("UPDATE meta SET value=? WHERE key='title'", (normalized,))
+        except Exception:
+            project_package.update_title(layout.entry, previous)
+            raise

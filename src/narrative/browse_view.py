@@ -22,23 +22,26 @@ from .graph_query import revealed
 from .order_ids import label_id, order_key
 from .property_labels import STORYLINE_PROGRESS
 
-GRANULARITIES = ("scene", "event")
-LABELS = {"storyline": "大事件", "scene": "场景", "event": "事件"}
+GRANULARITIES = ("scene", "event", "action")
+LABELS = {"storyline": "主要故事", "big_event": "大事件", "scene": "场景", "event": "事件", "action": "动作"}
 
 # 阅读位置的层级，从粗到细：大事件 → 场景 → 事件。再往下（一个事件里的动作）
 # 只是往这张表里插一行——父子关系不是写死的，是看谁把谁列在 `events` 里。
 MOMENT_LEVELS = (
-    {"key": "storyline", "label": "大事件"},
+    {"key": "storyline", "label": "主要故事"},
+    {"key": "big_event", "label": "大事件"},
     {"key": "scene", "label": "场景"},
     {"key": "event", "label": "事件"},
+    {"key": "action", "label": "动作"},
 )
 
 # 场景必须挂在大事件下面、事件必须挂在场景下面。数据里偶尔缺这一环（老工程、
 # 模型漏填），投影不硬凑一个节点，而是给一个**看得见的桶**：它只用来展开，
 # 不能被选成阅读位置，所以不会冒充一条真数据。
 ORPHAN_STORYLINE = "~orphan"
+ORPHAN_BIG_EVENT = "~orphan-big-event"
 ORPHAN_SCENE = "~orphan-scene"
-ORPHAN_LABELS = {ORPHAN_STORYLINE: "未归入大事件", ORPHAN_SCENE: "未归入场景"}
+ORPHAN_LABELS = {ORPHAN_STORYLINE: "未归入主要故事", ORPHAN_BIG_EVENT: "未归入大事件", ORPHAN_SCENE: "未归入场景"}
 
 
 
@@ -84,28 +87,13 @@ def _orders(snapshot: dict) -> dict[str, int]:
 
 
 def anchor_event(snapshot: dict, node: dict) -> dict:
-    """The event whose reading position counts as "read this far".
-
-    An event is its own anchor. A scene is a container, so reading it means
-    reading its last event; without children it falls back to itself.
-    """
+    """Resolve a container to its last active leaf by source position."""
     nodes = _by_id(snapshot)
-    if node.get("node_type") == "storyline":
-        # 大事件是一段：读到它的位置，就是读到它最后一场的最后一步。
-        scenes = [
-            nodes[child] for child in node.get("events") or []
-            if child in nodes and nodes[child].get("node_type") == "scene"
-        ]
-        anchors = [anchor_event(snapshot, scene) for scene in scenes]
-        anchors = [item for item in anchors if item.get("node_type") == "event"]
-        return max(anchors, key=_key) if anchors else node
-    if node.get("node_type") != "scene":
-        return node
-    children = [
-        nodes[child] for child in node.get("events") or []
-        if child in nodes and nodes[child].get("node_type") == "event"
-    ]
-    return max(children, key=_key) if children else node
+    descendants = _members(nodes, node)
+    leaves = [child for child in descendants if child.get("node_type") in {"event", "action"}
+              and not any((nodes.get(identifier) or {}).get("node_type") in {"event", "action"}
+                          for identifier in child.get("events") or [])]
+    return max(leaves, key=_reading_key(snapshot)) if leaves else node
 
 
 def cut_for(snapshot: dict, step_id: str) -> dict | None:
@@ -114,7 +102,14 @@ def cut_for(snapshot: dict, step_id: str) -> dict | None:
     if node is None:
         return None
     anchor = anchor_event(snapshot, node)
-    disclosure = anchor.get("disclosure") or {}
+    from .temporal_state import boundary_at
+    if node.get("node_type") == "storyline" and node.get("completion"):
+        completion = node["completion"]
+        disclosure = {"source_id": completion["source_id"], "start": completion["start"] - 1}
+    elif anchor["id"] == node["id"] and node.get("node_type") in {"storyline", "big_event", "scene"}:
+        disclosure = node.get("disclosure") or {}
+    else:
+        disclosure = boundary_at(snapshot, anchor["id"]) or {}
     start = disclosure.get("start")
     source_id = disclosure.get("source_id")
     if not isinstance(start, int) or not isinstance(source_id, str):
@@ -137,7 +132,7 @@ def steps(snapshot: dict, granularity: str = "scene") -> list[dict]:
         node for node in snapshot.get("nodes", [])
         if node.get("node_type") == kind and not node.get("retracted")
     ]
-    picked.sort(key=_key)
+    picked.sort(key=_reading_key(snapshot))
     return [
         {
             "id": node["id"],
@@ -151,45 +146,24 @@ def steps(snapshot: dict, granularity: str = "scene") -> list[dict]:
     ]
 
 
-def _progress_by_scene(snapshot: dict, records: list[dict] | None) -> dict[str, dict]:
-    """每个场景对「大事件走到哪了」的那一句话，取它自己最后一条。
-
-    记录挂在场景上（`storyline_progress`），不是挂在大事件上：大事件是容器，
-    它的样子由已经读过的场景攒出来，而不是自己写一句结论。
-    """
+def _progress_by_member(snapshot: dict, records: list[dict] | None) -> dict[str, dict]:
+    """主要故事进展记在大事件上，大事件进展记在场景上。"""
     nodes = _by_id(snapshot)
     best: dict[str, tuple[tuple, dict]] = {}
     for record in records or []:
         if not isinstance(record, dict) or record.get("kind") != "property_value":
             continue
-        if str(record.get("property_id") or "").strip() != STORYLINE_PROGRESS:
-            continue
         scene = nodes.get(str(record.get("node_id") or ""))
-        if scene is None or scene.get("node_type") != "scene":
+        expected = {"big_event": STORYLINE_PROGRESS, "scene": "big_event_progress"}.get(str((scene or {}).get("node_type") or ""))
+        if scene is None or not expected or record.get("property_id") != expected:
             continue
         event = nodes.get(str(record.get("event_id") or ""))
         if event is None:
             continue
-        key = _key(event)
+        key = _reading_key(snapshot)(event)
         if scene["id"] not in best or key > best[scene["id"]][0]:
             best[scene["id"]] = (key, record)
     return {scene_id: record for scene_id, (_key_, record) in best.items()}
-
-
-def _storyline_name(storyline: dict, nodes: dict[str, dict], cut_key: tuple | None) -> dict:
-    """读者此刻看到的大事件叫什么。
-
-    大事件常常到收尾才有正式名，过程里只有一个暂称。读到它最后一步之前，
-    显示暂称——否则读者在开头就看到了结局的名字。
-    """
-    final = storyline.get("name") or storyline["id"]
-    provisional = str(storyline.get("provisional_name") or "").strip()
-    if not provisional or cut_key is None:
-        return {"name": final, "final_name": final, "provisional": False}
-    end = _key(anchor_event({"nodes": list(nodes.values())}, storyline))
-    if cut_key >= end:
-        return {"name": final, "final_name": final, "provisional": False}
-    return {"name": provisional, "final_name": final, "provisional": True}
 
 
 def moment_tree(
@@ -206,21 +180,46 @@ def moment_tree(
     下面。没有归属的场景进「未归入大事件」这个桶，而不是混进第一列冒充大事件
     ——混在一起时，读者没法判断自己在选哪一级。
 
-    `cut_event_id` 是当前阅读位置：大事件在读完最后一步之前显示暂称，`summary`
-    也只取到这一步为止。`records` 是属性取值，场景对「大事件走到哪了」的那句话
+    `cut_event_id` 仅过滤可见成员；大事件名称保持原名，start/end 始终依据完整快照计算。
+    `summary` 只取到当前阅读位置。`records` 是属性取值，场景对「大事件走到哪了」的那句话
     就在里面（`STORYLINE_PROGRESS`）。
     """
+    from .storyline_ranges import analyze, reading_starts
+    starts = reading_starts(snapshot)
+    ranges = {row['id']: row for row in analyze(snapshot)[0]}
     nodes = {
         node["id"]: node
         for node in snapshot.get("nodes", [])
         if isinstance(node.get("id"), str) and not node.get("retracted")
     }
+    if cut_event_id and cut_event_id in nodes:
+        cut = cut_for(snapshot, cut_event_id)
+        if cut:
+            cut_orders = _orders(snapshot)
+            visible = {key for key, node in nodes.items() if revealed(node, cut, cut_orders)}
+            for identifier, start in starts.items():
+                if nodes[identifier].get('node_type') == 'storyline':
+                    start = nodes[identifier].get('disclosure')
+                    if not start and nodes[identifier].get('completion'):
+                        completion = nodes[identifier]['completion']
+                        start = {'source_id': completion['source_id'], 'start': completion['start'] - 1}
+                    if not start:
+                        visible.discard(identifier)
+                        continue
+                else:
+                    start = ranges.get(identifier, {}).get('start', start)
+                left = cut_orders.get(start['source_id'])
+                right = cut_orders.get(cut['source_id'])
+                if left is not None and right is not None and (left, start['start']) > (right, cut['start']):
+                    visible.discard(identifier)
+                elif left is not None and right is not None:
+                    visible.add(identifier)
+            nodes = {key: node for key, node in nodes.items() if key in visible}
     present = {str(node.get("node_type")) for node in nodes.values()}
     wanted = {level["key"] for level in MOMENT_LEVELS}
     if not (present & wanted):
         return {"levels": [], "nodes": []}
-    # 三级是固定的，不因为「这个工程暂时没有大事件」就塌成两级——塌了以后场景
-    # 又跑到第一列去，正是这次要修的那个错。
+    # 层级由MOMENT_LEVELS统一定义，不因某层暂时没有节点而变换含义。
     levels = [dict(level) for level in MOMENT_LEVELS]
     rank = {level["key"]: index for index, level in enumerate(levels)}
 
@@ -231,22 +230,22 @@ def moment_tree(
             if child in nodes:
                 parent_of.setdefault(child, node["id"])
 
-    progress = _progress_by_scene(snapshot, records)
-    cut_key = _key(nodes[cut_event_id]) if cut_event_id in nodes else None
+    progress = _progress_by_member(snapshot, records)
+    cut_key = _reading_key(snapshot)(nodes[cut_event_id]) if cut_event_id in nodes else None
 
     def seen(scene_id: str) -> bool:
         if cut_key is None:
             return True
-        return _key(anchor_event(snapshot, nodes[scene_id])) <= cut_key
+        return _reading_key(snapshot)(anchor_event(snapshot, nodes[scene_id])) <= cut_key
 
     orders = _orders(snapshot)
     rows: list[tuple[tuple, dict]] = []
-    orphans: dict[str, list[dict]] = {ORPHAN_STORYLINE: [], ORPHAN_SCENE: []}
+    orphans: dict[str, list[dict]] = {ORPHAN_STORYLINE: [], ORPHAN_BIG_EVENT: [], ORPHAN_SCENE: []}
     for node in nodes.values():
         kind = str(node.get("node_type"))
         if kind not in wanted:
             continue
-        disclosure = node.get("disclosure")
+        disclosure = ranges.get(node["id"], {}).get("start") or starts.get(node["id"]) or node.get("disclosure")
         disclosure = disclosure if isinstance(disclosure, dict) else {}
         source = disclosure.get("source_id")
         start = disclosure.get("start")
@@ -256,12 +255,12 @@ def moment_tree(
             _key(node),
         )
         parent = parent_of.get(node["id"], "")
-        if kind == "scene":
-            if parent not in nodes or nodes[parent].get("node_type") != "storyline":
-                parent = ORPHAN_STORYLINE
-        elif kind == "event":
-            if parent not in nodes or nodes[parent].get("node_type") != "scene":
-                parent = ORPHAN_SCENE
+        expected_parent = levels[rank[kind] - 1]["key"] if rank[kind] else ""
+        if expected_parent:
+            ancestor = next((row for row in _ancestors(snapshot, node["id"])
+                             if row.get("node_type") == expected_parent and row["id"] in nodes), None)
+            parent = ancestor["id"] if ancestor else {"storyline": ORPHAN_STORYLINE, "big_event": ORPHAN_BIG_EVENT,
+                                                    "scene": ORPHAN_SCENE}.get(expected_parent, "")
         else:
             parent = ""
         row = {
@@ -275,23 +274,26 @@ def moment_tree(
             "synthetic": False,
             "summary": "",
         }
-        if kind == "storyline":
-            row.update(_storyline_name(node, nodes, cut_key))
+        if kind in {"storyline", "big_event"}:
+            if kind == "big_event" and parent == ORPHAN_STORYLINE:
+                orphans[ORPHAN_STORYLINE].append(row)
+            row.update(start=ranges.get(node["id"], {}).get("start"),
+                       end=ranges.get(node["id"], {}).get("end"))
             # 大事件此刻的样子：它下面已经读过的场景里，最后那一句话。
             done = [
                 child for child in node.get("events") or []
-                if child in nodes and nodes[child].get("node_type") == "scene"
+                if child in nodes and nodes[child].get("node_type") == ("big_event" if kind == "storyline" else "scene")
                 and seen(child)
             ]
-            done.sort(key=lambda scene_id: _key(anchor_event(snapshot, nodes[scene_id])))
+            done.sort(key=lambda scene_id: _reading_key(snapshot)(anchor_event(snapshot, nodes[scene_id])))
             for scene_id in reversed(done):
                 if progress.get(scene_id):
                     row["summary"] = str(progress[scene_id].get("value") or "")
                     break
         elif kind == "scene":
             row["summary"] = str((progress.get(node["id"]) or {}).get("value") or "")
-            if parent == ORPHAN_STORYLINE:
-                orphans[ORPHAN_STORYLINE].append(row)
+            if parent == ORPHAN_BIG_EVENT:
+                orphans[ORPHAN_BIG_EVENT].append(row)
         elif kind == "event" and parent == ORPHAN_SCENE:
             orphans[ORPHAN_SCENE].append(row)
         rows.append((order, row))
@@ -315,89 +317,68 @@ def moment_tree(
                 "summary": "",
             },
         )
-    if orphans[ORPHAN_STORYLINE]:
-        out.insert(
-            len(out),
-            {
-                "id": ORPHAN_STORYLINE,
-                "label_id": "",
-                "name": ORPHAN_LABELS[ORPHAN_STORYLINE],
-                "level": "storyline",
-                "kind_label": LABELS["storyline"],
-                "parent_id": "",
-                "rank": rank.get("storyline", 0),
-                "synthetic": True,
-                "summary": "",
-            },
-        )
+    for bucket, level, parent in [(ORPHAN_BIG_EVENT, "big_event", ORPHAN_STORYLINE),
+                                   (ORPHAN_STORYLINE, "storyline", "")]:
+        if orphans[bucket] or bucket == ORPHAN_STORYLINE and orphans[ORPHAN_BIG_EVENT]:
+            out.append({"id": bucket, "label_id": "", "name": ORPHAN_LABELS[bucket],
+                        "level": level, "kind_label": LABELS[level], "parent_id": parent,
+                        "rank": rank[level], "synthetic": True, "summary": ""})
+
     return {"levels": levels, "nodes": out}
 
 
+def _ancestors(snapshot: dict, identifier: str) -> list[dict]:
+    nodes = _by_id(snapshot)
+    result, seen, pending = [], {identifier}, [identifier]
+    while pending:
+        child = pending.pop(0)
+        for parent in nodes.values():
+            if not parent.get("retracted") and parent["id"] not in seen and child in (parent.get("events") or []):
+                seen.add(parent["id"])
+                result.append(parent)
+                pending.append(parent["id"])
+    return result
+
+
 def _scene_of(snapshot: dict, event_id: str) -> dict | None:
-    """The scene that lists this event as its own child."""
-    scenes = [
-        node for node in snapshot.get("nodes", [])
-        if node.get("node_type") == "scene"
-        and not node.get("retracted")
-        and event_id in (node.get("events") or [])
-    ]
-    return min(scenes, key=_key) if scenes else None
+    return next((node for node in _ancestors(snapshot, event_id) if node.get("node_type") == "scene"), None)
 
 
 def step_for_granularity(snapshot: dict, step_id: str, granularity: str) -> str:
-    """The step in another granularity that sits at the same reading position.
-
-    The two views are not two facts: a scene is read when its last event is read,
-    so "this scene" and "that scene's last event" are the same position. Going
-    back, an event belongs to the scene that lists it; an event in no scene falls
-    back to the last scene the reader has already finished, because switching
-    granularity must not throw the position away and drop the reader at the end
-    of the book.
-    """
-    if not step_id:
-        return ""
     kind = granularity if granularity in GRANULARITIES else "scene"
     nodes = _by_id(snapshot)
     node = nodes.get(step_id)
-    if node is None:
+    if not node:
         return ""
-    if kind == "event":
-        if node.get("node_type") == "event":
-            return step_id
-        anchor = anchor_event(snapshot, node)
-        return anchor["id"] if anchor.get("node_type") == "event" else ""
-    if node.get("node_type") == "scene":
+    if node.get("node_type") == kind:
         return step_id
-    scene = _scene_of(snapshot, step_id)
-    if scene is not None:
-        return scene["id"]
-    position = _key(node)
-    finished = [
-        candidate for candidate in snapshot.get("nodes", [])
-        if candidate.get("node_type") == "scene"
-        and not candidate.get("retracted")
-        and _key(anchor_event(snapshot, candidate)) <= position
-    ]
-    if not finished:
-        return ""
-    return max(finished, key=lambda item: _key(anchor_event(snapshot, item)))["id"]
+    parent = next((row for row in _ancestors(snapshot, step_id) if row.get("node_type") == kind), None)
+    if parent:
+        return parent["id"]
+    children = [row for row in _members(nodes, node) if row.get("node_type") == kind]
+    if children:
+        return max(children, key=lambda row: _reading_key(snapshot)(anchor_event(snapshot, row)))["id"]
+    position = _reading_key(snapshot)(anchor_event(snapshot, node))
+    finished = [row for row in nodes.values() if row.get("node_type") == kind
+                and not row.get("retracted") and _reading_key(snapshot)(anchor_event(snapshot, row)) <= position]
+    return max(finished, key=lambda row: _reading_key(snapshot)(anchor_event(snapshot, row)))["id"] if finished else ""
 
 
 def _members(nodes: dict[str, dict], node: dict) -> list[dict]:
-    """What a scene is made of, at any depth."""
-    out: list[dict] = []
-    for child_id in node.get("events") or []:
-        child = nodes.get(child_id)
-        if child is None:
+    result, seen, pending = [], {node["id"]}, list(node.get("events") or [])
+    while pending:
+        identifier = pending.pop(0)
+        child = nodes.get(identifier)
+        if not child or identifier in seen or child.get("retracted"):
             continue
-        out.append(child)
-        if child.get("node_type") == "scene":
-            out.extend(_members(nodes, child))
-    return out
+        seen.add(identifier)
+        result.append(child)
+        pending.extend(child.get("events") or [])
+    return result
 
 
 def related_nodes(
-    snapshot: dict, step_id: str, records: list[dict] | None = None
+    snapshot: dict, step_id: str, records: list[dict] | None = None, *, cut: dict | None = None
 ) -> list[str]:
     """Nodes the step is about: itself, what it is made of, and who takes part.
 
@@ -418,52 +399,52 @@ def related_nodes(
     node = nodes.get(step_id)
     if node is None:
         return []
-    found = {step_id}
-    kind = node.get("node_type")
-    if kind == "scene":
-        members = _members(nodes, node)
-    elif kind == "storyline":
-        # 大事件 → 它下面每一场 → 那些场里的事件
-        scenes = [
-            child for child in node.get("events") or []
-            if (nodes.get(child) or {}).get("node_type") == "scene"
-        ]
-        members = [nodes[child] for child in scenes]
-        for scene in list(members):
-            members.extend(_members(nodes, scene))
-    else:
-        members = []
-    found.update(member["id"] for member in members)
-    # The container is related too: an event belongs to its scene.
-    if kind == "event":
-        found.update(
-            scene["id"] for scene in snapshot.get("nodes", [])
-            if scene.get("node_type") == "scene"
-            and step_id in (scene.get("events") or [])
-        )
-    for item in members or [node]:
-        found.update(
-            participant for participant in item.get("participants") or []
-            if participant in nodes
-        )
+    boundary = cut if cut is not None else cut_for(snapshot, step_id)
+    def visible(item):
+        return (not item.get("retracted") and item.get("context_id", "canon") == node.get("context_id", "canon")
+                and (boundary is None or revealed(item, boundary, _orders(snapshot))))
+    members = [item for item in _members(nodes, node) if visible(item)]
+    own_members = [item for item in [node, *members] if visible(item)]
+    found = {item["id"] for item in own_members}
+    found.update(parent["id"] for parent in _ancestors(snapshot, step_id) if visible(parent))
+    for item in own_members:
+        found.update(participant for participant in item.get("participants") or [] if participant in nodes)
+    from .node_involvement import involvement
+    aggregated = involvement(snapshot, records or [], step_id, boundary)
+    found.update(row["id"] for rows in aggregated.values() for row in rows)
     # 属性从哪里往外扩：这一步本身（场景/事件），加上参与其中的**物和地点**——
     # 「这一场里手镯在谁手上」正是相关的事。
     # 但**人物**的档案不扩：「身份」「司机」是他自己的资料，顺着它走会把全书的人都
     # 拉进来，选一个大事件却列出没出场的人，就是这么来的。
+    own = {item["id"] for item in own_members}
     structural = {
-        node_id for node_id in found
-        if (nodes.get(node_id) or {}).get("node_type") != "person"
+        identifier for identifier in own | {ref for item in own_members for ref in item.get("participants") or []}
+        if (nodes.get(identifier) or {}).get("node_type") != "person"
     }
-    # 属性指到的人 / 物：谁拿着这把钥匙、这一场里谁和谁是仇敌。
+    from .property_core import canonical_definitions
+    from .temporal_state import point, position
+    cutoff = position(boundary, snapshot)
+    definitions = canonical_definitions(records or [])
     if records:
         for record in records:
-            if record.get("kind") != "property_value":
+            if record.get("kind") != "property_value" or record.get("node_id") not in structural:
                 continue
-            if str(record.get("node_id") or "") not in structural:
+            if record.get("scope", "world") != "world":
                 continue
-            for target in [record.get("value"), *(record.get("related_nodes") or [])]:
+            begin, end = position(point(record), snapshot), position(record.get("valid_to"), snapshot)
+            if cutoff is not None and (begin is None or begin > cutoff or end is not None and end <= cutoff):
+                continue
+            if cutoff is None and record.get("valid_to") is not None:
+                continue
+            targets = list(record.get("related_nodes") or [])
+            if definitions.get(str(record.get("property_id") or ""), {}).get("value_type") in {"node", "either"}:
+                targets.append(record.get("value"))
+            for target in targets:
                 if isinstance(target, str) and target in nodes and target != step_id:
                     found.add(target)
+    found = {identifier for identifier in found if not nodes[identifier].get("retracted")
+             and nodes[identifier].get("context_id", "canon") == node.get("context_id", "canon")
+             and (boundary is None or revealed(nodes[identifier], boundary, _orders(snapshot)))}
     return sorted(found, key=lambda node_id: _key(nodes[node_id]))
 
 
@@ -473,7 +454,10 @@ def visible_nodes(snapshot: dict, cut: dict | None) -> list[dict]:
     if cut is None:
         return nodes
     orders = _orders(snapshot)
-    return [node for node in nodes if revealed(node, cut, orders)]
+    return [node for node in nodes if revealed(
+        node if node.get("disclosure") or node.get("node_type") != "storyline" or not node.get("completion")
+        else node | {"disclosure": {"source_id": node["completion"]["source_id"],
+                                   "start": node["completion"]["start"] - 1}}, cut, orders)]
 
 
 def matches(node: dict, needle: str) -> bool:
@@ -496,7 +480,13 @@ def timeline_tree(snapshot: dict) -> list[dict]:
         for node in snapshot.get("nodes", [])
         if not node.get("retracted")
     }
-    order = _reading_key(snapshot)
+    from .storyline_ranges import analyze, reading_starts
+    starts = reading_starts(snapshot)
+    starts.update({row["id"]: row["start"] for row in analyze(snapshot)[0]})
+    orders = _orders(snapshot)
+    def order(node):
+        point = starts.get(node["id"]) or {}
+        return (orders.get(str(point.get("source_id") or ""), -1), point.get("start", -1), _key(node))
     rows: list[dict] = []
     placed: set[str] = set()
 
@@ -510,37 +500,22 @@ def timeline_tree(snapshot: dict) -> list[dict]:
         })
         placed.add(node["id"])
 
-    def emit_scene(scene: dict, depth: int) -> None:
-        """场景连同它下面的事件一起排——事件永远跟着自己的场景走。"""
-        emit(scene, depth)
-        for event_id in scene.get("events") or []:
-            event = nodes.get(event_id)
-            if event and event.get("node_type") == "event":
-                emit(event, depth + 1)
+    def emit_subtree(node: dict, depth: int) -> None:
+        if node["id"] in placed:
+            return
+        emit(node, depth)
+        children = [nodes[identifier] for identifier in node.get("events") or []
+                    if identifier in nodes and nodes[identifier].get("node_type") in LABELS]
+        for child in sorted(children, key=order):
+            emit_subtree(child, depth + 1)
 
-    storylines = sorted(
-        (n for n in nodes.values() if n.get("node_type") == "storyline"), key=order
-    )
-    for story in storylines:
-        emit(story, 0)
-        for scene_id in story.get("events") or []:
-            scene = nodes.get(scene_id)
-            if scene and scene.get("node_type") == "scene":
-                emit_scene(scene, 1)
-
-    for scene in sorted(
-        (n for n in nodes.values()
-         if n.get("node_type") == "scene" and n["id"] not in placed),
-        key=order,
-    ):
-        emit_scene(scene, 0)
-
-    for event in sorted(
-        (n for n in nodes.values()
-         if n.get("node_type") == "event" and n["id"] not in placed),
-        key=order,
-    ):
-        emit(event, 0)
+    contained = {identifier for node in nodes.values() for identifier in node.get("events") or []}
+    roots = [node for node in nodes.values() if node.get("node_type") in LABELS and node["id"] not in contained]
+    for root in sorted(roots, key=order):
+        emit_subtree(root, 0)
+    for node in sorted(nodes.values(), key=order):
+        if node.get("node_type") in LABELS:
+            emit_subtree(node, 0)
     return rows
 
 
@@ -568,7 +543,7 @@ def browse_view(
     cut = cut_for(snapshot, cut_id) if cut_id else None
     nodes = visible_nodes(snapshot, cut if (cut is not None and time_filter) else None)
     related = (
-        set(related_nodes(snapshot, cut_id, records))
+        set(related_nodes(snapshot, cut_id, records, cut=cut))
         if (related_only and cut_id) else None
     )
     needle = query.strip()
@@ -594,12 +569,14 @@ def browse_view(
         "steps": steps(snapshot, granularity),
         # 时间点的层级：大事件 → 场景 → 事件。菜单按这个缩进展开，点哪一级就停在哪一级。
         "timeline": timeline_tree(snapshot),
-        # 阅读位置的三列菜单与资料卡的时间点选择器用**同一份**树：两套结构早晚
+        # 阅读位置菜单与资料卡的时间点选择器用**同一份**树：两套结构早晚
         # 会说出两种层级，而层级只有一个。
         "moments": moment_tree(snapshot),
         # Pickers that need an event (补录) get the full list whatever the
         # granularity is — the reading position is not the only use of events.
         "events": steps(snapshot, "event"),
+        "anchor_steps": sorted(steps(snapshot, "event") + steps(snapshot, "action"),
+                               key=lambda row: _reading_key(snapshot)(_by_id(snapshot)[row["id"]])),
         "cut": cut,
         # The same position in both granularities, so switching the step list
         # keeps the reader where they were instead of jumping to the last page.

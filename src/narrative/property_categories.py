@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import json
 
+from . import property_labels
+
 CONFIG_KEY = "property_categories"
 FALLBACK = "其他"
 
@@ -45,12 +47,14 @@ DEFAULT_CATEGORIES: dict[str, list[str]] = {
     "location": [
         "基本信息", "环境与外观", "位置与范围", "势力与居住者", "状态", FALLBACK,
     ],
-    # 事件只讲「发生了什么」，不挂状态；它那一栏留着，是因为老工程里还有。
+    # 事件属性标识基本信息、地点、参与者、过程与结果。
     "event": ["基本信息", "参与者", "过程与结果", FALLBACK],
     # 场景是这一层唯一带属性的：它说的不是自己，而是「大事件走到这里的样子」。
     "scene": ["基本信息", "大事件", "内容", FALLBACK],
     # 大事件自己不写属性——界面上那一行是从场景借来的（见 node_properties）。
-    "storyline": ["大事件", FALLBACK],
+    "storyline": ["主要故事", FALLBACK],
+    "big_event": ["基本信息", "主要故事", "内容", FALLBACK],
+    "action": ["基本信息", "参与者", "过程与结果", FALLBACK],
     "other": ["基本信息", FALLBACK],
 }
 
@@ -100,6 +104,11 @@ _NAME_HINTS: dict[str, dict[str, str]] = {
         "attitude_toward_women": "心理与意图", "emotion": "心理与意图",
         "mood": "心理与意图", "desire": "心理与意图", "intention": "心理与意图",
         "assessment": "心理与意图",
+        # Some projects retain the original Chinese property names. Keep these
+        # exact, established names beside their English equivalents.
+        "计划": "心理与意图", "外号": "基本信息",
+        "秘书": "关系", "手下": "关系",
+        "女友": "关系", "领路人": "关系",
     },
     "item": {
         "name": "基本信息", "alias": "基本信息", "aliases": "基本信息",
@@ -143,17 +152,41 @@ _NAME_HINTS: dict[str, dict[str, str]] = {
     },
     "event": {
         "name": "基本信息", "type": "基本信息", "time": "基本信息",
+        "location": "基本信息", "地点": "基本信息",
         "duration": "基本信息",
         "participants": "参与者", "actor": "参与者", "target": "参与者",
         "process": "过程与结果", "result": "过程与结果", "outcome": "过程与结果",
         "effect": "过程与结果",
     },
+    "action": {
+        "name": "基本信息", "type": "基本信息", "time": "基本信息",
+        "location": "基本信息", "地点": "基本信息",
+        "participants": "参与者", "actor": "参与者", "target": "参与者",
+        "process": "过程与结果", "result": "过程与结果", "outcome": "过程与结果",
+        "effect": "过程与结果",
+    },
     "scene": {
-        "storyline_progress": "大事件",
+        "big_event_progress": "大事件",
         "name": "基本信息", "location": "基本信息", "time": "基本信息",
         "content": "内容", "events": "内容",
     },
 }
+
+
+def _label_category_hints() -> dict[str, dict[str, set[str]]]:
+    """Reverse display labels only where known English names agree by category."""
+    result: dict[str, dict[str, set[str]]] = {}
+    for node_type, hints in _NAME_HINTS.items():
+        reverse: dict[str, set[str]] = {}
+        for property_name, label in property_labels.LABELS.items():
+            category = hints.get(property_name.lower())
+            if category:
+                reverse.setdefault(label, set()).add(category)
+        result[node_type] = reverse
+    return result
+
+
+_LABEL_HINTS = _label_category_hints()
 
 # Names that say nothing about the aspect: the value has to decide. Order
 # matters — the first matching keyword wins, so the more specific ones go first.
@@ -248,6 +281,10 @@ def suggest(
     vocabulary = vocabulary_for(node_type, config)
     name = (property_id or "").strip().lower()
     hint = _NAME_HINTS.get(node_type or "", {}).get(name)
+    if hint is None:
+        label_categories = _LABEL_HINTS.get(node_type or "", {}).get((property_id or "").strip(), set())
+        if len(label_categories) == 1:
+            hint = next(iter(label_categories))
     if hint and hint in vocabulary:
         return hint, "name"
     if name in _AMBIGUOUS:

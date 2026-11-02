@@ -62,9 +62,6 @@ ALIASES: dict[str, tuple[str, list[tuple[str, str, type | str, str]]]] = {
     "audit": ("audit_properties", [
         ("--node", "node_ids", "list", "只审这些节点（可重复）"),
     ]),
-    "candidates": ("list_candidates", [
-        ("--status", "status", str, "pending / accepted / rejected"),
-    ]),
     "add-property": ("add_property", [
         ("node_id", "node_id", str, "节点编号"),
         ("property_id", "property_id", str, "属性名"),
@@ -85,10 +82,27 @@ ALIASES: dict[str, tuple[str, list[tuple[str, str, type | str, str]]]] = {
         ("--quote", "quote", str, "原文引文"),
         ("--source-id", "source_id", str, "引文所在原文"),
     ]),
-    "retract": ("retract_properties", [
-        ("--ids", "ids", "list", "记录编号（可重复）"),
-        ("reason", "reason", str, "为什么失效"),
-        ("--event", "event_id", str, "从这次披露起失效；省略＝删除（从来不算）"),
+    "expire-properties": ("expire_properties", [
+        ("--record-ids", "record_ids", "list", "旧取值记录编号"),
+        ("source_id", "source_id", str, "有效期结束所在原文"),
+        ("start", "start", int, "Unicode字符偏移"),
+        ("reason", "reason", str, "状态变化原因"),
+        ("--event", "event_id", str, "披露事件"),
+    ]),
+    "delete-property-records": ("delete_property_records", [
+        ("--record-ids", "record_ids", "list", "错误记录编号"),
+        ("reason", "reason", str, "删除原因"),
+    ]),
+    "rollback-preview": ("rollback_preview", [
+        ("source_id", "source_id", str, "保留到的原文"),
+        ("start", "start", int, "保留到的Unicode字符偏移"),
+        ("expected_revision", "expected_revision", int, "当前修订号"),
+    ]),
+    "rollback-to": ("rollback_to", [
+        ("source_id", "source_id", str, "保留到的原文"),
+        ("start", "start", int, "保留到的Unicode字符偏移"),
+        ("expected_revision", "expected_revision", int, "当前修订号"),
+        ("reason", "reason", str, "回退原因"),
     ]),
     "revise-node": ("revise_node", [
         ("node_id", "node_id", str, "节点编号"),
@@ -98,24 +112,20 @@ ALIASES: dict[str, tuple[str, list[tuple[str, str, type | str, str]]]] = {
         ("--note", "identity_note", str, "身份说明"),
     ]),
     "merge-properties": ("merge_properties", [
-        ("alias_id", "alias_id", str, "要并入的属性名"),
-        ("target_id", "target_id", str, "目标属性名"),
+        ("source_id", "source_id", str, "要合并的属性定义"),
+        ("target_id", "target_id", str, "目标属性定义"),
+        ("reason", "reason", str, "合并原因"),
+        ("expected_revision", "expected_revision", int, "当前修订号"),
     ]),
     "rename-property": ("rename_property", [
-        ("to_id", "to_id", str, "新名字"),
-        ("--names", "names", "list", "要改的属性名（可重复）"),
+        ("from_id", "from_id", str, "原属性名"),
+        ("to_id", "to_id", str, "新属性名"),
+        ("reason", "reason", str, "改名原因"),
+        ("expected_revision", "expected_revision", int, "当前修订号"),
     ]),
     "categorize": ("categorize_records", [
         ("--ids", "ids", "list", "记录编号（可重复）"),
         ("category", "category", str, "大类名"),
-    ]),
-    "accept": ("accept_candidate", [
-        ("candidate_id", "candidate_id", str, "候选编号"),
-        ("--version", "version", int, "默认 1"),
-    ]),
-    "reject": ("reject_candidate", [
-        ("candidate_id", "candidate_id", str, "候选编号"),
-        ("--version", "version", int, "默认 1"),
     ]),
     "moments": ("list_moments", []),
     "material": ("node_material", [
@@ -158,22 +168,6 @@ ALIASES: dict[str, tuple[str, list[tuple[str, str, type | str, str]]]] = {
         ("--file", "text", "file", "从文件读正文；长文本用这个"),
     ]),
     "categories": ("property_categories", []),
-    "extract-propose": ("extract_propose", [
-        ("source_id", "source_id", str, "原文编号"),
-    ]),
-    "extract-review": ("extract_review", [
-        ("source_id", "source_id", str, "原文编号"),
-    ]),
-    "extract-build": ("extract_build", [
-        ("source_id", "source_id", str, "原文编号"),
-    ]),
-    "extract-commit": ("extract_commit", [
-        ("source_id", "source_id", str, "原文编号"),
-    ]),
-    "extract": ("extract_source", [
-        ("source_id", "source_id", str, "原文编号"),
-        ("--commit", "commit", "flag", "同时生成待审候选"),
-    ]),
 }
 
 
@@ -182,7 +176,7 @@ def add_commands(subparsers) -> None:
     tool.add_argument("action", choices=["list", "call"], help="list 列出；call 调用")
     tool.add_argument("name", nargs="?", help="call 时给工具名")
     tool.add_argument("params", nargs="?", help="call 时的 JSON 参数")
-    tool.add_argument("--project", help="工程 .sqlite3")
+    tool.add_argument("--project", help="工程 .nproj")
     tool.add_argument("--json", action="store_true", help="原样输出 JSON")
 
     for name, (tool_name, spec) in ALIASES.items():
@@ -202,7 +196,7 @@ def add_commands(subparsers) -> None:
                 parser.add_argument(flag, dest=param, **kwargs)
             else:  # 位置参数：dest 由名字决定，不能再传
                 parser.add_argument(flag, **kwargs)
-        parser.add_argument("--project", help="工程 .sqlite3")
+        parser.add_argument("--project", help="工程 .nproj")
         parser.add_argument("--json", action="store_true", help="原样输出 JSON")
 
 

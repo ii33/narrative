@@ -1,4 +1,4 @@
-"""Isolated v5 graph database; never upgrades or mutates historical projects."""
+"""Current schema-10 graph database; never upgrades historical projects."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
-GRAPH_SCHEMA_VERSION = 7
+GRAPH_SCHEMA_VERSION = 10
 
 
 class GraphStore:
@@ -31,41 +31,25 @@ class GraphStore:
                         id TEXT PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL,
                         accepted_revision INTEGER NOT NULL);
                     CREATE INDEX objects_kind ON objects(kind);
-                    CREATE TABLE candidates (
-                        id TEXT PRIMARY KEY, data TEXT NOT NULL, status TEXT NOT NULL,
-                        version INTEGER NOT NULL, expected_revision INTEGER NOT NULL,
-                        result_revision INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-                    CREATE TABLE revisions (
-                        revision INTEGER PRIMARY KEY, candidate_id TEXT, data TEXT NOT NULL,
+                    CREATE TABLE actions (
+                        id TEXT PRIMARY KEY, revision INTEGER NOT NULL,
+                        action TEXT NOT NULL, reason TEXT NOT NULL, summary TEXT NOT NULL,
                         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
                     CREATE TABLE property_records (
                         id TEXT PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL,
-                        accepted_revision INTEGER NOT NULL, candidate_id TEXT,
+                        accepted_revision INTEGER NOT NULL,
                         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
                     CREATE INDEX property_records_revision ON property_records(accepted_revision);
                     CREATE INDEX property_records_node ON property_records(json_extract(data,'$.node_id'));
                     CREATE INDEX property_records_property ON property_records(json_extract(data,'$.property_id'));
-                    CREATE TRIGGER property_records_no_update BEFORE UPDATE ON property_records
-                    BEGIN SELECT RAISE(ABORT, 'property records are append-only'); END;
-                    CREATE TRIGGER property_records_no_delete BEFORE DELETE ON property_records
-                    BEGIN SELECT RAISE(ABORT, 'property records are append-only'); END;
-                    CREATE TABLE property_candidates (
-                        id TEXT PRIMARY KEY, data TEXT NOT NULL, status TEXT NOT NULL,
-                        version INTEGER NOT NULL, expected_revision INTEGER NOT NULL,
-                        result_revision INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-                    CREATE INDEX property_candidates_status ON property_candidates(status);
-                    CREATE TABLE change_candidates (
-                        id TEXT PRIMARY KEY, data TEXT NOT NULL, status TEXT NOT NULL,
-                        version INTEGER NOT NULL, expected_revision INTEGER NOT NULL,
-                        result_revision INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-                    CREATE INDEX change_candidates_status ON change_candidates(status);
                     CREATE TABLE provider_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                    PRAGMA user_version=7;
+                    PRAGMA user_version=10;
                 """)
                 db.executemany(
                     "INSERT INTO meta(key,value) VALUES (?,?)",
                     [
                         ("revision", "0"),
+                        ("next_property_id", "1"),
                         ("title", "未命名作品"),
                         ("project_id", uuid4().hex),
                     ],
@@ -93,7 +77,7 @@ class GraphStore:
                 # opened for writing and no schema/data migration is attempted.
                 raise ValueError(
                     f"图项目需要 v{GRAPH_SCHEMA_VERSION} 新库；此文件为旧版或未知版本（{version}），"
-                    "已按 read-only 只读拒绝，未迁移或改写"
+                    "不支持旧版工程格式，原库未改动"
                 )
             if not db.execute("SELECT 1 FROM meta WHERE key='revision'").fetchone():
                 raise ValueError("无效的图项目")
@@ -159,38 +143,28 @@ class GraphStore:
             raise ValueError("原文不存在")
         return dict(row)
 
-    def snapshot(self, as_of_revision: int | None = None) -> dict:
+    def snapshot(self, *, validation_data: bool = False) -> dict:
         with self.connect() as db:
+            db.execute("BEGIN")
             current = int(db.execute("SELECT value FROM meta WHERE key='revision'").fetchone()[0])
-            if as_of_revision is None:
-                as_of_revision = current
-            if as_of_revision < 0 or as_of_revision > current:
-                raise ValueError("审核修订号超出范围")
-            if as_of_revision == current:
-                rows = list(db.execute("SELECT id,data,accepted_revision FROM objects"))
-                objects = [json.loads(row["data"]) for row in rows]
-                object_revisions = {row["id"]: row["accepted_revision"] for row in rows}
+            rows = list(db.execute("SELECT data FROM objects"))
+            objects = [json.loads(row["data"]) for row in rows]
+            validation = {}
+            if validation_data:
+                full_sources = {row['id']: dict(row) for row in db.execute(
+                    "SELECT * FROM sources WHERE imported_revision<=?", (current,))}
+                sources = [{key: row[key] for key in ('id', 'title', 'hash', 'created_at')}
+                           | {'length': len(row['text'])} for row in full_sources.values()]
+                validation = {
+                    'records': [json.loads(row['data']) for row in db.execute(
+                        'SELECT data FROM property_records ORDER BY rowid')],
+                    'sources': full_sources,
+                    'meta': {row['key']: row['value'] for row in db.execute('SELECT key,value FROM meta')},
+                }
             else:
-                state: dict[str, dict] = {}
-                object_revisions: dict[str, int] = {}
-                for row in db.execute(
-                    "SELECT data FROM objects WHERE accepted_revision=0"
-                ):
-                    obj = json.loads(row[0])
-                    state[obj["id"]] = obj
-                    object_revisions[obj["id"]] = 0
-                for row in db.execute(
-                    "SELECT revision,data FROM revisions WHERE revision<=? ORDER BY revision",
-                    (as_of_revision,),
-                ):
-                    for item in json.loads(row["data"]).get("operations", []):
-                        state[item["id"]] = item
-                        object_revisions[item["id"]] = row["revision"]
-                objects = list(state.values())
-            sources = [dict(row) for row in db.execute(
-                "SELECT id,title,hash,created_at,length(text) AS length FROM sources WHERE imported_revision<=?",
-                (as_of_revision,),
-            )]
+                sources = [dict(row) for row in db.execute(
+                    "SELECT id,title,hash,created_at,length(text) AS length FROM sources WHERE imported_revision<=?",
+                    (current,))]
         groups: dict[str, list[dict]] = {
             key: [] for key in ("nodes", "contexts", "timelines", "source_orders")
         }
@@ -198,10 +172,10 @@ class GraphStore:
             groups.setdefault(obj["kind"] + "s", []).append(obj)
         return {
             "schema_version": GRAPH_SCHEMA_VERSION,
-            "revision": as_of_revision,
+            "revision": current,
             "current_revision": current,
-            "object_revisions": object_revisions,
             "objects": objects,
             "sources": sources,
             **groups,
+            **({"_validation": validation} if validation_data else {}),
         }

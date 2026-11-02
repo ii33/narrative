@@ -25,8 +25,10 @@ TYPE_PREFIX = {
     "item": "I",
     "location": "L",
     "event": "E",
+    "action": "A",
     "scene": "S",
     "storyline": "T",
+    "big_event": "B",
 }
 UNKNOWN_PREFIX = "N"
 

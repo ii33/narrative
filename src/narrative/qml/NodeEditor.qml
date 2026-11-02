@@ -3,7 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 
 // 节点编辑器：改节点字段、补录/更正属性、把属性设为失效。
-// 所有改动都走候选或追加记录，不原地改值；面板只负责收集和展示。
+// 通过Operations校验保存；录入错误直接更正，新状态追加并结束旧值有效期。
 Dialog {
     id: editor
     objectName: "nodeEditor"
@@ -31,10 +31,10 @@ Dialog {
     property string editValue: ""
     property int editEventIndex: 0
     property string editQuote: ""
-    property var retractTargets: []
-    property string retractKey: ""
-    property string retractLabel: ""
-    property string retractReason: ""
+    property var expireTargets: []
+    property string expireKey: ""
+    property string expireLabel: ""
+    property string expireReason: ""
     // 正在改名哪一行：一个方面可能有两个名字，改的是整行。
     property string renameKey: ""
     property var renameNames: []
@@ -64,10 +64,10 @@ Dialog {
         editRecordId = ""
         editKey = ""
         editPropertyId = ""
-        retractTargets = []
-        retractKey = ""
-        retractLabel = ""
-        retractReason = ""
+        expireTargets = []
+        expireKey = ""
+        expireLabel = ""
+        expireReason = ""
         renameKey = ""
         renameNames = []
         renameName = ""
@@ -79,17 +79,17 @@ Dialog {
         return (item.property_id || "") + "|" + (item.category || "")
     }
 
-    // 取消就是「什么都没发生」：表单的显示条件是 editKey / retractKey，
+    // 取消就是「什么都没发生」：表单的显示条件是 editKey / expireKey，
     // 只清记录 id 的话表单还在，看着像按钮没反应。
     function cancelForms() {
         editRecordId = ""
         editKey = ""
         editPendingId = ""
         editPendingKey = ""
-        retractTargets = []
-        retractKey = ""
-        retractLabel = ""
-        retractReason = ""
+        expireTargets = []
+        expireKey = ""
+        expireLabel = ""
+        expireReason = ""
     }
 
     function startRename(item) {
@@ -97,7 +97,7 @@ Dialog {
         renameNames = (item.property_ids || []).slice()
         if (renameNames.length === 0 && item.property_id) renameNames = [item.property_id]
         renameName = ""
-        retractTargets = []
+        expireTargets = []
         editRecordId = ""
     }
 
@@ -107,14 +107,14 @@ Dialog {
             host.app.toast("请填写新的属性名", true)
             return
         }
-        bridge.renameProperty(JSON.stringify(renameNames), name)
+        bridge.renameProperty(renameNames[0], name)
         renameKey = ""
     }
 
     function apply(payload) {
         node = payload.node || ({})
         properties = payload.properties || []
-        events = payload.events || []
+        events = payload.anchor_steps || []
         atCut = payload.at_cut === true
         cutName = payload.cut_name || ""
         laterCount = payload.later_count || 0
@@ -147,8 +147,8 @@ Dialog {
         var here = atCut ? eventIndex(cutEventId) : -1
         editEventIndex = here >= 0 ? here : eventIndex(record.event_id)
         editQuote = record.evidence ? record.evidence.quote : ""
-        retractTargets = []
-        retractKey = ""
+        expireTargets = []
+        expireKey = ""
     }
 
     // 这一行还有没有站得住的记录。编辑器的列表本来只列站得住的，
@@ -186,32 +186,32 @@ Dialog {
         editPendingId = ""
     }
 
-    function startRetract(item) {
+    function startExpire(item) {
         var ids = []
         for (var i = 0; i < (item.records || []).length; ++i)
             if (item.records[i].valid) ids.push(item.records[i].id)
         if (ids.length === 0) {
             // 没有可失效的记录：不打开一个「0 条记录」的空表单。
-            retractKey = ""
-            retractTargets = []
+            expireKey = ""
+            expireTargets = []
             host.app.toast("这条属性现在没有有效记录", true)
             return
         }
-        retractTargets = ids
-        retractKey = rowKey(item)
-        retractLabel = item.label || item.property_id
-        retractReason = ""
+        expireTargets = ids
+        expireKey = rowKey(item)
+        expireLabel = item.label || item.property_id
+        expireReason = ""
         editRecordId = ""
         editKey = ""
     }
 
-    // 只撤这一条。一行里有两条一样的说法时，整行撤回会把两条一起带走。
-    function startRetractRecord(item, record) {
-        retractTargets = [record.id]
-        retractKey = rowKey(item)
-        retractLabel = (item.label || item.property_id)
+    // 只结束这一条的有效期；整行操作会处理该行全部记录。
+    function startExpireRecord(item, record) {
+        expireTargets = [record.id]
+        expireKey = rowKey(item)
+        expireLabel = (item.label || item.property_id)
             + (record.event_name ? " · " + record.event_name : "")
-        retractReason = ""
+        expireReason = ""
         editRecordId = ""
         editKey = ""
     }
@@ -233,13 +233,13 @@ Dialog {
         deleteRecords(ids)
     }
 
-    function submitRetract() {
-        if (retractTargets.length === 0) return
-        bridge.retractPropertyRecords(JSON.stringify(retractTargets), retractReason)
-        retractTargets = []
+    function submitExpire() {
+        if (expireTargets.length === 0) return
+        bridge.expirePropertyRecords(JSON.stringify(expireTargets), expireReason)
+        expireTargets = []
         // 同上：收起表单，别让人对着「0 条记录」再点一次。
-        retractKey = ""
-        retractReason = ""
+        expireKey = ""
+        expireReason = ""
     }
 
     function submitNode() {
@@ -267,7 +267,7 @@ Dialog {
                     if (editor.visible) editor.reload()
                 }
             } else if (kind === "property_correct" || kind === "property_add") {
-                if (payload.status !== "accepted") {
+                if ((payload.status !== "accepted" && payload.status !== "unchanged")) {
                     var problem = (payload.diagnostics || [])[0] || ({})
                     editor.host.app.toast((kind === "property_add" ? "补录" : "更正")
                         + "未通过预检：" + (problem.message || "未知原因"), true)
@@ -282,14 +282,14 @@ Dialog {
                 if (editor.nodeId === editor.host.selectedId)
                     bridge.loadNodeProperties(editor.nodeId)
             } else if (kind === "property_delete") {
-                var removed = (payload.retracted || []).length
-                editor.host.app.toast("已删除 " + removed + " 条记录（仍留在审计里）",
+                var removed = (payload.record_ids || []).length
+                editor.host.app.toast("已删除 " + removed + " 条记录（错误记录已移除）",
                     removed === 0)
                 editor.reload()
                 editor.host.load()
                 if (editor.nodeId === editor.host.selectedId)
                     bridge.loadNodeProperties(editor.nodeId)
-            } else if (kind === "property_retract") {
+            } else if (kind === "property_expire") {
                 editor.reload()
                 editor.host.load()
                 if (editor.nodeId === editor.host.selectedId)
@@ -354,6 +354,13 @@ Dialog {
                 font.pixelSize: 11
             }
             Button {
+                objectName: "editorExtractActions"
+                text: "动作提取"
+                visible: editor.node.node_type === "event"
+                enabled: !editor.host.app.busy
+                onClicked: { editor.close(); editor.host.app.assistantOpen = true; bridge.extractEventActions(editor.nodeId) }
+            }
+            Button {
                 objectName: "editorSubmitNode"
                 text: "提交节点修订"
                 onClicked: editor.submitNode()
@@ -405,7 +412,7 @@ Dialog {
             }
             Item { Layout.fillWidth: true }
             Label {
-                text: "人工改动立即生效；模型提取才需要到「审核」接受"
+                text: "保存后立即生效"
                 color: t.muted
                 font.pixelSize: 10
             }
@@ -486,7 +493,7 @@ Dialog {
                                 flat: true
                                 font.pixelSize: 10
                                 enabled: editor.hasValid(modelData)
-                                onClicked: editor.startRetract(modelData)
+                                onClicked: editor.startExpire(modelData)
                             }
                             Button {
                                 objectName: "editorDeleteRow_" + editor.rowKey(modelData)
@@ -539,7 +546,7 @@ Dialog {
                                     }
                                 }
                                 Label {
-                                    objectName: "editorRecordRetract"
+                                    objectName: "editorRecordExpire"
                                     text: "失效"
                                     color: t.muted
                                     font.pixelSize: 9
@@ -547,7 +554,7 @@ Dialog {
                                     MouseArea {
                                         anchors.fill: parent
                                         cursorShape: Qt.PointingHandCursor
-                                        onClicked: editor.startRetractRecord(row, modelData)
+                                        onClicked: editor.startExpireRecord(row, modelData)
                                     }
                                 }
                                 Label {
@@ -565,7 +572,7 @@ Dialog {
                             }
                         }
 
-                        // 更正表单：追加一条新记录，可选同时撤回旧记录。
+                        // 录入错误直接更正原记录，不制造故事中的状态变化。
                         ColumnLayout {
                             Layout.fillWidth: true
                             Layout.leftMargin: 18
@@ -622,11 +629,10 @@ Dialog {
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 6
-                                // 更正一定带回原记录：记录不原地改，所以「追加新的 + 撤回旧的」
-                                // 是同一件事的两半，不该让人选。
+                                // 更正保留记录编号，原地修正错误内容。
                                 Label {
                                     Layout.fillWidth: true
-                                    text: "提交后原记录同时失效——它本来就是读错的那条"
+                                    text: "提交后直接修正原记录，不保留错误值版本"
                                     color: t.muted
                                     font.pixelSize: 9
                                     elide: Text.ElideRight
@@ -697,55 +703,55 @@ Dialog {
                                 Layout.fillWidth: true
                                 wrapMode: Text.Wrap
                                 text: "改名对整个工程生效，所有用到这个方面的节点都按新名字显示；"
-                                    + "已记下的取值不改写，撤回这次改名就恢复原名。"
+                                    + "属性定义与全部引用将同步改名。"
                                     + "想把两个属性合成一个方面，用浏览区的「合并」而不是改名。"
                                 color: t.muted
                                 font.pixelSize: 9
                             }
                         }
 
-                        // 失效表单：整条属性一起撤回，原因必填。
+                        // 失效表单：设置有效期结束边界，原因必填。
                         ColumnLayout {
                             Layout.fillWidth: true
                             Layout.leftMargin: 18
                             spacing: 4
-                            visible: editor.retractKey.length > 0
-                                && editor.retractKey === editor.rowKey(modelData)
+                            visible: editor.expireKey.length > 0
+                                && editor.expireKey === editor.rowKey(modelData)
 
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 6
                                 Label {
-                                    text: "把「" + editor.retractLabel + "」的 "
-                                        + editor.retractTargets.length + " 条记录设为失效"
+                                    text: "把「" + editor.expireLabel + "」的 "
+                                        + editor.expireTargets.length + " 条记录设为失效"
                                     color: t.warn
                                     font.pixelSize: 10
                                 }
                                 Item { Layout.fillWidth: true }
                                 TextField {
-                                    objectName: "editorRetractReason"
+                                    objectName: "editorExpireReason"
                                     Layout.preferredWidth: 220
                                     placeholderText: "原因（必填）"
-                                    text: editor.retractReason
-                                    onTextChanged: editor.retractReason = text
+                                    text: editor.expireReason
+                                    onTextChanged: editor.expireReason = text
                                     onAccepted: {
-                                        if (editor.retractReason.trim().length > 0)
-                                            editor.submitRetract()
+                                        if (editor.expireReason.trim().length > 0)
+                                            editor.submitExpire()
                                     }
                                 }
                                 Button {
-                                    objectName: "editorCancelRetract"
+                                    objectName: "editorCancelExpire"
                                     text: "取消"
                                     flat: true
                                     font.pixelSize: 10
                                     onClicked: editor.cancelForms()
                                 }
                                 Button {
-                                    objectName: "editorSubmitRetract"
+                                    objectName: "editorSubmitExpire"
                                     text: "确认失效"
                                     font.pixelSize: 10
-                                    enabled: editor.retractReason.trim().length > 0
-                                    onClicked: editor.submitRetract()
+                                    enabled: editor.expireReason.trim().length > 0
+                                    onClicked: editor.submitExpire()
                                 }
                             }
                         }

@@ -8,11 +8,7 @@ from .property_store import PropertyStore
 
 
 class GraphReadService:
-    """Pure read paths over one reviewed snapshot.
-
-    The service never writes. Candidate previews are merged in memory after the
-    same precheck the review path uses, so a preview cannot bypass validation.
-    """
+    """Pure read paths over current graph state; never stages or writes a change."""
 
     def __init__(
         self,
@@ -44,7 +40,7 @@ class GraphReadService:
         from .graph_views import graph_view, normalize_spec
 
         query = normalize_spec(spec)
-        snapshot = self.store.snapshot(query["as_of_revision"])
+        snapshot = self.store.snapshot()
         result = graph_view(snapshot, query)
         result["pending_excluded"] = True
         return result
@@ -58,30 +54,21 @@ class GraphReadService:
         kinds: list[str] | None = None,
         context_id: str = "canon",
         disclosure_cut: dict | None = None,
-        as_of_revision: int | None = None,
         limit: int | None = 200,
     ) -> dict:
         return run_query(
             self.store, self.properties, node_id=node_id, query=query,
             node_ids=node_ids, kinds=kinds,
             context_id=context_id,
-            disclosure_cut=disclosure_cut, as_of_revision=as_of_revision, limit=limit,
+            disclosure_cut=disclosure_cut, limit=limit,
         )
 
     def display_map(
-        self, candidate_id: str | None = None, as_of_revision: int | None = None
+        self
     ) -> dict:
         from .graph_display import display_map
 
-        candidate = self.service.candidate(candidate_id) if candidate_id else None
-        return display_map(self.store.snapshot(as_of_revision), candidate)
-
-    def candidate_preview(self, candidate_id: str) -> dict:
-        from .graph_display import candidate_preview
-
-        candidate = self.service.candidate(candidate_id)
-        return candidate_preview(self.store.snapshot(), candidate)
-
+        return display_map(self.store.snapshot())
 
 def run_query(
     store: GraphStore,
@@ -93,13 +80,12 @@ def run_query(
     kinds: list[str] | None = None,
     context_id: str = "canon",
     disclosure_cut: dict | None = None,
-    as_of_revision: int | None = None,
     limit: int | None = 200,
 ) -> dict:
-    """Query a snapshot with cross-family dependency eligibility applied."""
+    """Query current objects with context and disclosure filters."""
     from .graph_query import query_graph
 
-    snapshot = store.snapshot(as_of_revision)
+    snapshot = store.snapshot()
     return query_graph(
         snapshot, node_id=node_id, query=query,
         node_ids=node_ids, kinds=kinds,

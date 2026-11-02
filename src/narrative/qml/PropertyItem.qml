@@ -163,7 +163,7 @@ Column {
                 width: parent.width - parent.leftPadding
                 spacing: 6
 
-                // 失效的不列出来，所以这里也不标「有效」——写出来的都算数。
+                // 历史取值仍保留，其有效区间决定当前阅读位置的状态。
                 // 这一行合了多个属性名时，标出这条记录用的是哪个。
                 Label {
                     visible: item.row.names.length > 0
@@ -174,9 +174,7 @@ Column {
                 Label {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
-                    text: modelData.kind === "property_retraction"
-                        ? "该说法已撤回"
-                        : modelData.value_node ? modelData.value_node.name
+                    text: modelData.value_node ? modelData.value_node.name
                         : String(modelData.value === null
                             || modelData.value === undefined ? "（空）" : modelData.value)
                     // 更早的披露仍然算数，但不再是当下状态：压暗，别当第二个当前值看。

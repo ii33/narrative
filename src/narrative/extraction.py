@@ -1,327 +1,30 @@
-"""Extract a chapter's nodes and events by reading the text directly.
-
-GraphRAG is not in this path. The model reads the whole chapter and returns the
-nodes the data model needs — people, groups, items, locations, scenes, events —
-each pinned to exact quotes. Every quote is verified against the source before
-anything reaches a candidate. Nothing is written to a project here.
-"""
+"""Validate conversation-produced facts and build current graph records."""
 
 from __future__ import annotations
 
-import hashlib
 import json
-import re
-from pathlib import Path
+from typing import cast
 
-from .extraction_session import open_extraction_session
-from .harness import HarnessReply, HarnessRunner, HarnessSettings
-from .order_ids import allocate, order_key, prefix_for
-from .property_categories import aspect_of
-from .property_labels import STORYLINE_PROGRESS
-from .property_store import record_position
+from .order_ids import allocate, prefix_for
+from .property_labels import BIG_EVENT_PROGRESS, STORYLINE_PROGRESS
 
-# 提示词改一次，这个号跟着动；缓存的提取结果里会写下来，便于对照。
-PROMPT_VERSION = "extract/22"
-
-NODE_TYPES = ("person", "group", "item", "location", "scene", "event", "storyline")
-
-PROMPT = """你在为一部小说的叙事数据库提取「章节结构」。
-
-下面是《{title}》全文，共 {chars} 字。
-
-任务：按原文顺序，提取这一章出现的**全部节点**和**发生的事件**。
-
-节点类型（type 只能取这六种）：
-- person：人物。有名有姓、有称呼、被当作个体对待的。
-- group：群体或组织。公司、门派、势力、家族。
-- item：物品。法宝、武器、服饰、日常物件。
-- location：地点。城市、星球、房间、湖、战场等可指认的空间。
-- scene：场景。由若干小事件组成的**复合事件**，本质是一个范围更大的事件，有自己的发生过程。
-  它回答「这一段发生了什么」，不是「在哪里发生」。地点另建 location 节点。
-  **每个场景都必须用 `storyline` 字段挂到一个大事件下面**（见下一节）。
-- storyline：大事件。跨多个场景、**甚至跨章**的一段完整过程，有起因有结果。
-  大事件常常到结尾才有名字：过程里先给一个**暂称**（`provisional_name`），收尾那一步再定正式名
-  （`name`）。读者读到跨度中间时看到的是暂称，读完之后才看到正式名。没把握就只写 name。
-- event：事件。**改变了什么的一次发生**——状态、关系、地点、目标或认知发生了变化。
-  层级见下面的「四个层级」：动作是事件里的细节，不单独建节点。
-
-## 四个层级：大事件 → 场景 → 事件 → 动作
-
-原文是一层套一层的。判断某个东西该放哪一层，看它「改变了什么」的范围有多大：
-
-- **大事件**（storyline 节点）：跨多个场景、甚至跨章的一段完整过程，有起因有结果。
-  上一章已经在走的那段过程，`storyline` **照抄它的名字**，不要另起一个——上面「这本书
-  已经读到哪儿」列着它们
-  （「老周把林舟带进另一个世界」）。它下面挂的是**场景**，而且**每个场景都要有归属**。
-  一章里这段过程还没走完、或者看不出边界，就建一个用**暂称**的大事件——后面的章节会
-  把它补完、定下正式名。不要为了凑一个节点把半截故事硬切出来，但也不要让场景悬空。
-- **场景**（scene 节点）：把围绕同一件事展开的若干小事件组织成一个**复合事件**，
-  用一句话概括这一段的发生过程。按事情的展开与阶段边界划分，不按地点清单划分。
-  换地点或时间跳跃可以提示边界，但不自动产生新场景；同一地点也可能发生不同场景。
-  场景名写「谁经历了什么／做成或遭遇了什么」，不能只写地点名或「地点＋日期」。
-  例如「酒店房间」是 location；「林舟撞破私情并与陈默冲突」是 scene，
-  下面包含「林舟推门发现私情」「林舟刺伤陈默」等 event。
-- **事件**（event 节点）：场景里**改变了什么**的一次发生——状态、关系、地点、目标或认知变了。
-- **动作**（不建节点）：「接起电话」「转身离开」「喝彩」「破口大骂」「一拳砸碎石块」。
-  动作是事件的细节，写进事件名里；只有它自己改变了什么，才升成事件。
-
-判断方法：
-
-- 一个场景里通常只有**几个**事件，其余都是动作；同一段连续动作（取出→戴上→试用）是**一个**事件。
-- 事件名写「谁做了什么、结果如何」——比单个动作大，比「发生冲突」小。
-- 战斗、争吵：场景概括一个完整的交锋阶段，事件按「结果变了」切；不因换地点或换回合机械拆场景。
-- 一章通常属于一个（或半个）大事件、几个场景、十几个事件。**这些数字只是参照，不要为了凑数拆。**
-- 同一件事不要输出两条措辞不同的记录（例如「沈砚告知来电」和「沈砚转告来电」是同一条）。
-
-  ✗「老周取出新衣」「林舟换上新衣」「林舟照镜子」→ ✓「老周为林舟换上新衣，林舟在镜中看到新形象」
-  ✗「林舟接电话」「林舟取消会议」「林舟让司机返回」→ ✓「林舟接完电话后取消会议，赶回酒店」
-
-## 说明性内容也是披露
-
-法宝是什么、星球叫什么、人物有什么经历、修真界有什么规矩——这些段落没有动作，
-但都是原文明确告诉读者的信息，**必须提取**，可以写成事件（「老周展示并解释纳芥手镯」），
-也可以写成属性。不要因为"这一段没发生什么事"就跳过。
-- 事件名称概括程度以「一句话能说清发生了什么」为准，不要细到单个动作，也不要粗到「发生冲突」。
-- **每个场景至少要有一个事件。** 只列场景、不列事件是不合格的输出。
-- 战斗、争吵这类连续过程，**整场算一个事件**；只有结果真的变了（谁受伤、谁被制住、法宝被破）
-  才在同一场景里再记一条。
-
-规则：
-1. 名称用原文用词。人物用原文最常见的称呼（例如「林舟」而不是「林总」），其他称呼放进 aliases。
-2. 每个节点给 1-2 段原文引文，必须**逐字复制**：不改字、不改标点、不跨段拼接、不加省略号。
-   引文是证据，程序会逐字比对；对不上的会被丢弃。
-3. 事件的 participants 写原文出现的人物、物品、地点名称；只写真正参与这个动作的。
-4. 事件归属到一个 scene（填 scene 字段，写场景名称）。scene 必须是本章已列出的场景。
-5. 只写原文明确写出的内容。不推断，不补心理活动，不补因果。
-6. 背景设定、外貌描写本身不是节点；但如果它引入了一个具体对象（例如某件法宝、某个地名），
-   那个对象就是节点。
-7. 节点按首次出现的位置排列，事件按发生顺序排列。
-
-另外提取「属性与状态」：
-
-- 人物的明确属性：年龄、身材、外貌、身份、状态、伤情。
-- 物品/地点的状态：持有者、位置、是否损坏、外形。
-- **物品必须有一条 `持有者`**，`value_type` 一律写 `either`（可以指向人物，也可以是普通字符串）：
-  - 原文能看出在谁手上（拿着、戴着、穿着、收进怀里、被谁给出、被谁抢走）→ 值填**人物名**；
-  - 明确没有主人（被遗弃、无主之物）→ 值写 `无`；
-  - 原文没说清在谁手里 → 值写 `未知`。
-  换手时再记一条，位置照常是那次披露。**不要因为不确定就不写这一条。**
-  例：「老周从怀里掏出一把铜钥匙」→ `铜钥匙.持有者 = 老周`；
-      「林舟接过钥匙揣进兜里」→ 再记一条 `铜钥匙.持有者 = 林舟`；
-      「废墟里散落着几件无主法器」→ `法器.持有者 = 无`。
-- 信息来自某个人的视角时，用 `scope` 标明归属，`holder` 填那个人：
-  - `world`：原文直接叙述的内容（默认，不填 holder）；
-  - `cognition`：某个人怎样理解、相信、知道、记得或怀疑。**"知道"也归这一类**，
-    原文的确定程度照抄进 value（"知道老周赢了"就记 `value: "老周赢了"`，不要改成"确定"）；
-  - `claim`：某个人对外说出的内容（口头、信件、公告），holder 填说的人。
-  三种之间**不自动转换**：说了不等于相信，相信不等于世界成立。
-  **叙述者讲的就是 `world`，哪怕句子里带「发现」「知道」「感觉」**：发现是叙述，值写的是
-  被发现的那个状态（「他发现自己变高了」→ `身高 = 变高了`、`world`）。只有原文明确转述
-  某人的想法、猜测、记忆或说法时，才用 `cognition` / `claim` 并填 holder。
-- `source` 记信息是怎么表达出来的：`narration`（叙述）、`speech`（人物发言）、
-  `thought`（人物想法）、`observation`（人物观察）、`document`（书信碑文等载体）。拿不准就留空。
-- `related_nodes` 填原文明示涉及的其他节点（观察者、被归因的人、信息载体），
-  **不要填 holder**——holder 已经由 scope 那一栏说明。
-- **大事件真的往前走了，才给这一场写一条 `storyline_progress`**：一句话概括「到这个场景
-  为止，读者已经知道的部分」。**`node` 写场景名**，不是地点名、不是人物名——场景是这一层
-  唯一带属性的东西，写错地方这句话就挂不到大事件上。
-  - **没有实质推进就不写**：过场、赶路、同一件事的延续、只是换个地方接着说话——这些场景
-    不必有进展句。硬写只能把上一句换个说法，读者反而以为发生了新的事。
-  - 写的时候接着上一句往下说，只写新走出来的部分，不要重抄。
-  - **挂到已有大事件的场景也是这个标准**：这一场确实把它往前推了一步，就写；没有就不写。
-  **挂到已有大事件的场景同样要写**：上一章写的是它走到哪儿，这一场是它往前走的下一步，
-  不写读者就停在上一章。
-  例：第一场 `"老周找上门，说林舟得跟他走"`，第二场 `"两人到了旧车站，铁门还没开"`。
-  这几个名字不是必须一致——读者看到的本来就是「到这里为止」的样子。
-- **大事件自己不写属性**：结局、结果、状态都不写。它的样子由各个场景的
-  `storyline_progress` 攒出来，写完最后一场才完整。
-- **事件不写属性**：事件名已经说了发生了什么。状态、身份、持有者、位置这些记在
-  人物／物品／地点／场景上，不要挂在事件节点上。
-- 每条属性必须有原文引文，只写原文明确写出的。
-- property 用英文小写标识，命名的是**被说的那个方面**（age、skin、height、holder、injury、
-  statement、plan），不要用中文。
-  **不要用"变化"命名**：不写 `height_change`、`appearance_change`、`skin_change`。
-  原文说"变高了"，就记 `height = 变高了`；说"白了许多"，就记 `skin = 白了许多`。
-- value_type 取 string、number、boolean、node、either、any；holder 这类指向节点的属性用 node，
-  value 填节点名称。
-  **同一个属性在不同时候可以是数值、描述或相对说法，不要因为形态不同就换个名字。**
-  比如身高：`height = 180`、`height = 矮小`、`height = 变高了` 都是 `height`，
-  这种属性 `value_type` 写 `any`。
-- **每披露一次就记一条，按披露顺序排列。** 一条新记录本身就代表这次披露（可能是首次、
-  确认、或改口），不需要另建"变化记录"，也不需要标注"这是变化还是状态"。
-  值可以是数值（180）、描述（矮小）、相对说法（变高了）、或带不确定语气（似乎更差）。
-  不要只记最终状态，也不要因为"和前面差不多"就跳过。
-## 属性命名与去重（四类常见错误）
-
-- **一个方面只用一个名字。** 身高只写 `height`，不要再出现 `stature`、`body_height`、
-  `height_cm`；外貌只写 `appearance`，不要再写 `look`、`face_description`。
-  写之前先看本章是否已经用过某个名字，用过就沿用。
-- **同一段原文的同一个方面只记一条。** 句子里提了两次、或既有数值又有描述，
-  都合并成一条，值照原文写；不要拆成两条记录。
-- **数值和描述共用一个属性名。** `height = 180`、`height = 矮小`、`height = 变高了`
-  都是 `height`；带单位直接写进值里（`"180 公分"`），不要另起 `height_cm`。
-- **宽窄不要混用。** 一句话说的是具体方面（肤色、身高、发型）就记到那个名字上，不要塞进
-  「外貌」这种笼统名字；「外貌」只留给整段的整体评价（「风流潇洒」「像十八九岁的大男孩」）。
-  一句话里既有整体又有局部，各记一条——否则同一个方面在两条不同的线上，后文改口时旧值
-  永远显得「还没被取代」。
-- **属性名用中文短语**：`身份`、`持有者`、`修为境界`、`兵力`。不要造 `identity`、`holder`
-  这种英文标识符——界面上会和中文混在一起。**「已有属性名」里出现过的名字照旧沿用**
-  （包括里面的英文名），同一方面写两个名字等于两条线。
-- **矛盾说法各自保留，但必须标来源。** 两个人对同一件事说法不同时，记成两条
-  不同 `scope`/`holder` 的记录；不要为了"一致"丢掉其中一条，也不要都写成 `world`。
-- **过时的说法不删。** 后文改口时新记录照常追加，旧记录保留——程序按披露顺序
-  取最后一条作为当前值，历史留给读者回查。
-- **提到就要记。** 原文明确说了某人的年龄、身份、伤势、持有物、所在地，
-  哪怕一句话带过也要记一条属性，不要只记事件。
-
-- 每条给 `at_event`：写**原文披露这个值时所处的事件**名称（必须是本章列出的事件）。
-  它是读者读到哪里才知道这件事的位置，**不要求这个事件导致属性变化**。
-  一段对话里说出年龄，`at_event` 就是那段对话所在的事件；读者此前不知道，到这里才知道。
-
-## 属性分类（展示用）
-
-每条属性再给一个 `category`，从该节点类型的分类表里选一个；**拿不准就写「其他」**，
-照常保存，不影响取值。分类只决定这条记录显示在哪个大类下，不改变属性名，也不要求拆分属性。
-**分类名照抄表里的写法**（简体、一字不改）：原文是繁体也照抄，写成「實力與資源」会认不出来，
-只能落到「其他」。
-
-人物：基本信息 / 外貌 / 身份与经历 / 能力与身体状态 / 持有与使用 / 关系 / 心理与意图 / 其他
-- 基本信息：姓名、别名、性别、年龄、种族、籍贯
-- 外貌：身高、体型、肤色、面容、发型、穿着
-- 身份与经历：职业、职务、称号、组织身份、出身、教育经历
-- 能力与身体状态：修为、技能、天赋、体质、伤势、健康
-- 持有与使用：财物、装备、携带物、佩戴物
-- 关系：亲属、师徒、朋友、敌对、隶属。**属性名写具体的关系**（师徒 / 父子 / 恋人 / 仇敌 /
-  上司 / 下属），值指向对方那个人；不要把「关系」本身当属性名，也不要把关系的描述写成
-  一句话（「与沈砚是多年的恋人」）——那是句子，不是属性
-- 心理与意图：情绪、愿望、计划、打算、态度
-
-物品：基本信息 / 外观与构造 / 功能与特性 / 状态 / 归属与持有 / 关联 / 其他
-- 基本信息：名称、别名、种类、来源
-- 外观与构造：颜色、形状、尺寸、材质、结构
-- 功能与特性：用途、效果、能力、使用条件、限制
-- 状态：完好、破损、耗尽、启动、封存
-- 归属与持有：所有者、持有人、使用者
-- 关联：组成、容纳、配套
-
-群体：基本信息 / 构成与规模 / 实力与资源 / 立场与关系 / 状态 / 其他
-地点：基本信息 / 环境与外观 / 位置与范围 / 势力与居住者 / 状态 / 其他
-事件：基本信息 / 参与者 / 过程与结果 / 其他
-场景：基本信息 / 内容 / 其他
-
-`state`、`status` 这种宽泛的名字也要给分类，**同一个属性名在不同记录里可以归不同大类**：
-`state = 衣服破烂` 归外貌，`state = 身受重伤` 归能力与身体状态，`state = 心情烦躁` 归心理与意图。
-拿不准就写「其他」，不要为了分类把一条记录拆成两条。
-
-{context}
-
-## 已有属性名（优先沿用）
-
-{known}
-
-输出一个 JSON 对象，不要任何解释文字。**`nodes` 和 `properties` 是两个并列的数组**：
-节点进 `nodes`，属性进 `properties`，属性行（`node` / `property` / `value`）不要塞进 `nodes`。
-
-{{"nodes": [
-  {{"name": "林舟", "type": "person", "quotes": ["原文逐字引文"], "aliases": ["林总"]}},
-  {{"name": "站前旅社", "type": "location", "quotes": ["原文逐字引文"], "aliases": []}},
-  {{"name": "撞破女友与陈默", "type": "scene", "quotes": ["原文逐字引文"], "aliases": [],
-    "storyline": "林舟发现自己被背叛"}},
-  {{"name": "林舟推开房门撞见女友与陈默", "type": "event", "quotes": ["原文逐字引文"],
-    "aliases": [], "participants": ["林舟", "陈默", "女友"], "scene": "撞破女友与陈默"}},
-  {{"name": "林舟用水果刀刺伤陈默", "type": "event", "quotes": ["原文逐字引文"],
-    "aliases": [], "participants": ["林舟", "陈默", "水果刀"], "scene": "撞破女友与陈默"}}
-],
- "properties": [
-  {{"node": "林舟", "property": "年龄", "value": 29, "value_type": "number",
-    "category": "基本信息",
-    "quotes": ["原文逐字引文"], "scope": "world", "holder": null,
-    "source": "narration", "related_nodes": [], "at_event": "沈砚告知林舟陈总来电"}},
-  {{"node": "铜钥匙", "property": "持有者", "value": "林舟", "value_type": "either",
-    "category": "归属与持有",
-    "quotes": ["原文逐字引文"], "scope": "world", "holder": null,
-    "source": "narration", "related_nodes": ["老周"],
-    "at_event": "老周赠送铜钥匙，林舟戴上试用"}},
-  {{"node": "断剑", "property": "持有者", "value": "未知", "value_type": "either",
-    "category": "归属与持有",
-    "quotes": ["原文逐字引文"], "scope": "world", "holder": null,
-    "source": "narration", "related_nodes": [],
-    "at_event": "废墟里散落着断剑与破甲"}},
-  {{"node": "老周", "property": "状态", "value": "赢了那场交战", "value_type": "string",
-    "category": "其他",
-    "quotes": ["原文逐字引文"], "scope": "cognition", "holder": "林舟",
-    "source": "thought", "related_nodes": ["苏娘"],
-    "at_event": "苏娘施展落英阵，老周以铁尺破解"}},
-  {{"node": "雨夜的门口", "property": "storyline_progress",
-    "value": "老周找上门，说林舟得跟他走", "value_type": "string",
-    "category": "大事件",
-    "quotes": ["原文逐字引文"], "scope": "world", "holder": null,
-    "source": "narration", "related_nodes": [],
-    "at_event": "林舟接过铜钥匙"}}
-]}}
-
-章节正文：
-
-{text}
-"""
+NODE_TYPES = ("person", "group", "item", "location", "scene", "event", "action", "big_event", "storyline")
 
 
-def _known_property_lines(known: list[dict] | None) -> str:
-    """The names already in the project, so a new chapter reuses them."""
-    if not known:
-        return "（本工程还没有属性名，这是第一批；命名时注意一个方面只用一个名字。）"
-    labels = {
-        "person": "人物", "group": "群体", "item": "物品",
-        "location": "地点", "event": "事件", "scene": "场景",
-    }
-    lines = []
-    for item in known:
-        node_type = labels.get(item.get("node_type") or "", item.get("node_type") or "未分类")
-        category = item.get("category") or "其他"
-        lines.append(f"- `{item['property']}`（{node_type} · {category}）")
-    return "\n".join(lines)
 
 
-def build_prompt(
-    title: str, text: str, known: list[dict] | None = None, context: str = ""
-) -> str:
-    return PROMPT.format(
-        title=title, chars=len(text), text=text, known=_known_property_lines(known),
-        context=context or "## 这本书已经读到哪儿\n\n（还没有读过任何章节，这是第一章。）",
-    )
 
 
-def _strip_fence(raw: str) -> str:
-    body = raw.strip()
-    if body.startswith("```"):
-        body = re.sub(r"^```[a-zA-Z]*\s*", "", body)
-        body = re.sub(r"\s*```$", "", body)
-    return body.strip()
 
 
-def _payload(raw: str) -> dict:
-    body = _strip_fence(raw)
-    # strict=False 允许字符串里出现裸换行/制表符：中文原文里偶尔会带，严格模式会整段拒收。
-    for candidate in (body, body[body.find("{"):body.rfind("}") + 1] if "{" in body else ""):
-        if not candidate:
-            continue
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            try:
-                return json.loads(candidate, strict=False)
-            except json.JSONDecodeError:
-                continue
-    if "{" not in body:
-        raise ValueError("模型回复里没有 JSON 对象")
-    raise ValueError("模型回复里的 JSON 解析不了")
+
 
 
 VALUE_TYPES = ("string", "number", "boolean", "node", "any", "either")
 ALLOWED_PARTICIPANTS = ("person", "group", "item", "location")
 
 
-def _parse_properties(rows, text: str, names: set[str], rejected: list[dict]) -> list[dict]:
+def _parse_properties(rows, text: str, names: set[str], rejected: list[dict], locations: dict) -> list[dict]:
     """Verify property observations the same way as nodes: exact quote, known owner."""
     if not isinstance(rows, list):
         return []
@@ -334,16 +37,23 @@ def _parse_properties(rows, text: str, names: set[str], rejected: list[dict]) ->
         value_type = str(row.get("value_type") or "string").strip()
         if not node_name or not property_id:
             continue
-        if node_name not in names:
-            rejected.append({"name": f"{node_name}.{property_id}", "reason": "属性所属节点不在本批"})
+        if any(row.get(key) is not None and not isinstance(row[key], str) for key in ('node', 'holder', 'at_event')):
+            rejected.append({"name": property_id, "reason": "节点引用必须为字符串"})
+            continue
+        if (not isinstance(row.get('related_nodes', []), list)
+                or any(not isinstance(value, str) for value in row.get('related_nodes', []))):
+            rejected.append({"name": property_id, "reason": "related_nodes须为节点引用字符串数组"})
             continue
         if value_type not in VALUE_TYPES:
             rejected.append({"name": f"{node_name}.{property_id}", "reason": f"值类型无效：{value_type}"})
             continue
+        if "symmetric" in row and type(row["symmetric"]) is not bool:
+            rejected.append({"name": f"{node_name}.{property_id}", "reason": "symmetric必须是布尔值"})
+            continue
         quotes = [str(item) for item in (row.get("quotes") or []) if str(item).strip()]
         good = []
         for quote in quotes:
-            index, found = _locate(text, quote)
+            index, found = _locate(text, quote, locations)
             if index < 0:
                 rejected.append({"name": f"{node_name}.{property_id}", "reason": "引文不在原文中",
                                  "quote": quote[:60]})
@@ -367,17 +77,20 @@ def _parse_properties(rows, text: str, names: set[str], rejected: list[dict]) ->
                     rejected.append({"name": f"{node_name}.{property_id}", "reason": "数值无法解析"})
                     continue
         elif value_type == "boolean":
-            value = bool(raw_value)
+            if type(raw_value) is not bool:
+                rejected.append({"name": f"{node_name}.{property_id}", "reason": "布尔属性必须为true或false"})
+                continue
+            value = raw_value
+        elif value_type in {"any", "node", "either"}:
+            value = raw_value
         else:
             value = str(raw_value if raw_value is not None else "").strip()
-        if value_type == "node" and value not in names:
-            rejected.append({"name": f"{node_name}.{property_id}", "reason": "属性值指向的节点不在本批"})
-            continue
         properties.append({
             "node": node_name,
             "property": property_id,
             "value": value,
             "value_type": value_type,
+            **({"symmetric": row["symmetric"]} if "symmetric" in row else {}),
             "start": good[0]["start"],
             "quotes": [item["quote"] for item in good],
             "scope": str(row.get("scope") or "world").strip(),
@@ -399,7 +112,13 @@ def _parse_properties(rows, text: str, names: set[str], rejected: list[dict]) ->
 WRAPPING_QUOTES = "\"'\u2018\u2019\u201c\u201d\u300c\u300d\u300e\u300f"
 
 
-def _locate(text: str, quote: str) -> tuple[int, str]:
+def _locate(text: str, quote: str, locations: dict) -> tuple[int, str]:
+    if quote not in locations:
+        locations[quote] = _find_quote(text, quote)
+    return locations[quote]
+
+
+def _find_quote(text: str, quote: str) -> tuple[int, str]:
     """找到引文在原文里的位置，返回 (下标, 实际用的引文)。
 
     先按原样找；找不到就只去掉**首尾的引号**再试一次——模型经常把整句再套一层
@@ -417,14 +136,13 @@ def _locate(text: str, quote: str) -> tuple[int, str]:
     return -1, quote
 
 
-def parse_nodes(raw: str, text: str) -> dict:
+def parse_nodes(payload: dict, text: str) -> dict:
     """Verify every quote and pin each node to its first appearance.
 
     A node survives only if at least one quote is a literal substring of the
     source; rejected quotes are reported with the reason instead of dropped
     silently.
     """
-    payload = _payload(raw)
     rows = payload.get("nodes")
     if not isinstance(rows, list):
         raise ValueError("模型回复缺少 nodes 数组")
@@ -434,7 +152,7 @@ def parse_nodes(raw: str, text: str) -> dict:
     # 「类型无效」丢掉，整章的属性、关系、大事件进展一起消失，还不报错。
     strays: list[dict] = []
     kept_rows: list = []
-    for row in rows:
+    for original_index, row in enumerate(rows, 1):
         if (
             isinstance(row, dict)
             and not str(row.get("type") or "").strip()
@@ -443,12 +161,13 @@ def parse_nodes(raw: str, text: str) -> dict:
         ):
             strays.append(row)
         else:
-            kept_rows.append(row)
+            kept_rows.append((original_index, row))
     rows = kept_rows
 
     nodes: list[dict] = []
+    locations: dict[str, tuple[int, str]] = {}
     rejected: list[dict] = []
-    for row in rows:
+    for original_index, row in rows:
         if not isinstance(row, dict):
             continue
         name = str(row.get("name") or "").strip()
@@ -456,17 +175,48 @@ def parse_nodes(raw: str, text: str) -> dict:
         if node_type not in NODE_TYPES:
             rejected.append({"name": name, "reason": f"类型无效：{node_type}"})
             continue
+        if (any(row.get(field) is not None and not isinstance(row[field], str) for field in ('scene', 'event', 'big_event', 'storyline'))
+                or not isinstance(row.get('participants', []), list)
+                or any(not isinstance(value, str) for value in row.get('participants', []))
+                or not isinstance(row.get('children', []), list)
+                or any(not isinstance(value, str) for value in row.get('children', []))):
+            rejected.append({"name": name, "reason": "父级与参与者须为正式ID或@索引字符串"})
+            continue
+        closing_span = None
+        if node_type == "storyline":
+            closing = row.get("closing_quote")
+            if not isinstance(closing, str) or not closing or text.find(closing) < 0:
+                rejected.append({"name": name, "reason": "主要故事仅在完整结束后总结，须给出原文closing_quote"})
+                continue
+            closing_start = text.find(closing)
+            if text.find(closing, closing_start+1) >= 0:
+                rejected.append({"name": name, "reason": "closing_quote出现多次，须用完整上下文唯一定位"})
+                continue
+            closing_span = {"start": closing_start, "end": closing_start+len(closing), "quote": closing}
         quotes = [str(item) for item in (row.get("quotes") or []) if str(item).strip()]
+        if node_type == "storyline" and not quotes:
+            quotes = [closing_span["quote"]] if closing_span else []
         good: list[dict] = []
         for quote in quotes:
-            index, found = _locate(text, quote)
+            index, found = _locate(text, quote, locations)
             if index < 0:
                 rejected.append({"name": name, "reason": "引文不在原文中", "quote": quote[:60]})
                 continue
+            if node_type == "event" and text.find(found, index + 1) >= 0:
+                rejected.append({"name": name, "quote": found,
+                                 "positions_sample": [index, text.find(found, index + 1)],
+                                 "position_basis": "submission_relative",
+                                 "reason": "事件引文在提交范围出现多处，不能任取首处作为精确身份依据；请缩小提交范围或提供更具体的逐字引文"})
             good.append({"quote": found, "start": index})
         if not name or not good:
             if name:
                 rejected.append({"name": name, "reason": "没有可用的原文引文"})
+            continue
+        if row.get("existing_id") is not None and not isinstance(row["existing_id"], str):
+            rejected.append({"name": name, "reason": "existing_id须为节点ID字符串"})
+            continue
+        if row.get("new_occurrence") is not None and type(row["new_occurrence"]) is not bool:
+            rejected.append({"name": name, "reason": "new_occurrence须为布尔值"})
             continue
         good.sort(key=lambda item: item["start"])
         participants = [
@@ -474,20 +224,27 @@ def parse_nodes(raw: str, text: str) -> dict:
         ]
         nodes.append({
             "name": name,
+            "reference": f"@{original_index}",
             "type": node_type,
             "start": good[0]["start"],
             "quotes": [item["quote"] for item in good],
+            "evidence_spans": [{"start": item["start"], "end": item["start"] + len(item["quote"]),
+                                "quote": item["quote"]} for item in good],
+            "existing_id": str(row.get("existing_id") or "").strip(),
+            "new_occurrence": row.get("new_occurrence") is True,
+            "context_id": str(row.get("context_id") or "canon"),
             "aliases": [
                 str(item).strip() for item in (row.get("aliases") or []) if str(item).strip()
             ],
             "participants": participants,
+            "children": list(row.get("children") or []),
             "participants_not_in_text": [item for item in participants if item not in text],
             "scene": str(row.get("scene") or "").strip(),
+            "event": str(row.get("event") or "").strip(),
             # 场景归属的大事件（可选）：大事件跨场景、甚至跨章。
             "storyline": str(row.get("storyline") or "").strip(),
-            # 大事件在过程中还没定名时的叫法。
-            # 大事件在过程中还没定名时的叫法。
-            "provisional_name": str(row.get("provisional_name") or "").strip(),
+            "big_event": str(row.get("big_event") or "").strip(),
+            "closing_span": closing_span,
         })
 
     # Reading order inside each type, then grouped for display.
@@ -500,15 +257,17 @@ def parse_nodes(raw: str, text: str) -> dict:
     declared = declared if isinstance(declared, list) else []
     if strays:
         declared = declared + strays
-    properties = _parse_properties(declared, text, {item["name"] for item in nodes}, rejected)
+    properties = _parse_properties(declared, text, {item["name"] for item in nodes}, rejected, locations)
     scenes = {item["name"] for item in grouped["scene"]}
     for event in grouped["event"]:
         if event["scene"] and event["scene"] not in scenes:
             event["scene_not_found"] = True
-    storylines = {item["name"] for item in grouped["storyline"]}
-    for scene in grouped["scene"]:
-        if scene["storyline"] and scene["storyline"] not in storylines:
-            scene["storyline_not_found"] = True
+    containers = {kind: {item["name"] for item in grouped[kind]} for kind in ("storyline", "big_event")}
+    for child_type, parent_type in (("scene", "big_event"), ("big_event", "storyline")):
+        for child in grouped[child_type]:
+            if child[parent_type] and child[parent_type] not in containers[parent_type]:
+                child[parent_type + "_not_found"] = True
+
     return {
         "nodes": nodes,
         "properties": properties,
@@ -518,263 +277,14 @@ def parse_nodes(raw: str, text: str) -> dict:
     }
 
 
-def graph_context(ops, *, tail_scenes: int = 8, tail_events: int = 12) -> str:
-    """这本书已经读到哪儿：大事件、场景、最近事件。
-
-    模型看不到前几章，所以会为同一段过程再造一个大事件、把「走到哪了」重说一遍。
-    这里把**结构**（不是全文）交给它：每个大事件连同最后两场和那两场的进展，最近
-    若干场景名与事件名。够它接着写，又不会把提示词撑成全书。
-
-    空工程返回空串——第一章不需要这段。
-    """
-    from .order_ids import order_key
-
-    snapshot = ops.graph_snapshot()
-    nodes = {node["id"]: node for node in snapshot.get("nodes", [])}
-    if not nodes:
-        return ""
-    progress = {}
-    for record in ops.property_records():
-        if record.get("kind") == "property_value" and str(
-            record.get("property_id") or ""
-        ) == STORYLINE_PROGRESS:
-            progress.setdefault(str(record.get("node_id")), str(record.get("value") or ""))
-
-    def key(node: dict) -> tuple:
-        return order_key(node.get("id") or "") or (999,)
-
-    storylines = sorted(
-        (node for node in nodes.values() if node.get("node_type") == "storyline"), key=key
-    )
-    scenes = sorted(
-        (node for node in nodes.values() if node.get("node_type") == "scene"), key=key
-    )
-    events = sorted(
-        (node for node in nodes.values() if node.get("node_type") == "event"), key=key
-    )
-
-    lines = ["## 这本书已经读到哪儿", "",
-             "接着往下写，**不要重来**：同一段过程不要另起一个大事件，同一个场景不要重复建。", ""]
-    if storylines:
-        lines.append("已有的大事件（`storyline` 就写这里的名字，新场景挂到它下面）：")
-        for story in storylines:
-            lines.append(f"- {story.get('name')}")
-            children = [
-                nodes[child] for child in story.get("events") or []
-                if child in nodes and nodes[child].get("node_type") == "scene"
-            ]
-            children.sort(key=key)
-            for scene in children[-2:]:
-                said = progress.get(scene["id"]) or "（还没写进展）"
-                lines.append(f"    · {scene.get('name')} —— {said}")
-            if not children:
-                lines.append("    （还没有场景）")
-    else:
-        lines.append("已有的大事件：还没有。这一章如果是一段完整过程，就建一个；跨章没走完的用暂称。")
-
-    if scenes:
-        lines.append("")
-        lines.append("最近的场景（仅在延续同一个既有复合事件时复用，不要重复建；新场景按发生过程命名，不照抄地点式命名）：")
-        lines.append("、".join(scene.get("name") or scene["id"] for scene in scenes[-tail_scenes:]))
-
-    if events:
-        lines.append("")
-        lines.append("最近的事件（按阅读顺序，接着这个往下走）：")
-        for event in events[-tail_events:]:
-            lines.append(f"- {event.get('name') or event['id']}")
-
-    lines.append("")
-    lines.append(
-        "`storyline_progress` 写的是**到这一场为止的总结**：接着上面那句话往下说，"
-        "让读者只看这一句就知道这件事走到哪了，不要只写这一场的新动作。"
-    )
-    return "\n".join(lines)
 
 
-def known_properties(ops) -> list[dict]:
-    """Property names already in the project, with the type they are used on.
-
-    Handing these back to the model is what keeps one aspect from acquiring three
-    names across chapters. It is context, not a closed list: a new aspect still
-    gets a new name.
-    """
-    from . import property_categories
-
-    snapshot = ops.graph_snapshot()
-    nodes = {node["id"]: node for node in snapshot.get("nodes", [])}
-    config = ops.property_categories()
-    # Names in use are the canonical ones: a name that was merged or renamed away
-    # must not be handed back to the model, or the next chapter reintroduces it.
-    aliases = ops.property_aliases()
-    seen: dict[tuple[str, str], int] = {}
-    for record in ops.property_records():
-        if record.get("kind") != "property_value":
-            continue
-        node_type = (nodes.get(record.get("node_id")) or {}).get("node_type") or "other"
-        name = record.get("property_id") or ""
-        key = (aliases.get(name, name), node_type)
-        seen[key] = seen.get(key, 0) + 1
-    return [
-        {
-            "property": property_id,
-            "node_type": node_type,
-            "category": property_categories.suggest(property_id, node_type, None, config)[0],
-            "count": count,
-        }
-        for (property_id, node_type), count in sorted(seen.items())
-        if property_id
-    ]
 
 
-def read_chapter(
-    title: str,
-    text: str,
-    *,
-    settings: HarnessSettings,
-    api_key: str,
-    workdir: Path,
-    ops=None,
-    prior: dict | None = None,
-    source_id: str = "",
-) -> dict:
-    """第一轮：整章读。不带库里的旧值，只认原文。
-
-    返回校验过的提议（节点、属性、被丢弃的引文）。原始响应和元数据落在
-    `workdir` 里，随时可以回看模型到底说了什么。
-    """
-    workdir.mkdir(parents=True, exist_ok=True)
-    known = known_properties(ops) if ops is not None else None
-    context = graph_context(ops) if ops is not None else ""
-    runner, session = open_extraction_session(ops, settings, api_key, workdir, HarnessRunner)
-    raws: list[str] = []
-
-    def _check(reply: HarnessReply) -> None:
-        """空回复 + 服务端报错时，把真正的原因说出来，别只说「没有 JSON」。"""
-        if reply.raw.strip():
-            return
-        problem = str(reply.metadata.get("service_error") or "").strip()
-        raise ValueError(f"模型没有返回内容：{problem or '空回复'}")
-
-    try:
-        instruction = build_prompt(title, text, known, context)
-        if source_id:
-            instruction += "\n当前原文ID：" + source_id
-        if prior is not None:
-            instruction += (
-                "\n本轮是查漏补缺复核。重新核对原文与下列既有提取，找出遗漏的节点、事件、属性与关系。"
-                "已有合法项保留，新增项必须逐字引用本段原文；不要仅回答差异，返回完整提取JSON。"
-                "引文定位坐标以当前文本为准。\n既有提取：\n"
-                + json.dumps(prior, ensure_ascii=False)
-            )
-        reply: HarnessReply = runner.agent_turn(instruction, session)
-        raws.append(reply.raw)
-        (workdir / "raw.txt").write_text(reply.raw, encoding="utf-8")
-        (workdir / "metadata.json").write_text(
-            json.dumps(reply.metadata, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        _check(reply)
-        result = parse_nodes(reply.raw, text)
-    finally:
-        runner.close()
-    workdir.mkdir(parents=True, exist_ok=True)
-    (workdir / "raw.txt").write_text(reply.raw, encoding="utf-8")
-    if len(raws) > 1:
-        (workdir / "raw-attempts.json").write_text(
-            json.dumps(raws, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-    (workdir / "metadata.json").write_text(
-        json.dumps(reply.metadata, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    result.update({
-        "chapter": title,
-        "prompt_version": PROMPT_VERSION,
-        "characters": len(text),
-        "model": settings.model,
-        "provider": settings.provider,
-        "usage": reply.metadata,
-        "session_id": session,
-        "raw": reply.raw,
-    })
-    return result
 
 
-def review_chapter(
-    ops,
-    data: dict,
-    *,
-    settings: HarnessSettings,
-    api_key: str,
-    workdir: Path,
-) -> dict:
-    """第二、三轮：拿库里已有的值对照，只丢确定的重复。
-
-    这一步是「对照」，不是「再读一遍」：它看的是第一轮解析出来的提议，加上这些
-    属性在库里已经记录的值。旧值失效（`supersede`）也在这里给，能不能落实由
-    `build_candidate` 判断。
-    """
-    if not data.get("properties"):
-        return data
-    from .extraction_review import review_properties
-
-    try:
-        reviewed = review_properties(
-            ops, data, settings=settings, api_key=api_key, workdir=workdir
-        )
-    except ValueError as exc:
-        # 复核没跑通（模型回了段话、或反复不给 JSON）：本章照常落图，把失败记下来。
-        # 宁可少一道对照，也不要整章作废。
-        result = dict(data)
-        result["review"] = {
-            "dropped": [], "unresolved": [], "rounds": 0,
-            "version": "review/6", "error": str(exc),
-        }
-        return result
-    result = dict(data)
-    result["session_id"] = reviewed["session_id"]
-    result["properties"] = reviewed["properties"]
-    # 旧值是不是真的失效，要等 `build_candidate` 把它们解析成记录和事件；
-    # 解析不出来的会被丢掉。
-    result["supersede"] = reviewed.get("supersede") or []
-    # 关系变了：模型点名要撤的记录，跟着这一批一起落（按记录编号撤）。
-    result["retire"] = reviewed.get("retire") or []
-    from .extraction_review import REVIEW_VERSION
-
-    result["review"] = {
-        "dropped": reviewed["dropped"],
-        "unresolved": reviewed.get("unresolved") or [],
-        "rounds": reviewed["rounds"],
-        # 复核提示词也带版本：两次提取的差别要能分辨是「读」还是「对」变了。
-        "version": REVIEW_VERSION,
-    }
-    return result
 
 
-def extract_chapter(
-    title: str,
-    text: str,
-    *,
-    settings: HarnessSettings,
-    api_key: str,
-    workdir: Path,
-    ops=None,
-    source_id: str = "",
-) -> dict:
-    """一轮读完再加对照：`read_chapter` + `review_chapter` 的组合。
-
-    分步的版本在工具面里（`extract_propose` / `extract_review`），两边调的是
-    同一对函数，不会各说一套。
-    """
-    result = read_chapter(
-        title, text, settings=settings, api_key=api_key, workdir=workdir, ops=ops,
-        source_id=source_id,
-    )
-    if source_id:
-        result["source_id"] = source_id
-    if ops is None:
-        return result
-    return review_chapter(
-        ops, result, settings=settings, api_key=api_key, workdir=workdir
-    )
 
 
 def _checkpoint_at(start: int, checkpoints: list[tuple[int, int, str]]) -> str | None:
@@ -799,172 +309,136 @@ def _checkpoint_at(start: int, checkpoints: list[tuple[int, int, str]]) -> str |
     return min(checkpoints, key=lambda item: item[0])[2]
 
 
-def _squash(text: str) -> str:
-    """只留汉字、字母和数字：标点不同不该影响「说的是不是同一个事件」。"""
-    return "".join(ch for ch in text if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
+def _anchor_for(reference: str, event_by_name: dict[str, str]) -> tuple[str | None, str]:
+    anchor = event_by_name.get(reference)
+    return anchor, "explicit" if anchor else ""
 
 
-def _anchor_for(name: str, event_by_name: dict[str, str]) -> tuple[str | None, str]:
-    """把模型写的 at_event 对到本章真实的事件上，返回 (事件编号, 对上的方式)。
-
-    **只认原样和「去掉标点后原样」两种**：判断两个名字像不像同一件事是语义判断，
-    归模型；这里只做结构上的查表。对不上就返回 None，由复核轮去问模型要准确的名字，
-    问不到就报出来——宁可不标失效，也不要锚到一个错的位置。
-    """
-    if name in event_by_name:
-        return event_by_name[name], "exact"
-    key = _squash(name)
-    if not key:
-        return None, ""
-    for event, event_id in event_by_name.items():
-        if _squash(event) == key:
-            return event_id, "normalized"
-    return None, ""
-
-
-def _dedupe_retractions(records: list[dict], accepted: list[dict]) -> list[dict]:
-    """一条记录只能撤一次。
-
-    三个来源（复核判的、结构推的、模型点名的）都用「目标 + 事件」算编号，同一个目标
-    被两个来源同时撤就会撞出同一个 id，预检直接判重复。这里按目标收成一条——复核判的
-    留着（它说得清理由），其余丢掉；已经撤过的目标也不再重复撤。
-    """
-    already = {
-        str(record.get("target_id")) for record in accepted
-        if record.get("kind") == "property_retraction"
-    }
-    rank = {"review": 0, "audit": 1, "human": 2}
-    best: dict[str, dict] = {}
-    for record in records:
-        if record.get("kind") != "property_retraction":
+def _expiry_updates(data: dict, records: list[dict], accepted: list[dict],
+                    nodes: dict[str, dict], event_by_name: dict[str, str],
+                    skipped: list[dict]) -> list[dict]:
+    """Put the expiry on the value itself; there is no invalidation record."""
+    values = {row["id"]: dict(row) for row in accepted + records}
+    changed: dict[str, dict] = {}
+    for item in data.get("expirations") or []:
+        identifier = str(item.get("record_id") or "")
+        row = values.get(identifier)
+        if not identifier:
+            subjects = {key for key, node in nodes.items()
+                        if key == item.get("node") or node.get("name") == item.get("node")}
+            matches = [value for value in values.values()
+                       if value.get("kind") == "property_value"
+                       and value.get("node_id") in subjects
+                       and value.get("property_id") == item.get("property")
+                       and value.get("value") == item.get("value")]
+            if len(matches) == 1:
+                row = matches[0]
+                identifier = row["id"]
+        if row is None or row.get("kind") != "property_value":
+            skipped.append({"name": identifier, "reason": "失效目标必须是已有或本批的属性取值ID"})
             continue
-        target = str(record.get("target_id") or "")
-        if not target or target in already:
+        boundary = item.get("valid_to")
+        if boundary is None:
+            anchor, _ = _anchor_for(str(item.get("at_event") or ""), event_by_name)
+            event = nodes.get(anchor or "", {})
+            disclosure = event.get("disclosure") or {}
+            if not anchor or not disclosure:
+                skipped.append({"name": identifier, "reason": "失效位置须给valid_to原文坐标或明确at_event"})
+                continue
+            boundary = {**disclosure, "event_id": anchor}
+        if not isinstance(boundary, dict) or not isinstance(boundary.get("source_id"), str) or type(boundary.get("start")) is not int:
+            skipped.append({"name": identifier, "reason": "valid_to须包含source_id和整数start"})
             continue
-        current = best.get(target)
-        if current is None or rank.get(str(record.get("basis")), 3) < rank.get(
-            str(current.get("basis")), 3
-        ):
-            best[target] = record
-    keep = {id(record) for record in best.values()}
-    return [
-        record for record in records
-        if record.get("kind") != "property_retraction" or id(record) in keep
-    ]
+        updated = dict(row) | {"valid_to": dict(boundary)}
+        if updated != row:
+            changed[identifier] = updated
+            values[identifier] = updated
+    return list(changed.values())
 
 
-def _supersede_retractions(
-    ops, batch: list[dict], accepted: list[dict]
-) -> list[dict]:
-    """Older values this extraction replaces, as retraction records.
-
-    The rule lives in `property_store.supersede_plan` so the audit, the
-    extraction and a hand-written edit cannot disagree about what "superseded"
-    means. Here it only becomes records, riding in the same candidate as the
-    value that caused them — a value and its invalidation never land apart.
-    """
-    from .property_store import supersede_records
-
-    return supersede_records(accepted, batch)
+def _node_spans(item: dict, source_id: str) -> list[dict]:
+    return [{"source_id": source_id, **span} for span in item.get("evidence_spans") or []]
 
 
-def _retire_by_id(
-    data: dict, event_by_name: dict[str, str], skipped: list[dict]
-) -> list[dict]:
-    """按记录编号撤回：关系变化这类判断，模型能直接指出是哪一条变了。"""
-    out: list[dict] = []
-    for item in data.get("retire") or []:
-        if not isinstance(item, dict):
+def _span_key(span: dict) -> tuple:
+    return (span.get("source_id"), span.get("start"), span.get("end"), span.get("quote"))
+
+
+def _participants(item: dict, by_name: dict, ids: dict, existing: dict) -> list[str]:
+    resolved = []
+    for name in item.get("participants") or []:
+        target = None
+        candidate = by_name.get(name)
+        if candidate and candidate["type"] in ALLOWED_PARTICIPANTS:
+            target = ids.get((candidate["type"], name))
+        if target is None:
+            target = next((existing[(kind, name)] for kind in ALLOWED_PARTICIPANTS
+                           if (kind, name) in existing), None)
+        if target and target not in resolved:
+            resolved.append(target)
+    return resolved
+
+
+def _event_reuse_candidates(item: dict, snapshot: dict, source_id: str,
+                            by_name: dict, ids: dict, existing: dict) -> tuple[list[dict], list[dict]]:
+    named = [node for node in snapshot["nodes"] if node["node_type"] == item["type"]
+             and node.get("context_id", "canon") == item.get("context_id", "canon")
+             and (item.get("display_name", item["name"]) == node["name"]
+                  or item.get("display_name", item["name"]) in (node.get("aliases") or []))]
+    parent_field = "event" if item["type"] == "action" else "scene"
+    scene_name = item.get(parent_field)
+    scene_id = item.get("resolved_" + parent_field + "_id")
+    scene = next((node for node in snapshot["nodes"] if node["id"] == scene_id), {})
+    if item["type"] == "action":
+        named = [node for node in named if node["id"] in (scene.get("events") or [])]
+    participants = set(_participants(item, by_name, ids, existing))
+    spans = {_span_key(span) for span in _node_spans(item, source_id)}
+    proven = []
+    for candidate in named:
+        if scene_name and candidate["id"] not in (scene.get("events") or []):
             continue
-        target = str(item.get("target_id") or "")
-        anchor, _how = _anchor_for(str(item.get("at_event") or ""), event_by_name)
-        if not target or not anchor:
-            skipped.append({
-                "name": target or "（未指名）",
-                "reason": f"关系变更锚点对不上本章事件：{item.get('at_event') or '（空）'}",
-            })
+        if item.get("participants") and set(candidate.get("participants") or []) != participants:
             continue
-        digest = hashlib.sha1(f"{target}:{anchor}".encode()).hexdigest()[:12]
-        out.append({
-            "kind": "property_retraction",
-            "id": f"retract_{digest}",
-            "target_id": target,
-            "reason": str(item.get("reason") or "").strip() or "关系有变化",
-            "event_id": anchor,
-            "basis": "review",
-        })
-    return out
-
-
-def _review_supersede(
-    data: dict,
-    records: list[dict],
-    accepted: list[dict],
-    node_ids: dict[str, str],
-    event_by_name: dict[str, str],
-    skipped: list[dict] | None = None,
-) -> list[dict]:
-    """Turn the review round's "this old value is over" into retraction records.
-
-    Only two things are needed and both must be exact: the old record (node +
-    aspect + the value as it was written) and the event where the reader learns it
-    no longer holds. Anything that does not resolve is dropped — a guessed anchor
-    would invent a reading position the text does not have.
-    """
-    items = data.get("supersede") or []
-    skipped = skipped if skipped is not None else []
-    if not items:
-        return []
-    marked = {
-        record.get("target_id") for record in accepted + records
-        if record.get("kind") == "property_retraction"
-    }
-    candidates: dict[tuple[str, str, str], list[dict]] = {}
-    for record in accepted + records:
-        if record.get("kind") != "property_value":
+        if (candidate.get("disclosure") or {}).get("source_id") != source_id:
             continue
-        key = (
-            str(record.get("node_id")),
-            aspect_of(record.get("property_id") or ""),
-            str(record.get("value")),
+        recorded = list(candidate.get("evidence_spans") or [])
+        # Preserve exact legacy primary evidence matching. Do not read history
+        # or invent other evidence that the node did not retain.
+        primary = candidate.get("evidence") or {}
+        start = (candidate.get("disclosure") or {}).get("start")
+        if isinstance(start, int) and isinstance(primary.get("quote"), str):
+            recorded.append({"source_id": primary.get("source_id"), "start": start,
+                             "end": start + len(primary["quote"]), "quote": primary["quote"]})
+        exact_primary = bool(
+            primary.get("quote") == item["quotes"][0]
+            and primary.get("source_id") == source_id and start == item["start"]
         )
-        candidates.setdefault(key, []).append(record)
-
-    out: list[dict] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        node_id = node_ids.get(str(item.get("node") or ""))
-        anchor, how = _anchor_for(str(item.get("at_event") or ""), event_by_name)
-        if not node_id or not anchor:
-            skipped.append({
-                "name": f"{item.get('node')}.{item.get('property')}",
-                "reason": f"失效锚点对不上本章事件：{item.get('at_event') or '（空）'}",
-            })
-            continue
-        key = (node_id, aspect_of(str(item.get("property") or "")), str(item.get("value")))
-        found = candidates.get(key) or []
-        if not found:
-            continue
-        # The latest such record is the one the claim is about.
-        target = max(found, key=record_position)
-        if target.get("id") in marked:
-            continue
-        digest = hashlib.sha1(f"{target.get('id')}:{anchor}".encode()).hexdigest()[:12]
-        out.append({
-            "kind": "property_retraction",
-            "id": f"retract_{digest}",
-            "target_id": target.get("id"),
-            "reason": str(item.get("reason") or "").strip() or "本章之后不再成立",
-            "event_id": anchor,
-            # 这是模型判的，不是结构推的：basis 分开记，才看得出失效是谁发现的。
-            "basis": "review",
-        })
-        marked.add(target.get("id"))
-    return out
+        # The previous strict primary-quote identity remains valid when a
+        # correction supplies no scene/participants; omitted structure is not a
+        # claim that the event had no scene or participants. Additional evidence
+        # may prove identity only with the full scene/participant checks.
+        complete_structure = bool(scene_id and item.get("participants") is not None
+                                  and set(candidate.get("participants") or []) == participants)
+        if exact_primary or (complete_structure and spans.intersection(_span_key(span) for span in recorded)):
+            proven.append(candidate)
+    return named, proven
 
 
-def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dict:
+def observation_key(row: dict) -> str:
+    """Full fact/provenance identity; readable row IDs do not encode semantics."""
+    boundary = row.get("valid_from") or row.get("disclosure") or {}
+    evidence = row.get("evidence") or {}
+    fields = {
+        "node": row.get("node_id"), "property": row.get("property_id"), "value": row.get("value"),
+        "scope": row.get("scope") or "world", "holder": row.get("holder_id"),
+        "event": row.get("event_id") or boundary.get("event_id"), "applies_to": row.get("applies_to"),
+        "source_id": boundary.get("source_id"), "start": boundary.get("start"),
+        "quote": evidence.get("quote"), "evidence_source": evidence.get("source_id"),
+    }
+    return json.dumps(fields, sort_keys=True, ensure_ascii=False, allow_nan=False)
+
+
+def build_extraction(ops, data: dict) -> dict:
     """Turn one extraction result into graph objects + property records.
 
     Two orders are kept apart. The disclosure chain is derived from source
@@ -974,14 +448,16 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
     checkpoint where the reader learns them.
     """
     snapshot = ops.graph_snapshot()
+    skipped: list[dict] = []
+    snapshot_nodes = {node["id"]: node for node in snapshot["nodes"]}
     # Ids are disclosure positions, so a new mention needs to know where it sits
     # relative to the nodes that already exist.
     orders = {
         row["source_id"]: row["ordinal"] for row in snapshot.get("source_orders", []) or []
     }
-    current_ordinal = orders.get(data["source_id"]) or (
-        max((int(value) for value in orders.values()), default=0) + 1
-    )
+    current_ordinal = orders.get(data["source_id"])
+    if current_ordinal is None:
+        current_ordinal = max((int(value) for value in orders.values()), default=-1) + 1
     # 每种节点各有自己的编号序列：人从 P1 开始，物品从 I1 开始，互不相关。
     # 所以位置表和占用表都按类型分开——两个类型共用一本流水号就不是两套编号了。
     positions: dict[str, list[tuple[tuple[int, int], str]]] = {}
@@ -999,30 +475,48 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
     existing: dict[tuple[str, str], str] = {}
     name_counts: dict[tuple[str, str], int] = {}
     for node in snapshot["nodes"]:
-        if node.get("retracted"):
-            continue
         key = (node["node_type"], node["name"])
         existing.setdefault(key, node["id"])
         name_counts[key] = name_counts.get(key, 0) + 1
-    selected = accepted if accepted is not None else {item["name"] for item in data["nodes"]}
 
+    existing_by_name = dict(existing)
+    for node in snapshot['nodes']:
+        existing[(node['node_type'], node['id'])] = node['id']
     # A shared name is not an identity. Entries collapse only when the type, the
     # name *and* the sentence all match — that is the model repeating itself,
     # not two different deeds that happen to be called the same thing.
     unique: dict[tuple[str, str, str], dict] = {}
     for item in data["nodes"]:
-        if item["name"] not in selected:
-            continue
         quote = item["quotes"][0] if item["quotes"] else ""
         key = (item["type"], item["name"], quote)
         if key in unique:
             merged = unique[key]
+            identity_fields = ("existing_id", "new_occurrence", "context_id", "scene", "event")
+            if (any(item.get(field) != merged.get(field) for field in identity_fields)
+                    or set(item.get("participants") or []) != set(merged.get("participants") or [])):
+                skipped.append({"name": item["name"], "reason": "同一首引文的节点声明了不同身份或参与结构，请先消除歧义"})
             for extra in item["quotes"]:
                 if extra not in merged["quotes"]:
                     merged["quotes"].append(extra)
+            span_keys = {_span_key(span) for span in merged.get("evidence_spans") or []}
+            for span in item.get("evidence_spans") or []:
+                if _span_key(span) not in span_keys:
+                    merged.setdefault("evidence_spans", []).append(span)
+                    span_keys.add(_span_key(span))
             continue
         unique[key] = dict(item)
-    nodes = list(unique.values())
+    nodes = []
+    for item in unique.values():
+        explicit = item.get("existing_id")
+        target = snapshot_nodes.get(explicit) if explicit else None
+        if explicit and (target is None
+                         or target.get("node_type") != item["type"]
+                         or target.get("context_id", "canon") != item.get("context_id", "canon")
+                         or item.get("new_occurrence")):
+            skipped.append({"name": item["name"], "existing_id": explicit,
+                            "reason": "existing_id须指向本工程存在且类型、语境一致的节点，不能同时声明new_occurrence"})
+            continue
+        nodes.append(item)
     by_name: dict[str, dict] = {}
     for item in nodes:
         by_name.setdefault(item["name"], item)
@@ -1031,10 +525,10 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
     # each mention gets its own id while references still resolve by name.
     mention_ids: dict[tuple[str, str, str], str] = {}
     objects: list[dict] = []
-    identity_candidates: list[dict] = []
 
     event_items = [item for item in nodes if item["type"] == "event"]
     event_items.sort(key=lambda item: item["start"])
+    action_items = sorted((item for item in nodes if item["type"] == "action"), key=lambda item: item["start"])
 
     # Resolve every id first: an event may reference a node that comes later.
     # Entities keep their identity across chapters; events do not, because two
@@ -1046,17 +540,40 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
             item["node_type"], item["name"],
             (item.get("evidence") or {}).get("quote"),
             (item.get("disclosure") or {}).get("source_id"),
-            (item.get("disclosure") or {}).get("start"),
+            (item.get("disclosure") or {}).get("start"), item.get("context_id", "canon"),
         ): item["id"]
         for item in snapshot["nodes"]
-        if not item.get("retracted")
     }
-    for item in nodes:
+    allocation_order = [item for item in nodes if item["type"] not in {"event", "action"}] + event_items + action_items
+    for item in allocation_order:
         key = (item["type"], item["name"])
         quote = item["quotes"][0] if item["quotes"] else ""
         mention = (item["type"], item["name"], quote)
-        record_key = (item["type"], item["name"], quote, data["source_id"], item["start"])
-        if record_key in known_by_quote:
+        record_key = (item["type"], item.get("display_name", item["name"]), quote, data["source_id"], item["start"], item.get("context_id", "canon"))
+        if item.get("existing_id"):
+            mention_ids[mention] = item["existing_id"]
+            ids.setdefault(key, mention_ids[mention])
+            continue
+        if item["type"] in {"event", "action"}:
+            from .containment_refs import resolve_parent
+
+            parent_kind = "event" if item["type"] == "action" else "scene"
+            item["resolved_" + parent_kind + "_id"] = resolve_parent(
+                item.get(parent_kind) or "", parent_kind, item.get("context_id", "canon"),
+                snapshot, nodes, mention_ids, skipped, item["name"],
+            )
+            named, proven = _event_reuse_candidates(item, snapshot, data["source_id"], by_name, ids, existing)
+            if proven and item.get("new_occurrence"):
+                skipped.append({"name": item["name"], "existing_ids": [node["id"] for node in proven],
+                                "reason": "new_occurrence与同一位置的事件证据冲突；请查证后引用existing_id或提供另一次发生的证据"})
+            elif len(proven) == 1:
+                mention_ids[mention] = proven[0]["id"]
+                ids.setdefault(key, mention_ids[mention])
+                continue
+            if len(proven) > 1 or (named and not item.get("new_occurrence")):
+                skipped.append({"name": item["name"], "existing_ids": [node["id"] for node in named],
+                                "reason": "同名事件身份不能唯一确认；查证后用existing_id引用已有事件，或用new_occurrence声明原文中的另一次发生"})
+        if item["type"] not in {"event", "action"} and record_key in known_by_quote:
             mention_ids[mention] = known_by_quote[record_key]
             ids.setdefault(key, mention_ids[mention])
             continue
@@ -1064,22 +581,14 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
         # name and type. Once there are several, the name proves nothing, so the
         # new mention stays separate until someone confirms the identity.
         reused = (
-            existing.get(key)
-            if item["type"] != "event" and name_counts.get(key, 0) == 1
+            existing_by_name.get((item["type"], item.get("display_name", item["name"])))
+            if item["type"] not in {"event", "action"}
+            and name_counts.get((item["type"], item.get("display_name", item["name"])), 0) == 1
             else None
         )
         if reused:
             mention_ids[mention] = reused
             ids.setdefault(key, reused)
-            # Reuse is a convenience, not a confirmed identity: the name happened
-            # to be unique. Record it so the decision stays auditable.
-            identity_candidates.append({
-                "name": item["name"], "node_type": item["type"],
-                "existing_ids": [reused], "new_id": None,
-                "source_id": data["source_id"], "start": item["start"],
-                "decision": "candidate",
-                "reason": "同名同类型在库中只有一个匹配项，据此指向它；这是候选，不是确认",
-            })
             continue
         position = (current_ordinal, item["start"])
         node_type = str(item["type"])
@@ -1093,63 +602,71 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
         positions[node_type].append((position, node_id))
         mention_ids[mention] = node_id
         ids.setdefault(key, node_id)
-        if item["type"] != "event" and existing.get(key):
-            identity_candidates.append({
-                "name": item["name"], "node_type": item["type"],
-                "existing_ids": [
-                    node["id"] for node in snapshot["nodes"]
-                    if node["node_type"] == item["type"] and node["name"] == item["name"]
-                    and not node.get("retracted")
-                ],
-                "new_id": mention_ids[mention],
-                "source_id": data["source_id"], "start": item["start"],
-                "decision": "separated",
-                "reason": "同名同类型已有多个候选，未合并；确认后再归并",
-            })
 
-    # Composite events: a scene lists the atomic events inside it. No assertion
-    # family needed — containment is a node field.
+    from .containment_refs import resolve_parent
+
+    # Typed parent IDs are the common identity for old and new containers.
     scene_children: dict[str, list[str]] = {}
     for event in event_items:
-        scene_name = event.get("scene")
-        quote = event["quotes"][0] if event["quotes"] else ""
-        if scene_name and ("scene", scene_name) in ids:
-            scene_children.setdefault(scene_name, []).append(
-                mention_ids[("event", event["name"], quote)]
+        if "resolved_scene_id" not in event:
+            event["resolved_scene_id"] = resolve_parent(
+                event.get("scene") or "", "scene", event.get("context_id", "canon"),
+                snapshot, nodes, mention_ids, skipped, event["name"],
             )
-
-    # 场景说自己属于哪个大事件：反过来给大事件填上它的场景。
-    # 那个大事件可能是**前面章节**建的（跨章的一段过程），这时不是新建一个同名节点，
-    # 而是把场景追加到已有的那个上——模型看到「这本书已经读到哪儿」就能照名字接上。
-    storyline_children: dict[str, list[str]] = {}
-    attach: dict[str, list[str]] = {}
-    for scene in nodes:
-        if scene["type"] != "scene":
-            continue
-        parent = str(scene.get("storyline") or "")
+        parent = event.get("resolved_scene_id")
+        if parent:
+            quote = event["quotes"][0]
+            scene_children.setdefault(parent, []).append(mention_ids[("event", event["name"], quote)])
+    action_children: dict[str, list[str]] = {}
+    for action in action_items:
+        parent = action.get("resolved_event_id")
         if not parent:
-            continue
-        quote = scene["quotes"][0] if scene["quotes"] else ""
-        scene_id = mention_ids[("scene", scene["name"], quote)]
-        if ("storyline", parent) in ids:
-            storyline_children.setdefault(parent, []).append(scene_id)
-        elif ("storyline", parent) in existing:
-            attach.setdefault(parent, []).append(scene_id)
-
-    # 追加场景是**改一个已有对象**，只有修订候选能这么做（change_service 的规矩），
-    # 所以这一批要标成修订；否则预检过不去，整章退回候选。
-    cross_chapter = False
-    for name, scene_ids in attach.items():
-        story = next(
-            (item for item in snapshot["nodes"] if item["id"] == existing[("storyline", name)]),
-            None,
-        )
-        if story is None:
-            continue
-        merged = list(dict.fromkeys([*(story.get("events") or []), *scene_ids]))
-        if merged != list(story.get("events") or []):
-            objects.append(dict(story) | {"events": merged})
-            cross_chapter = True
+            parent = resolve_parent(action.get("event") or "", "event", action.get("context_id", "canon"),
+                                    snapshot, nodes, mention_ids, skipped, action["name"])
+        if parent:
+            action_id = mention_ids[("action", action["name"], action["quotes"][0])]
+            action_children.setdefault(parent, []).append(action_id)
+    big_event_children: dict[str, list[str]] = {}
+    storyline_children: dict[str, list[str]] = {}
+    for child_type, parent_type, children in (("scene", "big_event", big_event_children),
+                                               ("big_event", "storyline", storyline_children)):
+        for child in nodes:
+            if child["type"] != child_type:
+                continue
+            parent = resolve_parent(child.get(parent_type) or "", parent_type, child.get("context_id", "canon"),
+                                    snapshot, nodes, mention_ids, skipped, child["name"])
+            if parent:
+                children.setdefault(parent, []).append(mention_ids[(child_type, child["name"], child["quotes"][0])])
+    children_by_type = {"scene": scene_children, "big_event": big_event_children,
+                        "storyline": storyline_children, "event": action_children}
+    direct_kind = {"storyline":"big_event", "big_event":"scene", "scene":"event", "event":"action"}
+    for item in nodes:
+        parent_kind = item["type"]
+        for reference in item.get("children") or []:
+            if parent_kind not in direct_kind:
+                skipped.append({"name": item["name"], "reason": "只有五层容器节点可声明children"})
+                continue
+            child_kind = direct_kind[parent_kind]
+            if parent_kind == "scene" and snapshot_nodes.get(reference, {}).get("node_type") == "scene":
+                child_kind = "scene"
+            if parent_kind == "scene" and any(row.get("name") == reference and row.get("type") == "scene" for row in nodes):
+                child_kind = "scene"
+            child_id = resolve_parent(reference, child_kind, item.get("context_id", "canon"),
+                                      snapshot, nodes, mention_ids, skipped, item["name"])
+            if child_id:
+                parent_id = mention_ids[(parent_kind,item["name"],item["quotes"][0])]
+                children_by_type[parent_kind].setdefault(parent_id, []).append(child_id)
+    for children_map in children_by_type.values():
+        for parent_id, children in children_map.items():
+            children = list(dict.fromkeys(children))
+            children_map[parent_id] = children
+            parent = snapshot_nodes.get(parent_id)
+            if parent is None:
+                continue
+            merged_children = list(dict.fromkeys([*(parent.get("events") or []), *children]))
+            if merged_children != list(parent.get("events") or []):
+                objects.append(dict(parent) | {"events": merged_children})
+            children_map[parent_id] = cast(list[str], merged_children)
 
     existing_ids = {item["id"] for item in snapshot["nodes"]}
     for item in nodes:
@@ -1157,61 +674,53 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
         quote = item["quotes"][0] if item["quotes"] else ""
         node_id = mention_ids[(item["type"], item["name"], quote)]
         if node_id in existing_ids:
-            continue  # already reviewed: re-extraction does not rewrite it
+            old = snapshot_nodes[node_id]
+            staged_index = next((index for index, obj in enumerate(objects) if obj["id"] == node_id), None)
+            current = objects[staged_index] if staged_index is not None else old
+            updated = dict(current)
+            spans = list(current.get("evidence_spans") or [])
+            keys = {_span_key(span) for span in spans}
+            for span in _node_spans(item, data["source_id"]):
+                if _span_key(span) not in keys:
+                    spans.append(span)
+                    keys.add(_span_key(span))
+            if spans:
+                updated["evidence_spans"] = spans
+            children = children_by_type.get(item["type"], {}).get(node_id, [])
+            if children:
+                updated["events"] = list(dict.fromkeys([*(current.get("events") or []), *children]))
+            if updated != current:
+                if staged_index is None:
+                    objects.append(updated)
+                else:
+                    objects[staged_index] = updated
+            continue
         payload = {
             "kind": "node",
             "id": node_id,
             "node_type": item["type"],
-            "name": item["name"],
+            "name": item.get("display_name", item["name"]),
             "aliases": item.get("aliases") or [],
-            "context_id": "canon",
+            "context_id": item.get("context_id", "canon"),
             "identity_note": "原文提取",
-            **(
-                {"provisional_name": str(item.get("provisional_name") or "").strip()}
-                if item["type"] == "storyline" and item.get("provisional_name")
-                else {}
-            ),
-            **(
-                {"provisional_name": str(item.get("provisional_name") or "").strip()}
-                if item["type"] == "storyline" and item.get("provisional_name")
-                else {}
-            ),
             "disclosure": {"source_id": data["source_id"], "start": item["start"]},
             "evidence": {"source_id": data["source_id"], "quote": item["quotes"][0]},
+            "evidence_spans": _node_spans(item, data["source_id"]),
         }
-        if item["type"] == "scene":
-            payload["events"] = scene_children.get(item["name"], [])
-        if item["type"] == "storyline":
-            # 大事件下面挂的是场景：跨场景、甚至跨章都正常。
-            children = storyline_children.get(item["name"], [])
-            payload["events"] = children
-            # 它是一段而不是一点：披露位置取它第一个场景的位置，别用模型随手引的那句。
-            starts = [
-                scene["start"] for scene in nodes
-                if scene["type"] == "scene" and scene.get("storyline") == item["name"]
-            ]
-            if starts:
-                payload["disclosure"] = {
-                    "source_id": data["source_id"], "start": min(starts),
-                }
-        if item["type"] == "storyline":
-            # 大事件下面挂的是场景：跨场景、甚至跨章都正常。
-            payload["events"] = storyline_children.get(item["name"], [])
-        if item["type"] == "event":
-            resolved: list[str] = []
-            for name in item.get("participants") or []:
-                target = None
-                candidate = by_name.get(name)
-                if candidate and candidate["type"] in ALLOWED_PARTICIPANTS:
-                    target = ids.get((candidate["type"], name))
-                if target is None:
-                    for kind in ALLOWED_PARTICIPANTS:
-                        target = existing.get((kind, name))
-                        if target:
-                            break
-                if target and target not in resolved:
-                    resolved.append(target)
-            payload["participants"] = resolved
+        if item["type"] == "storyline" and item.get("closing_span"):
+            closing = item["closing_span"]
+            payload["completion"] = {"source_id": data["source_id"], "start": closing["end"]}
+            payload["disclosure"] = {"source_id": data["source_id"], "start": closing["start"]}
+            payload["evidence"] = {"source_id": data["source_id"], "quote": closing["quote"]}
+            close_evidence = {"source_id": data["source_id"], **closing}
+            if close_evidence not in payload["evidence_spans"]:
+                payload["evidence_spans"].append(close_evidence)
+        if item["type"] in children_by_type:
+            payload["events"] = children_by_type[item["type"]].get(node_id, [])
+        if item["type"] in {"event", "action"}:
+            payload["participants"] = _participants(item, by_name, ids, existing)
+        if item["type"] == "event" and action_children.get(node_id):
+            payload["events"] = action_children[node_id]
         objects.append(payload)
 
     # A source needs a reading position before disclosure queries can order it.
@@ -1236,9 +745,9 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
     # same field must never mean both.
     event_by_name: dict[str, str] = {}
     checkpoint_order: list[tuple[int, int, str]] = []
-    for event in event_items:
+    for event in event_items + action_items:
         quote = event["quotes"][0] if event["quotes"] else ""
-        event_id = mention_ids[("event", event["name"], quote)]
+        event_id = mention_ids[(event["type"], event["name"], quote)]
         event_by_name.setdefault(event["name"], event_id)
         quote_len = len(quote)
         checkpoint_order.append((event["start"], event["start"] + quote_len, event_id))
@@ -1247,73 +756,79 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
     # the checkpoint the reader reaches it at; before that it is simply unknown.
     # It does not follow that the checkpoint caused the value, or that the value
     # began to hold in the story world at that moment.
-    recorded = {item["id"] for item in ops.property_records()}
-    used_ids: set[str] = set()
-    skipped: list[dict] = []
+    accepted_records = ops.property_records()
+    known_values = {observation_key(row): row for row in accepted_records if row.get("kind") == "property_value"}
+    reserved_ids = {row["id"] for row in accepted_records} | {prop["property"] for prop in data.get("properties", [])}
     records: list[dict] = []
-    # 场景名 → 编号，用来把「大事件走到哪了」这句话挂到场景的最后一步：这一场
-    # 读完才算读到它，读一半就显示等于提前剧透。
-    scene_name_by_id = {
-        node_id_: name for (kind, name), node_id_ in ids.items() if kind == "scene"
-    }
-    # The model may hand back a spelling that was merged or renamed away. Reading
-    # it as the name in use keeps one aspect from growing a second definition the
-    # moment a human renames it.
-    aliases = ops.property_aliases()
+
+    for node in snapshot['nodes']:
+        if node['node_type'] in {'event', 'action'} and not node.get('retracted'):
+            event_by_name[node['id']] = node['id']
+    for (kind, _ref), identifier in ids.items():
+        if kind in {'event', 'action'}:
+            event_by_name[identifier] = identifier
+    definition_records = {row["id"]: row for row in accepted_records
+                          if row.get("kind") == "property_definition"}
+    symmetric_flags = {}
+    for prop in data.get("properties", []):
+        if "symmetric" not in prop:
+            continue
+        name = prop["property"]
+        if name in symmetric_flags and symmetric_flags[name] != prop["symmetric"]:
+            skipped.append({"name": name, "reason": "同一属性定义的symmetric声明冲突"})
+        symmetric_flags[name] = prop["symmetric"]
+    definition_updates = set()
     definitions: dict[str, str] = {
-        aliases.get(item["id"], item["id"]): item.get("value_type", "string")
-        for item in ops.property_records()
+        str(item["id"]): str(item.get("value_type") or "string")
+        for item in accepted_records
         if item["kind"] == "property_definition"
     }
     # 同一批里同一个方面可能既有 node 又有 either：either 只是允许「无 / 未知」这类普通值，
     # 两者是同一类。整批先定下类型，免得先出现的 node 把后面的 either 顶掉。
     batch_types: dict[str, str] = {}
     for prop in data.get("properties", []):
-        name = aliases.get(prop["property"], prop["property"])
+        name = str(prop["property"])
         if batch_types.get(name) != "either":
             batch_types[name] = prop["value_type"]
 
-    # 事件 → 它所属的场景。`storyline_progress` 只能挂在场景上；模型有时把 node 写成
-    # 地点名或事件名（历史输出曾把「古战场」同时用作地点名与场景名，产生歧义），
-    # 此处按**落点事件所在的场景**归位——
-    # 那是它自己给的位置，不是猜的。归不回去就原样留着，审核会报出来。
-    scene_of_event: dict[str, str] = {}
-    for scene_name, event_ids in scene_children.items():
-        scene_id = ids.get(("scene", scene_name))
-        if not scene_id:
-            continue
-        for event_id in event_ids:
-            scene_of_event.setdefault(event_id, scene_id)
-
-    def progress_scene(prop: dict, node_id: str | None) -> str | None:
-        if str(prop.get("property") or "") != STORYLINE_PROGRESS:
-            return node_id
-        if node_id and node_id in scene_name_by_id:
-            return node_id
-        anchor = event_by_name.get(str(prop.get("at_event") or ""))
-        if anchor and anchor in scene_of_event:
-            return scene_of_event[anchor]
-        if node_id in scene_of_event:  # node 写的是事件名
-            return scene_of_event[node_id]
-        return node_id
+    current_nodes = snapshot_nodes | {row["id"]:row for row in objects if row.get("kind") == "node"}
+    progress_owners = {STORYLINE_PROGRESS:"big_event", BIG_EVENT_PROGRESS:"scene"}
+    def last_leaf(identifier):
+        seen, pending, leaves = set(), [identifier], []
+        while pending:
+            here = pending.pop()
+            if here in seen:
+                continue
+            seen.add(here)
+            node = current_nodes.get(here, {})
+            if node.get("events"):
+                pending.extend(node["events"])
+            elif node.get("node_type") in {"event", "action"}:
+                leaves.append(here)
+        def position(identifier):
+            point = current_nodes[identifier].get("disclosure") or {}
+            return orders.get(point.get("source_id"), current_ordinal), point.get("start", -1)
+        return max(leaves,key=position) if leaves else None
 
     for prop in data.get("properties", []):
         node_id = ids.get((prop["node_type"], prop["node"])) if "node_type" in prop else None
         if node_id is None:
-            for kind in ("person", "group", "item", "location", "scene", "event"):
+            for kind in NODE_TYPES:
                 node_id = ids.get((kind, prop["node"]))
                 if node_id:
                     break
         if node_id is None:
-            for kind in ("person", "group", "item", "location", "scene", "event"):
+            for kind in NODE_TYPES:
                 node_id = existing.get((kind, prop["node"]))
                 if node_id:
                     break
-        node_id = progress_scene(prop, node_id)
+        expected_owner = progress_owners.get(str(prop.get("property") or ""))
+        if expected_owner and current_nodes.get(node_id or "", {}).get("node_type") != expected_owner:
+            skipped.append({"name":prop["property"], "reason":f"该进展属性须直接记录在{expected_owner}，不自动迁移旧层级"})
+            continue
         if node_id is None:
             continue
         property_id = str(prop["property"])
-        property_id = aliases.get(property_id) or property_id
         proposed_type = prop["value_type"]
         known_type = definitions.get(property_id)
         if known_type is None:
@@ -1322,19 +837,25 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
             records.append({
                 "kind": "property_definition", "id": property_id,
                 "value_type": known_type, "cardinality": "one",
+                "symmetric": symmetric_flags.get(property_id, False),
             })
         elif known_type != proposed_type and {known_type, proposed_type} != {"node", "either"}:
             continue
+        if (property_id in definition_records and property_id in symmetric_flags
+                and property_id not in definition_updates
+                and definition_records[property_id].get("symmetric", False) != symmetric_flags[property_id]):
+            records.append(definition_records[property_id] | {"symmetric": symmetric_flags[property_id]})
+            definition_updates.add(property_id)
         value_type = known_type
         value = prop["value"]
         if value_type in {"node", "either"}:
             target = None
-            for kind in ALLOWED_PARTICIPANTS:
+            for kind in NODE_TYPES:
                 target = ids.get((kind, value))
                 if target:
                     break
             if target is None:
-                for kind in ("person", "group", "item", "location"):
+                for kind in NODE_TYPES:
                     target = existing.get((kind, value))
                     if target:
                         break
@@ -1346,14 +867,13 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
                 value = target
         quote = prop["quotes"][0]
         anchor = event_by_name.get(prop.get("at_event") or "")
+        if prop.get('at_event') and anchor is None:
+            skipped.append({'name': property_id, 'reference': prop['at_event'], 'reason': '显式披露锚点未能解析，不使用临近事件代替'})
+            continue
         basis = "model" if prop.get("at_event") else "nearest"
-        if property_id == STORYLINE_PROGRESS:
-            # 大事件进展说的是**这一场读完时的样子**，所以锚在这一场最后一步，
-            # 而不是模型随手引的那句。引文仍在场景之内，位置照旧记着。
-            scene_events = scene_children.get(scene_name_by_id.get(node_id or "", "")) or []
-            if scene_events:
-                anchor = max(scene_events, key=lambda item: order_key(item) or (999,))
-                basis = "scene_end"
+        if property_id in progress_owners:
+            anchor = last_leaf(node_id) if node_id else None
+            basis = "container_end"
         if not anchor:
             anchor = _checkpoint_at(prop["start"], checkpoint_order)
         if not anchor:
@@ -1365,15 +885,8 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
                 "reason": "没有可锚定的披露事件：本章事件未覆盖该位置",
             })
             continue
-        digest = hashlib.sha1(
-            f"{node_id}:{property_id}:{anchor}:{value}".encode()
-        ).hexdigest()[:12]
-        record_id = f"val_{digest}"
-        if record_id in recorded or record_id in used_ids:
-            continue
-        used_ids.add(record_id)
         record = {
-            "kind": "property_value", "id": record_id,
+            "kind": "property_value",
             "node_id": node_id, "property_id": property_id,
             "value": value, "event_id": anchor,
             "disclosure": {"source_id": data["source_id"], "start": prop["start"]},
@@ -1393,7 +906,7 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
         related: list[str] = []
         for name in prop.get("related_nodes") or []:
             target = None
-            for kind in ALLOWED_PARTICIPANTS:
+            for kind in NODE_TYPES:
                 target = ids.get((kind, name)) or existing.get((kind, name))
                 if target:
                     break
@@ -1417,283 +930,71 @@ def build_candidate(ops, data: dict, *, accepted: set[str] | None = None) -> dic
                 continue
             record["scope"] = scope
             record["holder_id"] = holder
+        key = observation_key(record)
+        previous = known_values.get(key)
+        if previous is not None:
+            # Classification edits do not create another observation or reopen an ended interval.
+            annotations = {field: record[field] for field in ("category", "source")
+                           if record.get(field) and previous.get(field) != record[field]}
+            combined_related = sorted(set(previous.get("related_nodes") or []) | set(record.get("related_nodes") or []))
+            if combined_related != sorted(previous.get("related_nodes") or []):
+                annotations["related_nodes"] = combined_related
+            if annotations:
+                updated = previous | annotations
+                if previous["id"] in {row["id"] for row in records}:
+                    records = [updated if row["id"] == previous["id"] else row for row in records]
+                else:
+                    records.append(updated)
+                known_values[key] = updated
+            continue
+        record["id"] = ops.new_property_id()
+        while record["id"] in reserved_ids:
+            record["id"] = ops.new_property_id()
+        reserved_ids.add(record["id"])
+        known_values[key] = record
         records.append(record)
 
-    # 失效有两个来源，顺序不能反：
-    #   ① 复核轮判的「这一章说它不成立了」——语义判断，锚在读者得知的那一刻；
-    #   ② 程序判的「同一个方面出现了新值」——结构判断，锚在新值出现的事件。
-    # 先落 ①，② 会把已经被 ① 标掉的目标跳过（`supersede_plan` 里看 `marked`），
-    # 于是同一个事实只有一个锚点，而且是更懂语义的那个。
-    accepted_records = ops.property_records(include_retracted=True)
-    known_names: dict[str, str] = {}
-    for node in snapshot["nodes"]:
-        known_names.setdefault(node["name"], node["id"])
-    for (_kind, name), node_id in ids.items():
-        known_names.setdefault(name, node_id)
-    records.extend(
-        _review_supersede(
-            data, records, accepted_records, known_names, event_by_name, skipped
-        )
-    )
-    records.extend(_supersede_retractions(ops, records, accepted_records))
-    # 关系轮直接点名要撤的记录（「这两个人的关系变了」），不需要再按名字去猜。
-    records.extend(_retire_by_id(data, event_by_name, skipped))
-    # 同一个目标可能被两个来源同时撤（复核说「不成立了」，结构说「有新值了」）：
-    # 收成一条，否则两条撤回编号相同，预检会判重复、整章落不下去。
-    records = _dedupe_retractions(records, accepted_records)
+    prospective_nodes = {row["id"]: row for row in snapshot["nodes"]}
+    prospective_nodes.update({row["id"]: row for row in objects if row.get("kind") == "node"})
+    reference_ids = {ref: identifier for (_kind, ref), identifier in ids.items()}
+    for expiration in data.get('expirations', []):
+        if expiration.get('node') in reference_ids:
+            expiration['node'] = reference_ids[expiration['node']]
+        if (data.get('property_reference_types', {}).get(expiration.get('property')) in {'node', 'either'}
+                and isinstance(expiration.get('value'), str) and expiration['value'] in reference_ids):
+            expiration['value'] = reference_ids[expiration['value']]
+        if isinstance(expiration.get('valid_to'), dict):
+            value = expiration['valid_to'].get('event_id')
+            if value in reference_ids:
+                expiration['valid_to']['event_id'] = reference_ids[value]
+    updates = _expiry_updates(data, records, accepted_records, prospective_nodes, event_by_name, skipped)
+    updates_by_id = {row["id"]: row for row in updates}
+    records = [updates_by_id.pop(row["id"], row) for row in records] + list(updates_by_id.values())
 
     revision = ops.graph_project_info()["revision"]
+    node_ids = {item['reference']: ids[(item['type'], item['name'])] for item in data['nodes']
+                if 'reference' in item and (item['type'], item['name']) in ids}
     if not objects and not records:
         return {
             "objects": [], "property_records": [], "diagnostics": [], "errors": [],
             "revision": revision, "empty": True, "node_count": 0,
-            "property_count": 0, "scene_links": 0, "identity_candidates": [],
-            "skipped": skipped,
+            "property_count": 0, "scene_links": 0,
+            "skipped": skipped, "node_ids": node_ids,
         }
-    diagnostics = ops.change_precheck(objects, records, revision)
-    errors = [item for item in diagnostics if item.get("severity") == "error"]
+    diagnostics: list[dict] = []
+    errors: list[dict] = []
     return {
+        "node_ids": node_ids,
         "objects": objects,
         "property_records": records,
-        "requires_correction": cross_chapter,
         "diagnostics": diagnostics,
         "errors": errors,
         "revision": revision,
         "empty": False,
-        "identity_candidates": identity_candidates,
         "skipped": skipped,
         "node_count": len([item for item in objects if item["kind"] == "node"]),
         "property_count": len([
             item for item in records if item["kind"] == "property_value"
         ]),
         "scene_links": sum(len(items) for items in scene_children.values()),
-    }
-
-
-# -- 只有拿不准的才要人看 ------------------------------------------------
-
-def split_confident(ops, built: dict, data: dict) -> dict:
-    """把一次提取分成「可以直接进图」和「要人看一眼」两份。
-
-    可信的标准是**没有反面证据**：引文逐字对上（build 阶段已经保证）、预检没报它、
-    属性审核没报它、模型没标存疑、同一事件里同一方面没有并列值。剩下的才算存疑——
-    这样人只看那一小撮，而不是逐条点头。
-
-    粒度到**记录**：一个节点的身份没问题、只是某条取值有疑问时，节点照样进图，只把
-    那条取值留下来。节点自己有问题（预检报它、参与者里有存疑节点）才整节点留。
-
-    返回 ``{"confident": {...}, "doubtful": {...}, "reasons": [...]}``。
-    """
-    from .property_audit import audit_candidate
-
-    objects = list(built.get("objects", []))
-    records = list(built.get("property_records", []))
-    nodes = {obj["id"]: obj for obj in objects if obj.get("kind") == "node"}
-    # 记录可能挂在上一章已有的节点上：显示原因时也要查得到名字。
-    names = {node["id"]: node.get("name") for node in ops.graph_snapshot().get("nodes", [])}
-    names |= {node_id: node.get("name") for node_id, node in nodes.items()}
-    by_id = {record["id"]: record for record in records if record.get("id")}
-    values = [record for record in records if record.get("kind") == "property_value"]
-
-    doubtful_nodes: dict[str, str] = {}
-    doubtful_records: dict[str, str] = {}
-
-    def flag_node(node_id: str | None, why: str) -> None:
-        if node_id and node_id in nodes:
-            doubtful_nodes.setdefault(str(node_id), why)
-
-    def flag_record(record_id: str | None, why: str) -> None:
-        if record_id and record_id in by_id:
-            doubtful_records.setdefault(str(record_id), why)
-
-    for row in built.get("diagnostics") or []:
-        if row.get("severity") != "error":
-            continue
-        target = str(row.get("object_id") or "")
-        why = f"预检 {row.get('code')}"
-        if target in nodes:
-            flag_node(target, why)
-        elif target in by_id:
-            flag_record(target, why)
-
-    for item in ((data.get("review") or {}).get("unresolved") or []):
-        name = str(item.get("node") or "")
-        aspect = str(item.get("property") or "")
-        wanted = item.get("value")
-        why = f"模型拿不准：{item.get('why') or item.get('reason') or '未说明'}"
-        matched = [
-            record for record in values
-            if nodes.get(str(record.get("node_id")), {}).get("name") == name
-            and str(record.get("property_id")) == aspect
-            and (wanted is None or str(record.get("value")) == str(wanted))
-        ]
-        for record in matched:
-            flag_record(record["id"], why)
-        if not matched:
-            for node_id, node in nodes.items():
-                if node.get("name") == name:
-                    flag_node(node_id, why)
-
-    # 分类名、缺中文名只是显示上的分组，不影响这条记录成立，不值得拦下来让人看。
-    # 重名、分组、中文名都只是「看起来像同一件事」，不影响这条记录成立。
-    # 一条提示就把枢纽节点拦下来，会顺着参与者把整章都拖成存疑——那等于没提。
-    cosmetic = {
-        "category_unknown", "category_unassigned", "label_missing",
-        "aspect_overlap", "repeated_value",
-    }
-    for issue in audit_candidate(ops, built).get("issues") or []:
-        if issue.get("severity") not in {"error", "warning"}:
-            continue
-        if issue.get("code") in cosmetic:
-            continue
-        why = f"审核 {issue.get('code')}"
-        flagged = issue.get("record_ids") or []
-        for record_id in flagged:
-            flag_record(record_id, why)
-        if not flagged:
-            flag_node(issue.get("node_id"), why)
-
-    # 同一方面、同一作用域、**同一个位置**出现两个不同值才是并列（一句话说了两件事）。
-    # 位置不同的由取代机制处理（后者接手），不在这里拦——两套判定不能各说一套。
-    groups: dict[tuple, list[dict]] = {}
-    for record in values:
-        disclosure = record.get("disclosure") or {}
-        groups.setdefault((
-            record.get("node_id"), record.get("property_id"),
-            record.get("event_id"), record.get("scope"),
-            disclosure.get("source_id"), disclosure.get("start"),
-        ), []).append(record)
-    for rows in groups.values():
-        if len({str(row.get("value")) for row in rows}) <= 1:
-            continue
-        for row in rows:
-            flag_record(row["id"], "同一位置同一方面有两个不同值")
-
-    # 闭合：存疑节点带着自己的记录一起留；引用了它的节点也留（否则参与者悬空）。
-    doubtful_names = {nodes[node_id].get("name") for node_id in doubtful_nodes}
-    for record in records:
-        if record.get("kind") != "property_definition" and str(
-            record.get("node_id")
-        ) in doubtful_nodes:
-            flag_record(record.get("id"), "所属节点待确认")
-    for node_id, node in nodes.items():
-        if node_id in doubtful_nodes:
-            continue
-        references = set(node.get("participants") or [])
-        if node.get("scene"):
-            references.add(str(node["scene"]))
-        if references & doubtful_names:
-            flag_node(node_id, "参与者里有待确认的节点")
-
-    # 撤回不分来源：结构推的（有新值顶掉）和模型判的（这一章说它不成立了）都跟着批次走。
-    # 它们不是「值」，没有并列可言；判错了在历史里看得见，重录一条就回来了。
-
-    confident_objects = [
-        obj for obj in objects
-        if not (obj.get("kind") == "node" and obj["id"] in doubtful_nodes)
-    ]
-    doubtful_objects = [
-        obj for obj in objects
-        if obj.get("kind") == "node" and obj["id"] in doubtful_nodes
-    ]
-    confident_records = [r for r in records if r.get("id") not in doubtful_records]
-    doubtful = [r for r in records if r.get("id") in doubtful_records]
-
-    reasons = [
-        {"node_id": node_id, "name": nodes[node_id].get("name"), "why": why}
-        for node_id, why in doubtful_nodes.items()
-    ]
-    reasons += [
-        {
-            "record_id": record_id,
-            "node_id": by_id[record_id].get("node_id"),
-            "name": names.get(str(by_id[record_id].get("node_id"))),
-            "property_id": by_id[record_id].get("property_id"),
-            "value": by_id[record_id].get("value"),
-            "why": why,
-        }
-        for record_id, why in doubtful_records.items()
-    ]
-    return {
-        "confident": {"objects": confident_objects, "records": confident_records},
-        "doubtful": {"objects": doubtful_objects, "records": doubtful},
-        "reasons": reasons,
-    }
-
-
-def commit_extraction(ops, data: dict, *, review: str = "doubtful") -> dict:
-    """把一份提取落进图：可信的直接进，存疑的留成候选。
-
-    ``review="all"`` 退回老做法：全部进候选，等人一条条看。
-    """
-    built = build_candidate(ops, data)
-    note = f"原文提取：{data.get('chapter') or data.get('source_id') or ''}"
-    source = "correction" if built.get("requires_correction") else "model"
-
-    if built.get("empty"):
-        return {
-            "empty": True, "candidate": None, "accepted": None,
-            "diagnostics": [], "doubtful": [], "review": review,
-        }
-    if built["errors"]:
-        return {
-            "errors": True, "candidate": None, "accepted": None,
-            "diagnostics": built["diagnostics"], "doubtful": [], "review": review,
-        }
-
-    if review == "all":
-        candidate = ops.change_propose(
-            built["objects"], built["property_records"], built["revision"],
-            source=source, note=note,
-        )
-        return {
-            "candidate": candidate, "accepted": None, "empty": False, "errors": False,
-            "diagnostics": built["diagnostics"], "doubtful": [], "review": "all",
-            "node_count": built["node_count"],
-        }
-
-    split = split_confident(ops, built, data)
-    accepted = None
-    confident = split["confident"]
-    if confident["objects"] or confident["records"]:
-        revision = ops.graph_project_info()["revision"]
-        try:
-            batch = ops.change_propose(
-                confident["objects"], confident["records"], revision,
-                source=source, note=f"{note}（可信部分）",
-            )
-            ops.change_accept(batch, 1)
-        except ValueError as exc:
-            # 拆开之后过不了预检：宁可全部交给人，也不要吞掉一条。
-            candidate = ops.change_propose(
-                built["objects"], built["property_records"], built["revision"],
-                source=source, note=note,
-            )
-            return {
-                "candidate": candidate, "accepted": None, "empty": False, "errors": False,
-                "diagnostics": built["diagnostics"], "doubtful": split["reasons"],
-                "review": review, "fallback": str(exc), "node_count": built["node_count"],
-            }
-        accepted = {
-            "candidate": batch,
-            "revision": ops.graph_project_info()["revision"],
-            "node_count": len([
-                obj for obj in confident["objects"] if obj.get("kind") == "node"
-            ]),
-            "property_count": len([
-                rec for rec in confident["records"] if rec.get("kind") == "property_value"
-            ]),
-        }
-
-    candidate = None
-    doubtful = split["doubtful"]
-    if doubtful["objects"] or doubtful["records"]:
-        candidate = ops.change_propose(
-            doubtful["objects"], doubtful["records"],
-            ops.graph_project_info()["revision"], source=source, note=f"{note}（待确认）",
-        )
-    return {
-        "candidate": candidate, "accepted": accepted, "empty": False, "errors": False,
-        "diagnostics": built["diagnostics"], "doubtful": split["reasons"],
-        "review": review, "node_count": built["node_count"],
     }

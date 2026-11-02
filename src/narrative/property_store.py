@@ -1,10 +1,4 @@
-"""Append-only storage adapter for v5 node property records.
-
-The pure projection/validation rules live in :mod:`narrative.property_core`.
-This adapter owns SQLite transactions, global graph revisions, as-of filtering,
-and the human review gate. Property records are never updated in place: a
-correction is another accepted ``property_retraction`` record.
-"""
+"""Current property values with intrinsic disclosure intervals and direct corrections."""
 
 from __future__ import annotations
 
@@ -15,12 +9,10 @@ from . import property_categories, property_labels
 from .graph_store import GraphStore
 from .order_ids import order_key
 
-PROPERTY_CONTRACT_VERSION = "property-state/6"
+PROPERTY_CONTRACT_VERSION = "property-state/14"
 PROPERTY_RECORD_KINDS = (
     "property_definition",
     "property_value",
-    "property_categorization",
-    "property_retraction",
 )
 PROPERTY_EFFECT_OPS = ("set", "add", "remove", "unknown", "absent")
 PROPERTY_STATE_CELL_KINDS = ("known", "unknown", "absent", "conflict", "unrecorded")
@@ -87,143 +79,37 @@ def _applies(record: dict, cut: tuple | None) -> bool:
 
 
 def invalid_at(records: list[dict], cut: tuple | None) -> dict[str, dict]:
-    """Records that no longer count at this reading position, and why.
-
-    A retraction with no event was a misreading: it never counted, so it applies
-    at every position. One with an event says "from here this is no longer the
-    state", so before that position the old value is still what the reader knows.
-    ``cut=None`` means "as of the last thing disclosed".
-
-    The answer is a fold over the disclosure chain, not a vote: each retraction
-    takes a record out from its own position on. Nothing reaches backwards — the
-    stretch where a value was gone stays gone, because a later state is built on
-    the earlier one.
-    """
-    # 按披露位置排，不按写入顺序排：状态是从前一段叠出来的，
-    # 写在后头的记录不能改写前面那一段。
-    statements = [
-        record for record in records
-        if record.get("kind") == "property_retraction" and _applies(record, cut)
-    ]
-    statements.sort(key=_statement_position)
-
-    result: dict[str, dict] = {}
-    for record in statements:
-        target = record.get("target_id")
-        if isinstance(target, str):
-            result[target] = record
+    """Ended value intervals at the requested disclosure cut."""
+    result = {}
+    for row in records:
+        end = row.get("valid_to")
+        if row.get("kind") != "property_value" or not isinstance(end, dict):
+            continue
+        boundary = {"event_id": end.get("event_id"), "disclosure": end}
+        if cut is None or record_position(boundary) <= cut:
+            result[row["id"]] = {"kind": "interval_end", "boundary": end}
     return result
 
 
-def supersede_plan(
-    accepted: list[dict], batch: list[dict] | tuple = ()
-) -> list[dict]:
-    """Older values that a later disclosure already replaced.
+def relation_target(
+    record: dict, nodes: dict[str, dict] | None = None,
+    definitions: dict[str, dict] | None = None,
+) -> str | None:
+    """A relationship has an independent value sequence for each counterpart.
 
-    One line per aspect, because that is what the reader sees: `cultivation` and
-    `cultivation_stage` describe one subject. A new value for the same aspect of
-    the same node (same scope, same holder) means the older one is no longer the
-    state — but only from that disclosure on, so the plan carries the replacing
-    event instead of deleting anything.
-
-    A restatement (same value) supersedes nothing: it confirms. Multi-valued
-    properties are left alone, because their values coexist by definition.
+    Scalar node references such as an item's holder remain single-valued.
     """
-    from .property_categories import aspect_of
-
-    everything = list(accepted) + list(batch)
-    # A renamed or merged name is the same aspect: superseding has to see through
-    # the alias, or the first value after a rename would never replace the last
-    # value before it.
-    aliases = _core().alias_map(everything)
-    definitions = _core().canonical_definitions(everything)
-    # A record already marked invalid keeps that mark; a second one would say
-    # nothing new and would double the reason in the history.
-    marked = {
-        record.get("target_id") for record in list(accepted) + list(batch)
-        if record.get("kind") == "property_retraction"
-    }
-    groups: dict[tuple, list[dict]] = {}
-    for record in everything:
-        if record.get("kind") != "property_value" or record.get("id") in marked:
-            continue
-        name = record.get("property_id") or ""
-        canonical = aliases.get(name, name)
-        definition = definitions.get(canonical)
-        if definition is not None and definition.get("cardinality") == "many":
-            continue
-        scope = record.get("scope") or "world"
-        # 同一个人「说的」和「以为的」是同一条线：他后来改口，先前那条就不再算数。
-        # 世界事实仍按 world 单独成线，不与人物的说法互相取代。
-        key = (
-            record.get("node_id"),
-            aspect_of(canonical),
-            "world" if scope == "world" else "holder",
-            record.get("holder_id") if scope != "world" else None,
-        )
-        groups.setdefault(key, []).append(record)
-
-    plan: list[dict] = []
-    for group in groups.values():
-        ordered = sorted(group, key=record_position)
-        still_valid: list[dict] = []
-        for record in ordered:
-            for older in still_valid:
-                if str(older.get("value")) == str(record.get("value")):
-                    continue
-                if record_position(record) <= record_position(older):
-                    continue
-                # 同一事件里两句话落在**同一个位置**才是并列（一句话说了两件事）；
-                # 位置更后的那条是「后来又说了一句」——换手、改口都属于这种，它接手。
-                item = {
-                    "target_id": older.get("id"),
-                    "event_id": record.get("event_id"),
-                    "reason": "被后一条披露取代",
-                    "node_id": older.get("node_id"),
-                    "property_id": older.get("property_id"),
-                }
-                disclosure = record.get("disclosure")
-                if isinstance(disclosure, dict) and isinstance(
-                    disclosure.get("source_id"), str
-                ):
-                    item["disclosure"] = {
-                        "source_id": disclosure["source_id"],
-                        "start": record_position(record)[1],
-                    }
-                plan.append(item)
-            still_valid = [record]
-    unique: dict[str, dict] = {}
-    for item in plan:
-        unique.setdefault(str(item["target_id"]), item)
-    return list(unique.values())
-
-
-def supersede_records(accepted: list[dict], batch: list[dict]) -> list[dict]:
-    """Retraction records for the older values this batch replaces.
-
-    The plan says which records and from where; this turns each into the record
-    that says so. Ids are derived from the pair, so re-running the same batch
-    produces the same ids instead of piling up duplicates.
-    """
-    import hashlib
-
-    out: list[dict] = []
-    for item in supersede_plan(accepted, batch):
-        digest = hashlib.sha1(
-            f"{item['target_id']}:{item['event_id']}".encode()
-        ).hexdigest()[:12]
-        record = {
-            "kind": "property_retraction",
-            "id": f"retract_{digest}",
-            "target_id": item["target_id"],
-            "reason": item["reason"],
-            "event_id": item["event_id"],
-            "basis": "audit",
-        }
-        if isinstance(item.get("disclosure"), dict):
-            record["disclosure"] = item["disclosure"]
-        out.append(record)
-    return out
+    value = record.get("value")
+    if not isinstance(value, str):
+        return None
+    definition = (definitions or {}).get(str(record.get("property_id") or "")) or {}
+    value_type = record.get("value_type") or definition.get("value_type")
+    if nodes and nodes.get(str(record.get("node_id") or ""), {}).get("node_type") == "person" \
+            and nodes.get(value, {}).get("node_type") == "person":
+        return value if value_type in {"node", "either"} else None
+    if record.get("category") == "关系" and value_type in {"node", "either"}:
+        return value
+    return None
 
 
 def _categorization_overrides(records: list[dict]) -> dict[str, str]:
@@ -238,333 +124,39 @@ def _categorization_overrides(records: list[dict]) -> dict[str, str]:
     return overrides
 
 
-def _alias_map(records: list[dict]) -> dict[str, str]:
-    """Alias → canonical name, following chains (a merge and a rename alike)."""
-    return _core().alias_map(records)
-
-
-def _canonical(records: list[dict]) -> list[dict]:
-    """The same records read under canonical names; definitions move with them."""
-    return _core().canonical_records(records)
-
-
 class PropertyStore:
-    """Persist reviewed property records against the graph's global revision."""
+    """Current value intervals and their read projections."""
 
     def __init__(self, store: GraphStore | str | Path, *, create: bool = False):
         self.store = store if isinstance(store, GraphStore) else GraphStore(store, create=create)
 
     # -- derived reads -------------------------------------------------
     @staticmethod
-    def _records_from_db(db, as_of_revision: int | None = None) -> list[dict]:
-        if as_of_revision is None:
-            rows = db.execute(
-                "SELECT data FROM property_records ORDER BY accepted_revision,rowid"
-            ).fetchall()
-        else:
-            rows = db.execute(
-                "SELECT data FROM property_records WHERE accepted_revision<=? "
-                "ORDER BY accepted_revision,rowid",
-                (as_of_revision,),
-            ).fetchall()
-        return [json.loads(row["data"]) for row in rows]
+    def _records_from_db(db) -> list[dict]:
+        return [json.loads(row["data"]) for row in db.execute(
+            "SELECT data FROM property_records ORDER BY rowid")]
 
-    def accepted_records(
-        self, as_of_revision: int | None = None, *, include_retracted: bool = False
-    ) -> list[dict]:
-        """Return immutable authoritative records visible at one review revision.
-
-        Only a retraction *without* an event removes a record here: that one says
-        the record was misread, so it never counted. A retraction with an event
-        says the record stops being the state from that point on — before it the
-        record is still what the reader knows, so removing it here would rewrite
-        the reading order. Those are applied where a reading position exists
-        (``node_properties``, ``_value_state``).
-        """
+    def accepted_records(self) -> list[dict]:
+        """Current definitions plus intrinsic value intervals; no revision replay."""
         with self.store.connect() as db:
-            records = self._records_from_db(db, as_of_revision)
-        if include_retracted:
-            return records
-        retracted = {
-            item.get("target_id")
-            for item in records
-            if item.get("kind") == "property_retraction"
-            and not isinstance(item.get("event_id"), str)
-        }
-        return [item for item in records if item.get("id") not in retracted]
+            return self._records_from_db(db)
 
     # -- validation ----------------------------------------------------
-    def _validation_snapshot(self, snapshot: dict) -> dict:
-        """Attach exact source text for pure validation only.
 
-        ``GraphStore.snapshot()`` deliberately omits source bodies so callers can
-        never read or persist them.  The pure core still needs the exact text to
-        prove that a property ``evidence.quote`` is a unique substring, so this
-        adapter injects the text into a private copy that is passed only to
-        ``property_core.validate_records``.  It is never stored in a candidate and
-        never returned from a snapshot-facing read.
-        """
-        sources = snapshot.get("sources")
-        if not isinstance(sources, list) or not sources:
-            return snapshot
-        enriched: list[dict] = []
-        changed = False
-        for source in sources:
-            if not isinstance(source, dict) or isinstance(source.get("text"), str):
-                enriched.append(source)
-                continue
-            source_id = source.get("id")
-            if not isinstance(source_id, str):
-                enriched.append(source)
-                continue
-            try:
-                body = self.store.source(source_id)["text"]
-            except ValueError:
-                enriched.append(source)
-                continue
-            enriched.append(source | {"text": body})
-            changed = True
-        return snapshot | {"sources": enriched} if changed else snapshot
 
-    @staticmethod
-    def _format_records(records: object) -> tuple[list[dict], list[dict]]:
-        if not isinstance(records, list):
-            return [], [_issue("FORMAT", "属性记录须为 JSON 数组")]
-        normalized = [dict(record) for record in records if isinstance(record, dict)]
-        if len(normalized) != len(records):
-            return normalized, [_issue("FORMAT", "每条属性记录须为 JSON 对象")]
-        try:
-            json.dumps(normalized, ensure_ascii=False, allow_nan=False)
-        except (TypeError, ValueError):
-            return normalized, [_issue("FORMAT", "属性记录须可序列化为 JSON")]
-        return normalized, []
 
-    def normalize_records(self, records: object) -> tuple[list[dict], list[dict]]:
-        """Normalize property records without writing anything."""
-        return self._format_records(records)
 
-    def _diagnostics(
-        self,
-        records: object,
-        expected_revision: int,
-        snapshot: dict,
-        accepted_records: list[dict],
-    ) -> list[dict]:
-        normalized, diagnostics = self._format_records(records)
-        if not normalized and not diagnostics:
-            diagnostics.append(_issue("EMPTY", "候选至少须包含一条属性记录"))
-        if (
-            not isinstance(expected_revision, int)
-            or isinstance(expected_revision, bool)
-            or expected_revision != snapshot["revision"]
-        ):
-            diagnostics.append(_issue("REVISION", "正式资料版本已变化，请刷新后重新预检"))
-        try:
-            core_diagnostics = _core().validate_records(
-                normalized, self._validation_snapshot(snapshot), accepted_records
-            )
-        except Exception as exc:
-            diagnostics.append(_issue("RECORD", str(exc)))
-        else:
-            diagnostics.extend(core_diagnostics or [])
-        ids = [record.get("id") for record in normalized]
-        valid_ids = [record_id for record_id in ids if isinstance(record_id, str) and record_id]
-        if len(valid_ids) != len(ids):
-            diagnostics.append(_issue("ID", "每条属性记录须有稳定 id"))
-        if len(valid_ids) != len(set(valid_ids)):
-            diagnostics.append(_issue("DUPLICATE_ID", "同一候选内属性记录 ID 不得重复"))
-        existing = {
-            item["id"]
-            for item in accepted_records
-            if isinstance(item.get("id"), str)
-        }
-        if existing.intersection(valid_ids):
-            diagnostics.append(
-                _issue("APPEND_ONLY", "属性记录只可追加一次；已有 ID 不可覆盖或重放")
-            )
-        return diagnostics
-
-    def diagnostics(
-        self,
-        records: list[dict],
-        expected_revision: int,
-        snapshot: dict | None = None,
-    ) -> list[dict]:
-        """Validate records against a supplied snapshot (used by unified changes)."""
-        snapshot = snapshot or self.store.snapshot()
-        # 撤回过的记录也要在场，否则指向它们的失效/撤销/更正会报「目标不是属性记录」。
-        return self._diagnostics(
-            records,
-            expected_revision,
-            snapshot,
-            self.accepted_records(snapshot["revision"], include_retracted=True),
-        )
 
     def precheck(self, records: list[dict], expected_revision: int) -> list[dict]:
-        snapshot = self.store.snapshot()
-        # 撤回过的记录也要在场：指向它们的失效、撤销失效、更正都得能验通过。
-        # 只看「还站得住的」会让第二次撤回报「目标不是属性记录」。
-        return self._diagnostics(
-            records,
-            expected_revision,
-            snapshot,
-            self.accepted_records(snapshot["revision"], include_retracted=True),
-        )
+        from .batch_write import capture, prepare
+        snapshot = capture(self.store)
+        return prepare(snapshot, [], records, expected_revision).diagnostics
 
-    # -- pending candidates -------------------------------------------
-    def propose(
-        self,
-        records: list[dict],
-        expected_revision: int,
-        *,
-        source: str = "manual",
-        note: str = "",
-        run_id: str | None = None,
-    ) -> str:
-        if source not in {"manual", "model", "correction", "audit"}:
-            raise ValueError("属性候选来源无效")
-        snapshot = self.store.snapshot()
-        diagnostics = self._diagnostics(
-            records,
-            expected_revision,
-            snapshot,
-            self.accepted_records(snapshot["revision"], include_retracted=True),
-        )
-        errors = [item["message"] for item in diagnostics if item["severity"] == "error"]
-        if errors:
-            raise ValueError("；".join(errors))
-        from uuid import uuid4
 
-        candidate_id = uuid4().hex
-        normalized, _ = self._format_records(records)
-        change = {
-            "id": candidate_id,
-            "records": normalized,
-            "source": source,
-            "note": note,
-            "run_id": run_id,
-            "expected_revision": expected_revision,
-            "diagnostics": diagnostics,
-        }
-        with self.store.connect(write=True) as db:
-            db.execute(
-                "INSERT INTO property_candidates"
-                "(id,data,status,version,expected_revision) VALUES (?,?,?,?,?)",
-                (
-                    candidate_id,
-                    json.dumps(change, ensure_ascii=False),
-                    "pending",
-                    1,
-                    expected_revision,
-                ),
-            )
-        return candidate_id
 
-    @staticmethod
-    def _candidate_row(row) -> dict:
-        return json.loads(row["data"]) | {
-            "status": row["status"],
-            "version": row["version"],
-            "expected_revision": row["expected_revision"],
-            "result_revision": row["result_revision"],
-            "created_at": row["created_at"],
-        }
 
-    def candidates(self, status: str | None = None) -> list[dict]:
-        if status is not None and status not in {"pending", "accepted", "rejected"}:
-            raise ValueError("候选状态无效")
-        sql = "SELECT * FROM property_candidates"
-        if status is not None:
-            sql += " WHERE status=?"
-        sql += " ORDER BY created_at DESC,rowid DESC"
-        with self.store.connect() as db:
-            rows = db.execute(sql, (status,) if status else ()).fetchall()
-        return [self._candidate_row(row) for row in rows]
 
-    def candidate(self, candidate_id: str) -> dict:
-        with self.store.connect() as db:
-            row = db.execute(
-                "SELECT * FROM property_candidates WHERE id=?", (candidate_id,)
-            ).fetchone()
-        if row is None:
-            raise ValueError("属性候选不存在")
-        return self._candidate_row(row)
 
-    def accept(self, candidate_id: str, version: int) -> int:
-        """Validate and append every record in one transaction, or append none."""
-        with self.store.connect(write=True) as db:
-            row = db.execute(
-                "SELECT * FROM property_candidates WHERE id=?", (candidate_id,)
-            ).fetchone()
-            if row is None:
-                raise ValueError("属性候选不存在")
-            if row["status"] != "pending" or row["version"] != version:
-                raise ValueError("候选状态或版本已变化")
-            change = json.loads(row["data"])
-            revision = int(
-                db.execute("SELECT value FROM meta WHERE key='revision'").fetchone()[0]
-            )
-            if change["expected_revision"] != revision:
-                raise ValueError("正式资料版本已变化，请重新建立属性候选")
-            snapshot = self.store.snapshot()
-            accepted_records = self._records_from_db(db, revision)
-            diagnostics = self._diagnostics(
-                change["records"], revision, snapshot, accepted_records
-            )
-            records, _ = self._format_records(change["records"])
-            errors = [item["message"] for item in diagnostics if item["severity"] == "error"]
-            if errors:
-                raise ValueError("；".join(errors))
-            next_revision = revision + 1
-            # 新披露覆盖旧值：同节点、同方面、同作用域、同持有人的单值属性，
-            # 更早的那条从这次披露起不再算数。它和这次披露同属一个版本，
-            # 不需要人再去审核页点一次「应用建议」。
-            records = list(records) + supersede_records(accepted_records, records)
-            for record in records:
-                db.execute(
-                    "INSERT INTO property_records(id,kind,data,accepted_revision,candidate_id) "
-                    "VALUES (?,?,?,?,?)",
-                    (
-                        record["id"],
-                        record.get("kind", ""),
-                        json.dumps(record, ensure_ascii=False),
-                        next_revision,
-                        candidate_id,
-                    ),
-                )
-            db.execute("UPDATE meta SET value=? WHERE key='revision'", (str(next_revision),))
-            db.execute(
-                "UPDATE property_candidates SET status='accepted',result_revision=? WHERE id=?",
-                (next_revision, candidate_id),
-            )
-            db.execute(
-                "INSERT INTO revisions(revision,candidate_id,data) VALUES (?,?,?)",
-                (
-                    next_revision,
-                    candidate_id,
-                    json.dumps(
-                        {
-                            "operations": [],
-                            "candidate_id": candidate_id,
-                        },
-                        ensure_ascii=False,
-                    ),
-                ),
-            )
-        return next_revision
-
-    def reject(self, candidate_id: str, version: int) -> None:
-        with self.store.connect(write=True) as db:
-            row = db.execute(
-                "SELECT status,version FROM property_candidates WHERE id=?", (candidate_id,)
-            ).fetchone()
-            if row is None:
-                raise ValueError("属性候选不存在")
-            if row["status"] != "pending" or row["version"] != version:
-                raise ValueError("候选状态或版本已变化")
-            db.execute(
-                "UPDATE property_candidates SET status='rejected' WHERE id=?", (candidate_id,)
-            )
 
     # -- projections ---------------------------------------------------
     @staticmethod
@@ -605,7 +197,7 @@ class PropertyStore:
         hidden: list[str] = []
         unknown: list[str] = []
         for record in records:
-            if record.get("kind") in {"property_definition", "property_retraction"}:
+            if record.get("kind") in {"property_definition"}:
                 visible.append(record)
                 continue
             status = self._disclosure_status(record, disclosure_cut, source_order)
@@ -624,7 +216,6 @@ class PropertyStore:
         node_id: str,
         property_id: str,
         at=None,
-        as_of_revision: int | None = None,
         *,
         scope: str = "world",
         holder_id: str | None = None,
@@ -637,15 +228,14 @@ class PropertyStore:
             raise ValueError("world 范围不能带认知持有者")
         if scope != "world" and not holder_id:
             raise ValueError("认知查询须提供 holder_id")
-        snapshot = self.store.snapshot(as_of_revision)
-        records = self.accepted_records(snapshot["revision"])
+        snapshot = self.store.snapshot()
+        records = self.accepted_records()
         visible, disclosure = self._visible_records(records, snapshot, disclosure_cut)
         # `at` is a disclosure checkpoint (an event id) or nothing at all: the
         # property has no value outside a reading position.
-        result = self._value_state(
-            node_id, property_id, self._cut_position(at),
-            scope=scope, holder_id=holder_id,
-        )
+        from .temporal_state import interval_state
+        result = interval_state(self.store, node_id, property_id, at if at is not None else disclosure_cut,
+                                scope=scope, holder_id=holder_id)
         if not include_diagnostics and disclosure_cut is not None:
             disclosure = {
                 "cut": disclosure["cut"],
@@ -669,12 +259,10 @@ class PropertyStore:
             raise ValueError("world 范围不能带认知持有者")
         if scope != "world" and not holder_id:
             raise ValueError("认知查询须提供 holder_id")
-        return self._value_state(
-            node_id, property_id, self._cut_position(disclosure_cut),
-            scope=scope, holder_id=holder_id,
-        )
+        from .temporal_state import interval_state
+        return interval_state(self.store, node_id, property_id, disclosure_cut, scope=scope, holder_id=holder_id)
 
-    def _cut_position(self, cut: object) -> tuple | None:
+    def _cut_position(self, cut: object, revision: int | None = None) -> tuple | None:
         """Turn a reading cut into a position on the chain.
 
         An event id means "after reading that event", so everything anchored there
@@ -701,59 +289,6 @@ class PropertyStore:
                 best = (key, offset)
         return best
 
-    def _value_state(
-        self,
-        node_id: str,
-        property_id: str,
-        cut: tuple[int, ...] | None,
-        *,
-        scope: str = "world",
-        holder_id: str | None = None,
-    ) -> dict:
-        """The value visible at a reading cut, read from the value sequence.
-
-        The cut is an event id, and an id's number *is* its reading position, so
-        no separate ordering table is involved.
-        """
-        cut_position = cut
-
-        # A value stops counting when a retraction says so, and a retraction
-        # anchored at a later disclosure does not apply yet at this position.
-        all_records = self.accepted_records(include_retracted=True)
-        invalid = invalid_at(all_records, cut_position)
-        records = [item for item in all_records if item.get("id") not in invalid]
-        # A rename that was taken back stops applying here too, so the alias map
-        # is built from what still stands rather than from every record ever.
-        aliases = _alias_map(records)
-        wanted = aliases.get(property_id, property_id)
-
-        def name_of(record: dict) -> str:
-            name = record.get("property_id")
-            return aliases.get(name, name) if isinstance(name, str) else ""
-
-        values = [
-            record for record in records
-            if record.get("kind") == "property_value"
-            and record.get("node_id") == node_id
-            and name_of(record) == wanted
-            and (record.get("scope") or "world") == scope
-            and (scope == "world" or record.get("holder_id") == holder_id)
-        ]
-
-        applicable = [
-            record for record in values
-            if cut_position is None or record_position(record) <= cut_position
-        ]
-        if not applicable:
-            return {"state": {"kind": "unrecorded"}, "record_ids": []}
-        # Later disclosure wins; when positions tie, the later record wins.
-        best = max(
-            enumerate(applicable), key=lambda pair: (record_position(pair[1]), pair[0])
-        )[1]
-        return {
-            "state": {"kind": "known", "value": best.get("value")},
-            "record_ids": [best.get("id")],
-        }
 
     def history(
         self,
@@ -769,33 +304,27 @@ class PropertyStore:
             raise ValueError("world 范围不能带认知持有者")
         if scope != "world" and not holder_id:
             raise ValueError("认知查询须提供 holder_id")
+        # Value history consists of the surviving intrinsic intervals.
         kwargs = (
             {"scope": scope, "holder_id": holder_id}
             if scope != "world" or holder_id is not None
             else {}
         )
-        # History is the audit trail: retracted entries belong in it.
-        records = self.accepted_records(include_retracted=True)
-        records = _canonical(records)
+        records = self.accepted_records()
         return _core().history(records, node_id, property_id, **kwargs)
 
     def audit(
         self,
         node_ids: set[str] | None = None,
-        as_of_revision: int | None = None,
     ) -> dict:
         """Deterministic audit of accepted records; nothing is modified."""
         from .property_audit import audit_properties
 
-        snapshot = self.store.snapshot(as_of_revision)
-        # Retracted rows are read too: judging a retraction needs the record it
-        # points at, and a target the audit never saw looks like a broken pointer.
-        records = self.accepted_records(
-            snapshot["revision"], include_retracted=True
-        )
+        snapshot = self.store.snapshot()
+        # Audit current value intervals; ended rows are retained as time history.
+        records = self.accepted_records()
         # An alias that was merged is no longer a separate name: auditing it as
         # one would keep reporting the split the human already resolved.
-        records = _canonical(records)
         return audit_properties(
             records,
             snapshot.get("nodes", []),
@@ -813,8 +342,7 @@ class PropertyStore:
 
         A rename is migrated: without it, every record whose category was derived
         from the old name would quietly drop into 其他, which looks like the
-        rename lost data. Records are moved by appending categorization records,
-        exactly as a manual move does.
+        rename lost data. Selected value categories are edited directly, just as a manual move does.
         """
         previous = property_categories.load(self.store)
         vocabulary = property_categories.save(self.store, config)
@@ -840,32 +368,17 @@ class PropertyStore:
         return {"vocabulary": vocabulary, "moved": moved}
 
     def _apply_categorizations(self, pairs: list[tuple[str, str]], note: str) -> dict:
-        """Append one categorization record per pair, in a single revision."""
-        from uuid import uuid4
-
-        current = _categorization_overrides(self.accepted_records())
-        records = [
-            {
-                "kind": "property_categorization",
-                "id": f"cat_{uuid4().hex[:12]}",
-                "target_id": target,
-                "category": category,
-                **({"note": note} if note else {}),
-            }
-            for target, category in pairs
-            if current.get(target) != category
-        ]
-        if not records:
-            return {"revision": self.store.revision, "moved": [], "category": ""}
-        revision = self.store.revision
-        candidate = self.propose(
-            records, revision, source="correction", note=note or "移动分类"
-        )
-        return {
-            "revision": self.accept(candidate, 1),
-            "moved": [record["target_id"] for record in records],
-            "category": records[0]["category"],
-        }
+        from .temporal_state import persist
+        snapshot = self.store.snapshot()
+        records = self.accepted_records()
+        categories = dict(pairs)
+        for row in records:
+            if row["id"] in categories and row.get("kind") == "property_value":
+                row["category"] = categories[row["id"]]
+        revision = persist(self.store, snapshot, records, expected_revision=snapshot["revision"],
+                           action="categorize", reason=note)
+        return {"revision": revision, "moved": list(categories),
+                "category": next(iter(categories.values()), "")}
 
     def categorize(
         self, targets: list[str], category: str, note: str = ""
@@ -873,8 +386,7 @@ class PropertyStore:
         """Move disclosures to a category.
 
         Moving is a human editorial act, so it is applied immediately — but it is
-        still an append-only record, not a rewrite: the earlier grouping stays in
-        the history and the value itself is untouched.
+        a direct edit of the value category; no editorial record is appended.
         """
         category = (category or "").strip()
         if not category:
@@ -903,321 +415,53 @@ class PropertyStore:
         )
         return result | {"category": category}
 
-    def merge(self, alias_id: str, target_id: str, note: str = "") -> dict:
-        """Read `alias_id` as `target_id` from now on.
 
-        Nothing is rewritten: records keep the name they were captured under and
-        the alias stays a real definition, so its records still validate.
-        Retracting this record splits the names again.
-        """
-        from uuid import uuid4
 
-        alias_id = (alias_id or "").strip()
-        target_id = (target_id or "").strip()
-        if not alias_id or not target_id:
-            raise ValueError("请提供两个属性名")
-        if alias_id == target_id:
-            raise ValueError("合并的两个名字不能相同")
-        known = {
-            record["id"] for record in self.accepted_records()
-            if record.get("kind") == "property_definition"
-        }
-        for name in (alias_id, target_id):
-            if name not in known:
-                raise ValueError(f"属性定义不存在：{name}")
-        record = {
-            "kind": "property_merge",
-            "id": f"merge_{uuid4().hex[:12]}",
-            "alias_id": alias_id,
-            "target_id": target_id,
-            **({"note": note} if note else {}),
-        }
-        revision = self.store.revision
-        candidate = self.propose(
-            [record], revision, source="correction",
-            note=note or f"合并属性：{alias_id} → {target_id}",
-        )
-        return {
-            "revision": self.accept(candidate, 1),
-            "alias_id": alias_id,
-            "target_id": target_id,
-        }
 
-    def rename(self, names: object, to_id: str, note: str = "") -> dict:
-        """Give one aspect a new name.
 
-        A rename is a read-time alias like a merge, but it says something else:
-        not "these two names are one aspect" but "this aspect is called that
-        now". So the new name does not have to exist yet — creating it is the
-        point — and the definition moves with it, keeping the shape the values
-        were validated against. Nothing is rewritten: records keep the name they
-        were captured under, and retracting this record restores the old name.
 
-        ``names`` is the whole row: an aspect may be spread over two names
-        (`cultivation`, `cultivation_stage`), and renaming the line has to move
-        all of them, otherwise the next disclosure reintroduces the old spelling.
-        Renaming onto another aspect's name is refused — that is a merge, and a
-        silent one would hide which aspect just absorbed which.
-        """
-        from uuid import uuid4
-
-        if isinstance(names, str):
-            names = [names]
-        if not isinstance(names, (list, tuple)):
-            raise ValueError("请提供要改的属性名")
-        sources = [item.strip() for item in names if isinstance(item, str) and item.strip()]
-        to_id = (to_id or "").strip()
-        if not sources:
-            raise ValueError("请提供要改的属性名")
-        if not to_id:
-            raise ValueError("请填写新的属性名")
-        if len(to_id) > 40:
-            raise ValueError("属性名最长 40 个字符")
-
-        records = self.accepted_records(include_retracted=True)
-        invalid = invalid_at(records, None)
-        live = [record for record in records if record.get("id") not in invalid]
-        aliases = _alias_map(live)
-        definitions = {
-            record["id"] for record in live
-            if record.get("kind") == "property_definition"
-        }
-        known = definitions | set(aliases) | set(aliases.values())
-        unknown = [name for name in sources if name not in known]
-        if unknown:
-            raise ValueError(f"属性名不存在：{'、'.join(unknown[:3])}")
-
-        canonical = {aliases.get(name, name) for name in sources}
-        target = aliases.get(to_id, to_id)
-        if target in canonical:
-            # The new name is one this aspect already answers to: point the rest
-            # at it instead of inventing a third spelling.
-            to_id = target
-        else:
-            taken = (definitions | set(aliases.values())) - canonical
-            if to_id in taken:
-                raise ValueError(
-                    f"「{to_id}」已经是另一个属性的名字；要合成一个方面请用「合并」"
-                )
-        pending = [
-            {
-                "kind": "property_rename",
-                "id": f"rename_{uuid4().hex[:12]}",
-                "from_id": name,
-                "to_id": to_id,
-                **({"note": note} if note else {}),
-            }
-            for name in dict.fromkeys(sources)
-            if name != to_id
-        ]
-        if not pending:
-            raise ValueError("新旧名字相同")
-        revision = self.store.revision
-        candidate = self.propose(
-            pending, revision, source="correction",
-            note=note or f"改名：{'、'.join(sources)} → {to_id}",
-        )
-        return {
-            "revision": self.accept(candidate, 1),
-            "renamed": [record["from_id"] for record in pending],
-            "to_id": to_id,
-        }
-
-    def aliases(self) -> dict[str, str]:
-        """Alias → canonical name for the whole project (merges and renames).
-
-        Read once by anything that has to speak the current names: the extraction
-        prompt lists them so the next chapter does not reinvent a name that was
-        just renamed away.
-        """
-        records = self.accepted_records(include_retracted=True)
-        invalid = invalid_at(records, None)
-        return _alias_map([item for item in records if item.get("id") not in invalid])
-
-    def retract(
-        self,
-        targets: list[str],
-        reason: str,
-        *,
-        event_id: str | None = None,
-        basis: str = "human",
-    ) -> dict:
-        """Invalidate records. The row stays for audit; readers stop seeing it.
-
-        Retraction is the only way to take something back, because a value is
-        never edited in place: a wrong record is retracted, and a corrected one
-        is appended as a new disclosure.
-
-        ``event_id`` separates the two reasons it can happen:
-
-        - absent — the record was misread. It never counted, at any position.
-        - present — the record was true, but from this reading position it is no
-          longer part of the state. Before that position it still counts.
-        """
-        from uuid import uuid4
-
-        reason = (reason or "").strip()
-        if not reason:
-            raise ValueError("撤回需要写清原因")
-        if not isinstance(targets, list) or not targets:
-            raise ValueError("请提供要撤回的记录")
-        records = self.accepted_records(include_retracted=True)
-        by_id = {
-            record["id"]: record for record in records if isinstance(record.get("id"), str)
-        }
-        # 已经有过的撤回。同一个说法不用说第二遍，但「从某处起不算」和「从来不算」
-        # 是两句话——站在更早的阅读位置上撤一条已经被取代的记录，说的是后者；
-        # 不写进去，读者在那个位置怎么点都撤不动。
-        live = [
-            record for record in records
-            if record.get("kind") == "property_retraction"
-        ]
-        pending: list[dict] = []
-        for target in dict.fromkeys(targets):
-            record = by_id.get(target)
-            if record is None:
-                raise ValueError(f"记录不存在：{target}")
-            if record.get("kind") not in {
-                "property_value", "property_categorization", "property_merge",
-                "property_rename",
-            }:
-                raise ValueError("只有取值、分类、归并或改名记录可以撤回")
-            existing = [
-                record for record in live if record.get("target_id") == target
-            ]
-            # 只在「比现有的更早」时才写：已经有一条落在更早位置的失效（含「从来不算」，
-            # 它的位置排在最前），这次就没有新信息。反过来，站在更早的阅读位置上撤
-            # 一条后来才被取代的记录，是在说「从这里起也不算」——那是新说法，要写进去，
-            # 否则读者在那个位置上怎么点都撤不动。
-            new_event = _statement_event({"event_id": event_id})
-            if any(_statement_event(record) <= new_event for record in existing):
-                continue
-            item: dict = {
-                "kind": "property_retraction",
-                "id": f"retract_{uuid4().hex[:12]}",
-                "target_id": target,
-                "reason": reason,
-                "basis": basis,
-            }
-            if event_id:
-                item["event_id"] = event_id
-                # The position inside that event is the target's own disclosure:
-                # the old value stops counting exactly where the new one appears.
-                disclosure = (record.get("disclosure") or {})
-                if isinstance(disclosure.get("source_id"), str):
-                    item["disclosure"] = {
-                        "source_id": disclosure["source_id"],
-                        "start": record_position(record)[1],
-                    }
-            pending.append(item)
-        if not pending:
-            return {"revision": self.store.revision, "retracted": [], "reason": reason}
-        revision = self.store.revision
-        candidate = self.propose(
-            pending, revision, source="correction", note=f"撤回：{reason}"
-        )
-        return {
-            "revision": self.accept(candidate, 1),
-            "retracted": [record["target_id"] for record in pending],
-            "reason": reason,
-        }
-
-    def supersede(self, pairs: list[dict], note: str = "") -> dict:
-        """Mark older values as no longer the state, from a later disclosure on.
-
-        Each pair is ``{target_id, event_id, reason}``: the target is invalid from
-        ``event_id`` on. This is what the audit round proposes when a new value
-        replaces an older one — the newer disclosure says the older one is no
-        longer what holds, and nothing is rewritten or deleted.
-        """
-        from uuid import uuid4
-
-        if not isinstance(pairs, list) or not pairs:
-            raise ValueError("请提供要失效的记录")
-        records = self.accepted_records(include_retracted=True)
-        by_id = {
-            record["id"]: record for record in records if isinstance(record.get("id"), str)
-        }
-        already = {
-            record.get("target_id") for record in records
-            if record.get("kind") == "property_retraction"
-        }
-        pending: list[dict] = []
-        for pair in pairs:
-            target = str(pair.get("target_id") or "").strip()
-            event_id = str(pair.get("event_id") or "").strip()
-            reason = str(pair.get("reason") or "").strip() or "被后一条披露取代"
-            record = by_id.get(target)
-            if record is None or record.get("kind") != "property_value":
-                raise ValueError(f"记录不存在或不是取值记录：{target}")
-            if not event_id:
-                raise ValueError("失效需要一个时间点（事件）")
-            if target in already:
-                continue
-            item: dict = {
-                "kind": "property_retraction",
-                "id": f"retract_{uuid4().hex[:12]}",
-                "target_id": target,
-                "reason": reason,
-                "event_id": event_id,
-                "basis": "audit",
-            }
-            disclosure = record.get("disclosure") or {}
-            if isinstance(disclosure.get("source_id"), str):
-                item["disclosure"] = {
-                    "source_id": disclosure["source_id"],
-                    "start": record_position(record)[1],
-                }
-            pending.append(item)
-        if not pending:
-            return {"revision": self.store.revision, "superseded": []}
-        revision = self.store.revision
-        candidate = self.propose(
-            pending, revision, source="audit", note=note or "审核轮：旧值失效"
-        )
-        return {
-            "revision": self.accept(candidate, 1),
-            "superseded": [record["target_id"] for record in pending],
-        }
-
-    def _storyline_progress(
+    def _container_progress(
         self,
         node_id: str,
         snapshot: dict,
         all_records: list[dict],
         cut_position: tuple | None,
     ) -> list[dict]:
-        """大事件在「现在」这一点的样子：最后读过的那个场景说的那句话。
-
-        记录挂在场景上（`storyline_progress`），大事件只是**读**它——所以改的是
-        场景，看到的还是同一句话，不会出现两处说法。读到的场景还没给出这句话时
-        什么都不返回，而不是编一句总结。
-        """
+        """父级读取直属成员的进展，不复制持久记录或跨层借用。"""
         nodes = {node["id"]: node for node in snapshot.get("nodes", [])}
         story = nodes.get(node_id) or {}
-        if story.get("node_type") != "storyline":
+        level = {"storyline": ("big_event", property_labels.STORYLINE_PROGRESS, "主要故事"),
+                 "big_event": ("scene", "big_event_progress", "大事件")}.get(str(story.get("node_type") or ""))
+        if not level:
             return []
+        child_kind, progress_property, category = level
         scenes = {
             child for child in story.get("events") or []
-            if child in nodes and nodes[child].get("node_type") == "scene"
+            if child in nodes and nodes[child].get("node_type") == child_kind and not nodes[child].get("retracted")
         }
         if not scenes:
             return []
+        from .temporal_state import point, position
+        expired = {row['id'] for row in all_records if row.get('valid_to') and
+                   (cut_position is None or (position(row['valid_to'], snapshot) or (float('inf'), 0)) <= cut_position)}
+        def key_of(row):
+            return position(point(row), snapshot) or (-1, -1)
         candidates = [
             record for record in all_records
             if record.get("kind") == "property_value"
             and record.get("node_id") in scenes
-            and str(record.get("property_id") or "") == property_labels.STORYLINE_PROGRESS
-            and (cut_position is None or record_position(record) <= cut_position)
+            and str(record.get("property_id") or "") == progress_property
+            and record.get("id") not in expired
+            and (cut_position is None or key_of(record) <= cut_position)
         ]
         if not candidates:
             return []
-        latest = max(candidates, key=record_position)
+        latest = max(candidates, key=key_of)
         return [{
             "id": f"derived:{latest.get('node_id')}",
             "kind": "property_value",
             "node_id": node_id,
-            "property_id": property_labels.STORYLINE_PROGRESS,
+            "property_id": progress_property,
             "value": latest.get("value"),
             "value_type": latest.get("value_type") or "string",
             "event_id": latest.get("event_id"),
@@ -1225,7 +469,7 @@ class PropertyStore:
             "disclosure": latest.get("disclosure") or {},
             "source": latest.get("source") or "narration",
             "scope": "world",
-            "category": "大事件",
+            "category": category,
             "derived": True,
             "derived_from": latest.get("node_id"),
         }]
@@ -1233,7 +477,6 @@ class PropertyStore:
     def node_properties(
         self,
         node_id: str,
-        as_of_revision: int | None = None,
         cut: object = None,
         include_derived: bool = False,
     ) -> dict:
@@ -1256,25 +499,23 @@ class PropertyStore:
         直接不出现——`valid` 是唯一的那个字段，行上不再有失效条数、失效于哪次披露、
         失效原因这些派生的说法。
         """
-        snapshot = self.store.snapshot(as_of_revision)
-        # Read the whole history even when the caller only wants what stands: a
-        # record that stopped counting is still needed to know that the aspect
-        # lost a value, and a retraction has to be resolvable to its target.
-        all_records = self.accepted_records(snapshot["revision"], include_retracted=True)
-        # A reading cut turns the pane into "what was known at this point". It is
-        # also what decides whether a retraction applies: one anchored at a later
-        # disclosure has not happened for the reader yet.
-        cut_position = self._cut_position(cut) if cut else None
+        snapshot = self.store.snapshot()
+        # Read value intervals, then apply their explicit source boundaries.
+        all_records = self.accepted_records()
+        # Reading cuts select which intrinsic intervals hold at this point.
+        from .temporal_state import boundary_at, point
+        from .temporal_state import position as source_position
+        cut_position = source_position(boundary_at(snapshot, cut), snapshot) if cut else None
         # 大事件自己没有属性记录：它此刻的样子是它下面最后一个**读过的**场景说的
         # 那句话。借一条记录过来显示，行就有了正常的 records / 披露 / 当前值，
         # 编辑器不请求派生行，所以不会有人去改一条不存在的记录。
         if include_derived:
-            all_records = all_records + self._storyline_progress(
+            all_records = all_records + self._container_progress(
                 node_id, snapshot, all_records, cut_position
             )
-        # Validity is explicit, not computed: a record counts until a retraction
-        # says otherwise. Nothing here derives a window from the next disclosure.
-        invalid = invalid_at(all_records, cut_position)
+        # Validity lives on each value as valid_from/valid_to.
+        from .temporal_state import ended_at
+        invalid = ended_at(all_records, snapshot, cut)
         records = all_records
         config = property_categories.load(self.store)
         # A move, a merge or a rename that has been invalidated stops applying:
@@ -1303,7 +544,6 @@ class PropertyStore:
         overrides = _categorization_overrides(editorial)
         # A merged alias reads as its canonical name everywhere: one aspect, one
         # line, one label, without rewriting the records that used the old name.
-        aliases = _alias_map(editorial)
 
         def node_ref(value: object) -> dict | None:
             """A node-valued property stores an id; the reader wants the name."""
@@ -1313,7 +553,7 @@ class PropertyStore:
             return {"id": value, "name": name} if name else None
 
         def position(record: dict) -> tuple:
-            return record_position(record)
+            return source_position(point(record), snapshot) or (-1, -1)
 
         # One line per aspect and category. The aspect is the first token of the
         # property name, so `cultivation` and `cultivation_stage` share a line:
@@ -1321,9 +561,9 @@ class PropertyStore:
         # realms look like three simultaneous truths. Scope is a label on each
         # record rather than a reason to split the line — a claim about the realm
         # and the realm itself are the same subject, told differently.
-        lines: dict[tuple[str, str], list[dict]] = {}
+        lines: dict[tuple, list[dict]] = {}
         for record in all_records:
-            # Only values sit on a line. A retraction has no node or aspect of its
+            # Only actual value intervals sit on a line; metadata has no aspect of its
             # own — it points at a value and is applied through `invalid_at`.
             if record.get("kind") != "property_value":
                 continue
@@ -1338,23 +578,25 @@ class PropertyStore:
                 record, node_type, config, overrides
             )
             raw_name = record.get("property_id")
-            name = aliases.get(raw_name, raw_name) if isinstance(raw_name, str) else ""
+            name = raw_name if isinstance(raw_name, str) else ""
             aspect = property_categories.aspect_of(name)
-            lines.setdefault((aspect, category), []).append({
+            target = relation_target(record | {"category": category, "property_id": name}, nodes, definitions)
+            sequence = (aspect, target, record.get("scope") or "world", holder) if target else aspect
+            lines.setdefault((sequence, category), []).append({
                 "record": record,
                 "property_id": name,
                 "category_source": category_source,
             })
         # A slice with nothing left is not shown at all, so it must not be
         # advertised either: "也在「其他」中" has to point at a row that exists.
-        shown_categories: dict[str, set[str]] = {}
+        shown_categories: dict[object, set[str]] = {}
 
         items: list[dict] = []
         hidden_total = 0
         # One aspect has one state, even when its records were classified into two
         # categories. Which record holds it is decided here, across slices, so the
         # other slice cannot claim a current value of its own.
-        holding: dict[str, tuple[tuple, str]] = {}
+        holding: dict[object, tuple[tuple, str]] = {}
         for (aspect_key, category_key), entries in lines.items():
             for entry in entries:
                 record_id = entry["record"].get("id")
@@ -1367,7 +609,8 @@ class PropertyStore:
                         holding[aspect_key] = (key, record_id)
                     shown_categories.setdefault(aspect_key, set()).add(category_key)
 
-        for (aspect, category), line in lines.items():
+        for (sequence, category), line in lines.items():
+            aspect = sequence[0] if isinstance(sequence, tuple) else sequence
             ordered = sorted(line, key=lambda entry: position(entry["record"]))
             later = 0
             if cut_position is not None:
@@ -1445,7 +688,7 @@ class PropertyStore:
                 None,
             )
             is_current = bool(
-                current and current_at == holding.get(aspect, (None, ""))[0]
+                current and current_at == holding.get(sequence, (None, ""))[0]
             )
             # The label names the aspect, not the newest spelling of it: a line
             # holding `cultivation` and `cultivation_stage` is 修为.
@@ -1460,7 +703,7 @@ class PropertyStore:
                 # The same aspect may sit in another category too; the reader is
                 # told rather than shown a silently partial list.
                 "other_categories": sorted(
-                    shown_categories.get(aspect, set()) - {category}
+                    shown_categories.get(sequence, set()) - {category}
                 ),
                 "value_node": headline["value_node"],
                 "scope": headline["scope"],
@@ -1486,22 +729,23 @@ class PropertyStore:
             ordered_categories.index(item["category"]), item["label"], item["aspect"],
         ))
 
-        # 物品必须回答「在谁手里」。原文没写就补一行「未知」——**不造假记录**，
-        # 这一行是算出来的（derived），展开没有披露可看。
-        if node_type == "item" and not any(
-            "持有" in item["aspect"] or "归属" in item["aspect"] for item in items
-        ):
+        from .item_possession import possession_rows
+
+        holder_property, world_holders, _ = possession_rows([row for row in all_records if row.get("id") not in invalid], cut_position,
+                                                                         position_key=position)
+        if node_type == "item" and node_id not in world_holders:
+            # A missing record is not a world fact saying "未知". At an earlier
+            # reading cut it is undisclosed, and no future owner is exposed.
             items.append({
-                "property_id": "持有者", "property_ids": ["持有者"],
-                "aspect": "持有者", "label": "持有者",
+                "property_id": holder_property, "property_ids": [holder_property],
+                "aspect": holder_property, "label": property_labels.label_for(holder_property),
                 "category": "归属与持有", "category_source": "inferred",
-                "other_categories": [],
-                "value_node": None, "scope": "world", "scopes": ["world"],
-                "holder_id": None, "holder_name": "",
-                "value_type": "either", "value": "未知",
+                "other_categories": [], "value_node": None, "scope": "world", "scopes": ["world"],
+                "holder_id": None, "holder_name": "", "value_type": "either",
+                "value": "未披露" if cut_position is not None else "未记录",
                 "event_id": None, "start": None, "disclosed_at": "",
-                "is_current": True, "record_count": 0, "later_count": 0,
-                "records": [], "derived": True,
+                "is_current": False, "record_count": 0, "later_count": 0, "records": [],
+                "derived": True, "state": "unrecorded",
             })
 
         # The other end of a relation: a record stored on another node whose
@@ -1528,7 +772,7 @@ class PropertyStore:
                 record, owner_type, config, overrides
             )
             raw_name = record.get("property_id")
-            name = aliases.get(raw_name, raw_name) if isinstance(raw_name, str) else ""
+            name = raw_name if isinstance(raw_name, str) else ""
             inbound.append({
                 "record_id": record.get("id"),
                 "property_id": name,
@@ -1576,7 +820,7 @@ class PropertyStore:
             if scope == "world":
                 continue
             raw_name = record.get("property_id")
-            name = aliases.get(raw_name, raw_name) if isinstance(raw_name, str) else ""
+            name = raw_name if isinstance(raw_name, str) else ""
             claims.append({
                 "record_id": record.get("id"),
                 "node_id": subject,
@@ -1607,7 +851,7 @@ class PropertyStore:
             if cut_position is not None and position(record) > cut_position:
                 continue
             raw_name = record.get("property_id")
-            name = aliases.get(raw_name, raw_name) if isinstance(raw_name, str) else ""
+            name = raw_name if isinstance(raw_name, str) else ""
             heard.append({
                 "record_id": record.get("id"),
                 "holder_id": holder,
@@ -1637,10 +881,12 @@ class PropertyStore:
                 "name": child.get("name", child_id),
                 "label_id": child.get("label_id", child_id),
                 "node_type": child.get("node_type"),
-                "type_label": "场景" if child.get("node_type") == "scene" else "事件",
+                "type_label": {"scene": "场景", "event": "事件", "action": "动作"}.get(child.get("node_type"), "节点"),
                 "start": (child.get("disclosure") or {}).get("start"),
             })
         children.sort(key=lambda item: (item["start"] or 0, item["id"]))
+
+        from .node_involvement import involvement
 
         return {
             "node_id": node_id,
@@ -1663,70 +909,39 @@ class PropertyStore:
             "claims": claims,
             "heard": heard,
             "children": children,
+            "involvement": involvement(snapshot, records, node_id, cut),
             "cut": cut,
             "later_count": hidden_total,
         }
 
     @staticmethod
     def _pairs(records: list[dict]) -> set[tuple[str, str]]:
-        by_id = {
-            record["id"]: record
-            for record in records
-            if isinstance(record.get("id"), str)
-        }
-        pairs: set[tuple[str, str]] = set()
+        return {(row["node_id"], row["property_id"]) for row in records
+                if row.get("kind") == "property_value"
+                and isinstance(row.get("node_id"), str) and isinstance(row.get("property_id"), str)}
 
-        def collect(record: dict, seen: set[str]) -> None:
-            kind = record.get("kind")
-            if kind == "property_value":
-                node_id, property_id = record.get("node_id"), record.get("property_id")
-                if isinstance(node_id, str) and isinstance(property_id, str):
-                    pairs.add((node_id, property_id))
-            elif kind == "property_retraction":
-                target_id = record.get("target_id")
-                if isinstance(target_id, str) and target_id not in seen:
-                    target = by_id.get(target_id)
-                    if target is not None:
-                        seen.add(target_id)
-                        collect(target, seen)
-
-        for record in records:
-            collect(record, set())
-        return pairs
-
-    def world_state(self, at=None, as_of_revision: int | None = None) -> dict:
+    def world_state(self, at=None) -> dict:
         """Build a node-local world projection by calling the core for each pair."""
-        snapshot = self.store.snapshot(as_of_revision)
+        snapshot = self.store.snapshot()
         revision = snapshot["revision"]
-        records = self.accepted_records(revision)
+        records = self.accepted_records()
         world_records = [
             record for record in records
-            if record.get("kind") in {"property_definition", "property_retraction"}
+            if record.get("kind") in {"property_definition"}
             or (record.get("scope") or "world") == "world"
         ]
-        cut = self._cut_position(at)
         nodes: dict[str, dict[str, dict]] = {}
         flat: list[dict] = []
         for node_id, property_id in sorted(self._pairs(world_records)):
-            result = self._value_state(node_id, property_id, cut)
+            from .temporal_state import interval_state
+            result = interval_state(self.store, node_id, property_id, at)
             nodes.setdefault(node_id, {})[property_id] = result
             flat.append(
                 {"node_id": node_id, "property_id": property_id, **result}
             )
         return {
             "at": at,
-            "as_of_revision": revision,
+            "revision": revision,
             "nodes": nodes,
             "properties": flat,
         }
-
-    # Explicit property_* aliases keep the adapter discoverable beside Operations.
-    property_precheck = precheck
-    property_propose = propose
-    property_accept = accept
-    property_reject = reject
-    property_state = state
-    property_disclosure_state = disclosure_state
-    property_history = history
-    property_world_state = world_state
-    property_categorize = categorize

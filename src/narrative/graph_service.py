@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from uuid import uuid4
 
 from pydantic import ValidationError
 
@@ -14,7 +13,7 @@ from .graph_models import (
     GraphObject,
     parse_objects,
 )
-from .graph_store import GraphStore
+from .graph_store import GRAPH_SCHEMA_VERSION, GraphStore
 from .property_store import (
     PROPERTY_CONTRACT_VERSION,
     PROPERTY_EFFECT_OPS,
@@ -82,82 +81,69 @@ class GraphService:
             ).fetchone()
             if prior:
                 return prior[0]
-            source_id = uuid4().hex
+            saved = db.execute("SELECT value FROM meta WHERE key='source_sequence'").fetchone()
+            existing = [int(row[0][3:]) for row in db.execute("SELECT id FROM sources")
+                        if row[0].startswith("SRC") and row[0][3:].isdigit()]
+            sequence = max([int(saved[0]) if saved else 0, *existing]) + 1
+            source_id = f"SRC{sequence}"
+            db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('source_sequence',?)", (str(sequence),))
             revision = int(db.execute("SELECT value FROM meta WHERE key='revision'").fetchone()[0]) + 1
             db.execute(
                 "INSERT INTO sources(id,title,text,hash,imported_revision) VALUES (?,?,?,?,?)",
                 (source_id, title.strip(), text, source_hash, revision),
             )
             db.execute("UPDATE meta SET value=? WHERE key='revision'", (str(revision),))
-            db.execute(
-                "INSERT INTO revisions(revision,data) VALUES (?,?)",
-                (revision, json.dumps({"import_source": source_id, "operations": []})),
-            )
+            orders = [json.loads(row[0]) for row in db.execute("SELECT data FROM objects WHERE kind='source_order'")]
+            ordinal = max((row['ordinal'] for row in orders if row.get('context_id') == 'canon'), default=-1) + 1
+            order = {'kind': 'source_order', 'id': 'source-order-' + source_id,
+                     'context_id': 'canon', 'source_id': source_id, 'ordinal': ordinal}
+            db.execute('INSERT INTO objects(id,kind,data,accepted_revision) VALUES (?,?,?,?)',
+                       (order['id'], order['kind'], json.dumps(order, ensure_ascii=False), revision))
+
+
         return source_id
 
-    def locate(self, source_id: str, quote: str) -> list[dict]:
-        if not quote:
-            return []
-        source = self.store.source(source_id)
-        result, cursor = [], 0
-        while (start := source["text"].find(quote, cursor)) >= 0:
-            result.append(
-                {
-                    "kind": "evidence",
-                    "id": uuid4().hex,
-                    "source_id": source_id,
-                    "source_hash": source["hash"],
-                    "start": start,
-                    "end": start + len(quote),
-                    "quote": quote,
-                }
-            )
-            cursor = start + 1
-        return result
+    def locate(self, source_id: str, quotes: list[str], *, limit_per_quote: int = 20) -> list[dict]:
+        from .source_location import locate_text
+        return locate_text(self.store.source(source_id)["text"], quotes, limit_per_quote)
 
     def schema(self) -> dict:
         property_fields = {
             "property_definition": {
                 "required": ["id", "value_type", "cardinality"],
-                "optional": ["target_node_types", "evidence"],
+                "optional": ["target_node_types", "evidence", "semantic", "symmetric"],
             },
             "property_value": {
-                "required": ["id", "node_id", "property_id", "value", "event_id"],
-                "optional": ["anchor_basis", "applies_to", "scope", "holder_id",
-                             "disclosure", "evidence"],
-            },
-            "property_retraction": {
-                "required": ["id", "target_id", "reason"],
-                "optional": ["evidence"],
+                "required": ["node_id", "property_id", "value", "event_id"],
+                "optional": ["id", "anchor_basis", "applies_to", "scope", "holder_id",
+                             "disclosure", "evidence", "valid_from", "valid_to", "category"],
             },
         }
         return {
-            "version": 5,
-            "schema_version": 5,
-            "contract_version": "graph-nesting/2",
+            "version": GRAPH_SCHEMA_VERSION,
+            "schema_version": GRAPH_SCHEMA_VERSION,
+            "contract_version": "graph-nesting/11",
             "property_contract_version": PROPERTY_CONTRACT_VERSION,
+            "item_possession_rule": "活动物品须有当前world持有者：合法节点或显式无/未知。定义semantic=item_holder，默认属性名持有者；认知holder_id不替代。",
+            "state_storage": "节点只存当前版本；属性值以valid_from/valid_to自身区间表示状态。新状态关闭旧值区间再追加；录入错误用correct/delete直接修正。",
+            "property_interval": {"shape": {"source_id": "原文ID", "start": "Unicode坐标", "event_id": "可选锚点"},
+                                  "bounds": "[valid_from,valid_to)，valid_to=null表示继续有效"},
+            "rollback": "rollback_to(source_id,start,expected_revision,reason)保留该点，删除后续并清理引用；不重放节点旧版本。",
+            "event_scene_rule": "活动事件须经包含路径归属同语境活动场景；动作必须直属恰好一个同语境活动事件，不能含子项。events不得成环。",
+            "action_rule": "action按需提取，有独立A编号，支持披露、引文、参与者和可选发生区间；不由程序拆分所有事件。",
+            "property_identifiers": "新取值可省id由程序分配PVn；已有取值更新用其现有id；定义id仍为语义属性名。",
             "property_record_kinds": list(PROPERTY_RECORD_KINDS),
             "property_record_fields": property_fields,
             "property_records": property_fields,
             "property_effect_ops": list(PROPERTY_EFFECT_OPS),
             "property_state_cells": list(PROPERTY_STATE_CELL_KINDS),
-            "property_value_types": ["string", "number", "boolean", "node", "either"],
+            "property_value_types": ["string", "number", "boolean", "node", "either", "any"],
             "property_cardinalities": ["one", "many"],
-            "property_candidate_staging": {
-                "precheck": "Operations.property_precheck(records, expected_revision)",
-                "propose": "Operations.property_propose(records, expected_revision, source, note)",
-                "accept": "human-only Operations.property_accept(id, version)",
-                "reject": "human-only Operations.property_reject(id, version)",
-                "agent_tool_args": {
-                    "property_precheck": ["records", "expected_revision", "note"],
-                    "property_propose": ["records", "expected_revision", "note"],
-                    "source": "可省略；无论传入什么，代理桥接固定记为 model",
-                },
-                "model_access": "propose_only",
-                "model_may_accept": False,
-                "model_can_accept": False,
-                "model_may_delete": False,
-                "tools": ["property_precheck", "property_propose"],
+            "property_symmetry": "property_definition.symmetric为严格布尔值，默认false；true表示关系本身对称，不补写反向取值。",
+            "extraction_submission": {
+                "preview": "Operations.preview_extraction(source_id, result, start, end)",
+                "submit": "Operations.submit_extraction(source_id, result, start, end)",
+                "behavior": "同一对话任务提取与自审；程序校验完整图与属性草稿后自动入库，并保留内部审计。",
                 "records": list(PROPERTY_RECORD_KINDS),
             },
             "property_evidence": {
@@ -167,58 +153,41 @@ class GraphService:
                 },
                 "exactly": ["source_id", "quote"],
                 "quote_rule": "the quote must occur exactly once in the accepted source text; unique exact substring only",
-                "staged_graph_evidence_ids": "not valid here; property evidence never references graph evidence objects (for example a staged ev1 handle) staged in the agent workspace",
-            },
-            "property_two_stage_gate": {
-                "order": [
-                    "1. graph candidate is proposed from the private graph workspace",
-                    "2. a human accepts the graph candidate",
-                    "3. property precheck/propose run against the now accepted graph",
-                ],
-                "graph_first": "Property records may only be proposed after the graph objects they reference are human-accepted; graph and property records are never submitted as one combined candidate.",
-                "property_scope": "property_precheck/property_propose validate only against the accepted graph, never against the agent's private graph workspace.",
-                "pending_graph_review": "If property records reference graph objects staged in the same private workspace (node_id, event_id, an event-boundary TimeRef, or a node-valued state/effect value), the agent tools return a PENDING_GRAPH_REVIEW diagnostic and next_action instead of referential errors, and no property candidate is created.",
             },
             "object_kinds": ["node", "context", "timeline", "source_order"],
             "node_types": [
-                "person", "item", "location", "event", "scene", "storyline", "group", "other"
+                "person", "item", "location", "event", "action", "scene", "big_event", "storyline", "group", "other"
             ],
             "time_bound_states": ["known", "unknown", "unbounded"],
-            "review": "预检无 error 后仅生成待审候选；人工接受才进入正式图",
+            "validation": "引文、结构及预检通过后经 Operations 自动采用；模型存疑和程序诊断保留于审计。",
             "fields": {
-                "node": {"required": ["kind", "id", "node_type", "name"], "optional": ["aliases", "subtype", "context_id", "identity_note", "provisional_name", "occurrence", "disclosure", "evidence", "retracted", "participants", "predecessors", "successors", "events", "source_marks"]},
+                "node": {"required": ["kind", "id", "node_type", "name"], "optional": ["aliases", "subtype", "context_id", "identity_note", "occurrence", "disclosure", "completion", "evidence", "evidence_spans", "retracted", "participants", "predecessors", "successors", "events", "source_marks"]},
                 "context": {"required": ["kind", "id", "label", "context_type"], "optional": ["parent_id", "holder_id"]},
                 "timeline": {"required": ["kind", "id", "label"], "optional": ["context_id", "calendar"]},
                 "source_order": {"required": ["kind", "id", "source_id", "ordinal"], "optional": ["context_id"]},
             },
             "rules": [
                 "property_* 记录的 evidence 恰为 {source_id, quote}：source_id 须为已接受来源，quote 须在该来源原文中恰好出现一次；不得引用图证据对象ID或私有句柄。",
-                "属性两阶段门槛：先由私有图草稿 graph_propose 并由人工接受图候选，之后属性分析才能对已接受图 precheck/propose；属性记录引用私有图草稿ID时工具返回 PENDING_GRAPH_REVIEW，不创建属性候选，也不与图记录合并成一个候选。",
             ],
             "examples": {
                 "node": {"kind": "node", "id": "p1", "node_type": "person", "name": "甲"},
                 "property_definition": {
-                    "kind": "property_definition", "id": "holder", "value_type": "node",
+                    "kind": "property_definition", "id": "持有者", "value_type": "either",
                     "cardinality": "one",
-                    "target_node_types": ["person"],
                 },
                 "property_value": {
-                    "kind": "property_value", "id": "key-holder-at-e1",
-                    "node_id": "key", "property_id": "holder", "value": "p1",
+                    "kind": "property_value",
+                    "node_id": "key", "property_id": "持有者", "value": "p1", "scope": "world",
                     "event_id": "e1", "anchor_basis": "model",
                     "disclosure": {"source_id": "s1", "start": 120},
                     "evidence": {"source_id": "s1", "quote": "原文逐字引文"},
-                },
-                "property_retraction": {
-                    "kind": "property_retraction", "id": "retract-holder",
-                    "target_id": "key-holder-at-e1", "reason": "登记错误",
                 },
                 "evidence_link": {
                     "evidence_id": "q1", "role": "supports",
                 },
                 "evidence": {
                     "kind": "evidence", "id": "q1", "source_id": "source-id",
-                    "source_hash": "sha256-of-exact-source", "start": 0, "end": 2,
+                    "start": 0, "end": 2,
                     "quote": "甲说",
                 },
                 "source_order": {"kind": "source_order", "id": "order1", "source_id": "source-id", "ordinal": 1},
@@ -240,11 +209,13 @@ class GraphService:
             return [], [_issue("FORMAT", item["msg"], ".".join(map(str, item["loc"]))) for item in exc.errors()]
         return _as_dicts(parsed), []
 
-    def precheck(self, objects: list[dict], expected_revision: int, *, allow_cross_family: bool = False) -> list[dict]:
+    def precheck(self, objects: list[dict], expected_revision: int, *, allow_cross_family: bool = False,
+                 property_records: list[dict] | None = None,
+                 _snapshot: dict | None = None, _accepted_properties: list[dict] | None = None) -> list[dict]:
         normalized, issues = self._normalized(objects)
         if issues:
             return issues
-        snapshot = self.store.snapshot()
+        snapshot = _snapshot if _snapshot is not None else self.store.snapshot()
         if expected_revision != snapshot["revision"]:
             issues.append(_issue("REVISION", "正式资料版本已变化，请刷新后重新预检"))
         if not normalized:
@@ -255,6 +226,16 @@ class GraphService:
             issues.append(_issue("DUPLICATE_ID", "同一候选内对象 ID 不得重复"))
         current = {item["id"]: item for item in snapshot["objects"]}
         merged = current | {item["id"]: item for item in normalized}
+        from .containment_refs import event_scene_issues, storyline_issues
+
+        issues.extend(event_scene_issues(list(merged.values())))
+        issues.extend(storyline_issues(list(merged.values()), snapshot))
+        from .item_possession import item_possession_issues
+        from .property_store import PropertyStore
+
+        accepted_properties = (_accepted_properties if _accepted_properties is not None else
+                               PropertyStore(self.store).accepted_records())
+        issues.extend(item_possession_issues(list(merged.values()), accepted_properties + (property_records or [])))
         groups: dict[str, dict[str, dict]] = defaultdict(dict)
         for item in merged.values():
             groups[item["kind"]][item["id"]] = item
@@ -273,8 +254,8 @@ class GraphService:
             exists("timeline", ref["timeline_id"], owner, "timeline_id")
             if ref["form"] == "event_boundary":
                 event = exists("node", ref["event_id"], owner, "event_id")
-                if event and event["node_type"] != "event":
-                    issues.append(_issue("TIME_REF", "事件边界须引用事件节点", owner))
+                if event and event["node_type"] not in {"event", "action"}:
+                    issues.append(_issue("TIME_REF", "发生边界须引用事件或动作节点", owner))
 
         def check_extent(extent: dict | None, owner: str) -> None:
             if not extent:
@@ -295,24 +276,24 @@ class GraphService:
             previous = current.get(obj_id)
             if previous and previous["kind"] != kind:
                 issues.append(_issue("ID_KIND", "对象 ID 不可跨类型复用", obj_id))
-            if previous and kind == "source_order" and previous != item:
+            if _snapshot is None and previous and kind == "source_order" and previous != item:
                 issues.append(_issue("SOURCE_ORDER_IMMUTABLE", "已登记阅读顺序不可改写；请使用新的语境", obj_id))
-            if previous and obj_id in {"canon", "story"} and previous != item:
+            if _snapshot is None and previous and obj_id in {"canon", "story"} and previous != item:
                 issues.append(_issue("INFRA_IMMUTABLE", "正篇语境和故事时间轴标识不可修订", obj_id))
             if kind == "node":
                 exists("context", item["context_id"], obj_id, "context_id")
                 check_extent(item.get("occurrence"), obj_id)
-                if item.get("participants") and item["node_type"] != "event":
-                    issues.append(_issue("PARTICIPANTS", "只有事件节点记录参与者", obj_id))
-                if item.get("events") and item["node_type"] not in {"event", "scene", "storyline"}:
-                    issues.append(_issue("COMPOSITE", "只有事件、场景、故事线可以包含子事件", obj_id))
+                if item.get("participants") and item["node_type"] not in {"event", "action"}:
+                    issues.append(_issue("PARTICIPANTS", "只有事件和动作记录参与者", obj_id))
+                if item.get("events") and item["node_type"] not in {"event", "scene", "big_event", "storyline"}:
+                    issues.append(_issue("COMPOSITE", "只有主要故事、大事件、场景、事件可以包含子项", obj_id))
                 for child in item.get("events") or []:
                     target = merged.get(child)
                     if not target or target["kind"] != "node":
                         issues.append(_issue("REF", "子事件须引用已有或本批节点", obj_id))
                         continue
-                    if target.get("node_type") not in {"event", "scene"}:
-                        issues.append(_issue("COMPOSITE", "子事件须是事件或场景", obj_id))
+                    if target.get("node_type") not in {"event", "scene", "action", "big_event"}:
+                        issues.append(_issue("COMPOSITE", "子项须是大事件、场景、事件或动作，并遵循五层直属关系", obj_id))
                     if child == obj_id:
                         issues.append(_issue("COMPOSITE", "节点不能包含自己", obj_id))
                 if (item.get("predecessors") or item.get("successors")) and item["node_type"] != "event":
@@ -343,9 +324,21 @@ class GraphService:
                     elif not isinstance(quote, str) or not quote:
                         issues.append(_issue("EVIDENCE", "节点证据须有原文引文", obj_id))
                     else:
-                        text = self.store.source(source_id)["text"]
+                        text = sources[source_id].get("text")
+                        if text is None:
+                            text = self.store.source(source_id)["text"]
                         if quote not in text:
                             issues.append(_issue("EVIDENCE", "节点引文不是原文子串", obj_id))
+                for span in item.get("evidence_spans") or []:
+                    source_id = span["source_id"]
+                    if source_id not in sources:
+                        issues.append(_issue("SOURCE", "节点证据跨度来源不存在", obj_id))
+                        continue
+                    text = sources[source_id].get("text")
+                    if text is None:
+                        text = self.store.source(source_id)["text"]
+                    if span["end"] > len(text) or text[span["start"]:span["end"]] != span["quote"]:
+                        issues.append(_issue("EVIDENCE_SPAN", "节点证据跨度与原文位置不符", obj_id))
                 disclosure = item.get("disclosure")
                 if disclosure is not None:
                     source_id = disclosure.get("source_id")
@@ -356,6 +349,13 @@ class GraphService:
                         length = sources[source_id].get("length", 0)
                         if not isinstance(start, int) or start < 0 or start >= length:
                             issues.append(_issue("DISCLOSURE", "披露位置超出原文范围", obj_id))
+                completion = item.get("completion")
+                if completion is not None:
+                    source_id, start = completion.get("source_id"), completion.get("start")
+                    if source_id not in sources:
+                        issues.append(_issue("SOURCE", "主要故事闭合来源不存在", obj_id))
+                    elif type(start) is not int or not 0 <= start <= sources[source_id].get("length", 0):
+                        issues.append(_issue("COMPLETION", "主要故事闭合边界超出原文范围", obj_id))
             elif kind == "context":
                 if item.get("parent_id"):
                     exists("context", item["parent_id"], obj_id, "parent_id")
@@ -372,6 +372,21 @@ class GraphService:
 
         self._check_context_cycles(groups, issues)
         self._check_source_order(groups, issues)
+        return issues
+
+    def validate_snapshot(self, snapshot: dict, records: list[dict]) -> list[dict]:
+        """Read-only validation of active objects at an already captured revision."""
+        active, issues = [], []
+        for obj in snapshot["objects"]:
+            if obj.get("retracted"):
+                continue
+            normalized, diagnostics = self._normalized([obj])
+            issues.extend(row | {"object_id": obj.get("id"), "field": row.get("object_id")}
+                          for row in diagnostics)
+            active.extend(normalized)
+        if active:
+            issues.extend(self.precheck(active, snapshot["revision"], _snapshot=snapshot,
+                                        _accepted_properties=records))
         return issues
 
     def _check_context_cycles(self, groups, issues):
@@ -400,124 +415,3 @@ class GraphService:
             if source_key in seen_sources:
                 issues.append(_issue("SOURCE_ORDER", "同一来源在一条阅读序列中只能登记一次", item["id"]))
             seen_sources[source_key] = item["id"]
-
-    def propose(self, objects, expected_revision, *, source, note, run_id, parent_candidate_id):
-        normalized, format_issues = self._normalized(objects)
-        if format_issues:
-            raise ValueError("；".join(issue["message"] for issue in format_issues))
-        diagnostics = self.precheck(normalized, expected_revision)
-        errors = [item["message"] for item in diagnostics if item["severity"] == "error"]
-        if errors:
-            raise ValueError("；".join(errors))
-        if source not in {"manual", "model", "correction"}:
-            raise ValueError("候选来源无效")
-        candidate_id = uuid4().hex
-        change = {
-            "id": candidate_id, "objects": normalized, "source": source, "note": note,
-            "run_id": run_id, "parent_candidate_id": parent_candidate_id,
-            "expected_revision": expected_revision, "diagnostics": diagnostics,
-        }
-        with self.store.connect(write=True) as db:
-            db.execute(
-                "INSERT INTO candidates(id,data,status,version,expected_revision) VALUES (?,?,?,?,?)",
-                (candidate_id, json.dumps(change, ensure_ascii=False), "pending", 1, expected_revision),
-            )
-        return candidate_id
-
-    def candidates(self, status: str | None = None) -> list[dict]:
-        if status is not None and status not in {"pending", "accepted", "rejected"}:
-            raise ValueError("候选状态无效")
-        sql = "SELECT * FROM candidates" + (" WHERE status=?" if status else "") + " ORDER BY created_at DESC,rowid DESC"
-        with self.store.connect() as db:
-            rows = db.execute(sql, (status,) if status else ()).fetchall()
-        return [self._candidate_row(row) for row in rows]
-
-    @staticmethod
-    def _candidate_row(row) -> dict:
-        return json.loads(row["data"]) | {
-            "status": row["status"], "version": row["version"],
-            "expected_revision": row["expected_revision"],
-            "result_revision": row["result_revision"], "created_at": row["created_at"],
-        }
-
-    def candidate(self, candidate_id: str) -> dict:
-        with self.store.connect() as db:
-            row = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
-        if not row:
-            raise ValueError("候选不存在")
-        return self._candidate_row(row)
-
-    def edit_candidate(self, candidate_id: str, objects: list[dict], version: int) -> dict:
-        normalized, format_issues = self._normalized(objects)
-        if format_issues:
-            raise ValueError("；".join(issue["message"] for issue in format_issues))
-        with self.store.connect(write=True) as db:
-            row = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
-            if not row or row["status"] != "pending" or row["version"] != version:
-                raise ValueError("候选状态或版本已变化")
-            change = json.loads(row["data"])
-            diagnostics = self.precheck(normalized, change["expected_revision"])
-            errors = [item["message"] for item in diagnostics if item["severity"] == "error"]
-            if errors:
-                raise ValueError("；".join(errors))
-            change["objects"] = normalized
-            change["diagnostics"] = diagnostics
-            db.execute(
-                "UPDATE candidates SET data=?,version=version+1 WHERE id=?",
-                (json.dumps(change, ensure_ascii=False), candidate_id),
-            )
-        return self.candidate(candidate_id)
-
-    def select_operations(self, candidate_id: str, keep_ids: list[str], version: int) -> dict:
-        candidate = self.candidate(candidate_id)
-        if len(keep_ids) != len(set(keep_ids)):
-            raise ValueError("保留对象 ID 不能重复")
-        available = {item["id"] for item in candidate["objects"]}
-        if not keep_ids or not set(keep_ids) <= available:
-            raise ValueError("须至少保留一条该候选内的操作")
-        return self.edit_candidate(
-            candidate_id,
-            [item for item in candidate["objects"] if item["id"] in keep_ids],
-            version,
-        )
-
-    def accept(self, candidate_id: str, version: int) -> int:
-        with self.store.connect(write=True) as db:
-            row = db.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
-            if not row:
-                raise ValueError("候选不存在")
-            if row["status"] != "pending" or row["version"] != version:
-                raise ValueError("候选状态或版本已变化")
-            change = json.loads(row["data"])
-            revision = int(db.execute("SELECT value FROM meta WHERE key='revision'").fetchone()[0])
-            if change["expected_revision"] != revision:
-                raise ValueError("正式资料版本已变化，请重新建立候选")
-            errors = [d["message"] for d in self.precheck(change["objects"], revision) if d["severity"] == "error"]
-            if errors:
-                raise ValueError("；".join(errors))
-            audit = []
-            for obj in change["objects"]:
-                before = db.execute("SELECT kind,data FROM objects WHERE id=?", (obj["id"],)).fetchone()
-                if before and change["source"] != "correction":
-                    raise ValueError("已有对象只能由显式修订候选更新")
-                audit.append({"id": obj["id"], "before": dict(before) if before else None, "after": obj})
-            next_revision = revision + 1
-            for obj in change["objects"]:
-                db.execute(
-                    "INSERT INTO objects VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET kind=excluded.kind,data=excluded.data,accepted_revision=excluded.accepted_revision",
-                    (obj["id"], obj["kind"], json.dumps(obj, ensure_ascii=False), next_revision),
-                )
-            db.execute("UPDATE meta SET value=? WHERE key='revision'", (str(next_revision),))
-            db.execute("UPDATE candidates SET status='accepted',result_revision=? WHERE id=?", (next_revision, candidate_id))
-            db.execute(
-                "INSERT INTO revisions(revision,candidate_id,data) VALUES (?,?,?)",
-                (next_revision, candidate_id, json.dumps({"operations": change["objects"], "audit": audit}, ensure_ascii=False)),
-            )
-        return next_revision
-
-    def reject(self, candidate_id: str, version: int) -> None:
-        with self.store.connect(write=True) as db:
-            row = db.execute("SELECT status,version FROM candidates WHERE id=?", (candidate_id,)).fetchone()
-            if not row or row["status"] != "pending" or row["version"] != version:
-                raise ValueError("候选状态或版本已变化")
-            db.execute("UPDATE candidates SET status='rejected' WHERE id=?", (candidate_id,))

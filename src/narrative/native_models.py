@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-_NODE_PRIORITY = {"person": 0, "group": 1, "storyline": 2, "event": 3}
+_NODE_PRIORITY = {"person": 0, "group": 1, "storyline": 2, "big_event": 3, "event": 3, "action": 4}
 
 
 def _node(item: dict, labels: dict[str, dict], positions: dict[str, tuple[float, float]]) -> dict:
@@ -99,9 +99,9 @@ class CanvasState:
             view["nodes"],
             key=lambda item: (_NODE_PRIORITY.get(item["node_type"], 4), item["name"], item["id"]),
         )
-        anchors = [item for item in candidates if item["node_type"] in {"person", "group", "storyline"}]
+        anchors = [item for item in candidates if item["node_type"] in {"person", "group", "storyline", "big_event"}]
         if prefer_events:
-            anchors = [item for item in candidates if item["node_type"] in {"storyline", "scene", "event"}]
+            anchors = [item for item in candidates if item["node_type"] in {"storyline", "big_event", "scene", "event", "action"}]
         if not anchors:
             anchors = candidates
         for item in anchors[:limit]:
@@ -180,7 +180,7 @@ class CanvasState:
         semantics = None if filters.get("semantics") is None else set(filters["semantics"])
         nodes = {key: value for key, value in self.nodes.items()
                  if (types is None or value["node_type"] in types)
-                 and (filters.get("max_event_depth") is None or value["node_type"] != "event"
+                 and (filters.get("max_event_depth") is None or value["node_type"] not in {"event", "action"}
                       or value.get("depth") is None or value["depth"] <= filters["max_event_depth"])}
         edges = [e for e in self.edges.values()
                  if e["subject_id"] in nodes and e["object_id"] in nodes
@@ -230,7 +230,7 @@ def node_detail(
                 related_ids.add(ref)
     related = [_node(by_id[ref], labels, {}) for ref in related_ids]
     related.sort(key=lambda item: (
-        0 if item["node_type"] in {"event", "scene", "storyline", "group"} else 1,
+        0 if item["node_type"] in {"event", "action", "scene", "big_event", "storyline", "group"} else 1,
         item["name"], item["id"],
     ))
     from .order_ids import label_id as make_label
@@ -245,13 +245,6 @@ def node_detail(
         "uncertainties": view.get("uncertainties", []),
         "pending_excluded": view.get("pending_excluded", True),
     }
-
-
-def candidate_summary(candidate: dict) -> dict:
-    return {key: candidate.get(key) for key in (
-        "id", "status", "version", "source", "note", "created_at",
-        "expected_revision", "result_revision", "parent_candidate_id", "run_id",
-    )} | {"object_count": len(candidate.get("objects", []))}
 
 
 def search_result(view: dict, labels: dict[str, dict], types: list[str]) -> dict:

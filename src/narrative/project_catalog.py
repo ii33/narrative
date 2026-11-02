@@ -124,16 +124,23 @@ def create_graph_project(path: str | Path) -> GraphOperations:
     from .project_package import layout, write_project
 
     entry = Path(path).resolve()
-    if entry.exists():
-        raise ValueError("工程入口已存在，不能覆盖")
-    target = layout(entry)
-    if target.root.exists() and any(target.root.iterdir()):
-        raise ValueError("工程数据目录已存在，不能覆盖")
-    target.db.parent.mkdir(parents=True, exist_ok=True)
-    ops = GraphOperations(target.db, create=True)
-    info = ops.graph_project_info()
-    write_project(entry, title=info["title"], project_id=info["project_id"], locations=target)
-    return ops
+    try:
+        if entry.exists():
+            raise ValueError("工程入口已存在，不能覆盖")
+        target = layout(entry)
+        if target.root.exists() and (not target.root.is_dir() or any(target.root.iterdir())):
+            raise ValueError("工程数据路径已存在，不能覆盖")
+        target.db.parent.mkdir(parents=True, exist_ok=True)
+        ops = GraphOperations(target.db, create=True)
+        info = ops.graph_project_info()
+        write_project(entry, title=info["title"], project_id=info["project_id"], locations=target)
+        return ops
+    except PermissionError as exc:
+        blocked = exc.filename or str(entry.parent)
+        raise ValueError(
+            f"无法在所选位置创建工程，没有写入权限：{blocked}。"
+            "请选择可写位置；若普通用户目录也失败，请检查应用运行环境。"
+        ) from exc
 
 
 def open_graph_project(path: str | Path) -> GraphOperations:

@@ -1,156 +1,18 @@
-# Node property and event change contract (v5)
+# 属性状态合同（schema 10）
 
-Status: implemented in the v5 project path and verified by the focused local
-suite. Live compatible-model acceptance remains incomplete.
+完整存储合同见 [数据模型](DATA_MODEL.md)。属性只存当前定义和取值自身的有效区间，不存撤回记录或可重放的节点修订。
 
-This contract replaces ordinary `attribute`, `relation`, and `participation`
-assertions in new graph projects. Stable graph node IDs remain the identity of
-people, items, places, and events. Temporal and containment assertions continue
-to describe event order and reading organization. Opening a v4 project as v5
-must fail explicitly; neither opening nor failure may alter the old file.
-
-## Authoritative records
-
-The following JSON records are append-only after human review. `id` is stable
-and unique. They are not a second mutable copy of node state.
-
-| Kind | Required fields | Meaning |
-| --- | --- | --- |
-| `property_definition` | `id`, `value_type`, `cardinality`, `persistence` | `value_type` is `string`, `number`, `boolean`, or `node`; `cardinality` is `one` or `many`; `persistence` is `until_changed` or `instant`. Optional `owner_node_types` and `target_node_types` constrain references. |
-| `property_initial` | `id`, `node_id`, `property_id`, `state` | Initial local state for one node property. At most one active initial record per pair. |
-| `property_observation` | `id`, `node_id`, `property_id`, `at`, `state` | Baseline observed at a story `TimeRef`; observation does not assert an acquisition or other change event. |
-| `event_change` | `id`, `event_id`, `boundary`, `effects` | One atomic event batch at `start` or `end`. Each effect names `node_id`, `property_id`, `op`, optional `value`, optional `expected`. |
-| `property_retraction` | `id`, `target_id`, `reason` | System correction of an earlier property record; history remains readable and projections rebuild without that record. |
-
-`state` is a tagged cell: `{"kind":"known","value":...}`,
-`{"kind":"unknown"}`, or `{"kind":"absent"}`. The absence of any applicable
-record is returned as `unrecorded`, never as `unknown` or `absent`. A known
-multivalue `[]` is a recorded empty collection and differs from all three.
-`value` of a node reference is its stable node ID; a multivalue property uses a
-list of unique typed values. `target_node_types` applies only to node references.
-
-Effect `op` is `set`, `add`, `remove`, `unknown`, or `absent`. `set` replaces a
-single value or whole collection. `add` and `remove` require a multivalue
-definition. Optional `expected` is the complete old state cell, checked before
-any member of the batch is committed. Every record may carry an optional
-`evidence` object with `source_id` and an exact unique `quote` for provenance.
-
-## Scope, cognition, and disclosure (2026-10-21)
-
-`property_initial`, `property_observation`, and `event_change` accept three optional
-fields:
-
-| Field | Meaning |
+| 记录 | 字段 |
 | --- | --- |
-| `scope` | `world` (default), `belief`, `claim`, or `knowledge` |
-| `holder_id` | Person who holds the belief/claim/knowledge; forbidden for `world` |
-| `disclosure` | `{source_id, start}`; same disclosure shape as graph assertions |
+| `property_definition` | `id`、`value_type`、`cardinality`，可选 `target_node_types`、`semantic`、`symmetric` |
+| `property_value` | `id`、`node_id`、`property_id`、`value`、`event_id`、`valid_from`、`valid_to`、作用域与逐字证据 |
 
-Semantics:
+有效边界为 `{source_id, start, event_id?}`，按正式来源顺序和 Unicode 偏移比较。区间为 `[valid_from, valid_to)`；空终点表示继续有效。正常状态变化关闭旧区间并追加新值，补录早先披露仍按其原文位置排序。同一作用域、认知持有人和属性分组内，单值状态按时间衔接；人物关系的不同对象独立有效，不跨对象自动替换。
 
-- `world` records describe the story world and must not have `holder_id`.
-- `belief` records describe what a person believes; `claim` records describe what a
-  person said (which may be a lie and is not automatically a belief); `knowledge`
-  records describe what the system records the person as knowing. None of them
-  verifies the proposition against world truth.
-- World changes never rewrite belief records. A character can believe `健康` while
-  the world says `受伤`; both coexist and are evaluated separately.
-- `property_state(..., scope="belief", holder_id="p2")` evaluates the belief
-  projection; omitting scope evaluates the world projection.
-- `property_history(..., scope=..., holder_id=...)` returns the records for that
-  scope; a retraction applies only to its target record.
-- `disclosure_cut={source_id, start}` hides records whose disclosure is later than
-  the cut. Records without disclosure are `unknown` at a disclosure cut, not
-  silently visible. `property_state` returns a `disclosure` object listing
-  `hidden` and `unknown` record IDs.
+录入错误使用 `correct_property` 直接编辑错误取值，或 `delete_property_records` 删除错误行；不把录错伪装成剧情变化。`expire_properties` 原子设置已选取值的终点，不追加依赖目标 ID 的失效行。定义更名、合并与分类修改直接改当前定义和取值引用。属性合并必须保持定义兼容：方向性 `symmetric`、值类型、基数、`semantic` 和目标节点类型范围一致；不能因指向同一人就把不同关系性质当作同义项。不同定义须先经明确查证修正，合并不会自动继承目标差异。
 
-The E0–E3 acceptance case is in `tests/test_property_cognition.py`: world injury,
-stale belief, learning event, world recovery; world and belief stay separate, and
-a third character with no records is `unrecorded`, not “does not know”. The same
-file checks the disclosure cut and `as_of_revision` visibility.
+`property_state`、`property_disclosure_state` 依据原文时间点读取区间。`property_history` 是仍保留的实际取值区间序列，不是数据库修订回放。节点资料只保留当前版本，`revision` 仅用于并发检查。
 
-`property_state` hides filtered record IDs by default. Authors/editors can request
-`include_diagnostics=True` (CLI `--diagnostics`) to get the `hidden` / `unknown`
-record IDs; reader and character views only receive `{cut, restricted}`. A later
-record that is hidden at the cut must not change the reader-visible result, and
-`as_of_revision` constrains the whole response, not just the final value.
+所有写入经 `Operations` 静态验证完整拟写状态后原子提交；不设置人工审批队列。活动事件须属于活动场景；活动物品须有当前 world 持有者节点或明确的“无”“未知”。认知 `holder_id` 不能替代物品持有者。
 
-### Dependencies and eligibility
-
-`property_initial`, `property_observation`, and `event_change` may declare
-`derived_from` / `support_groups` with typed refs:
-
-```json
-{"kind": "assertion", "id": "a17"}
-{"kind": "property_record", "id": "p42"}
-```
-
-`support_groups` means “all refs in one group, any one group is enough”. No group
-means valid unless retracted. Precheck rejects dangling refs and dependency
-cycles; cross-family refs must go through `change_precheck`. Unsupported derived
-records are excluded from `property_state`, but remain in `property_history` and
-in old `as_of_revision` views. “Unsupported” is not a retraction and does not
-imply the content is false.
-
-Automatic knowledge propagation is still not implemented: a world change or a
-false testimony does not rewrite a character's belief; only records that depend
-on an invalid premise lose eligibility.
-
-## Disclosure-only observations
-
-`property_observation` may carry either a story-time `at` or a `disclosure`
-position, but not neither:
-
-- `at` present: story-time projection (`property_state`);
-- `disclosure` present and `at` absent: disclosure projection
-  (`property_disclosure_state`);
-- both absent: validation error.
-
-`property_disclosure_state(node_id, property_id, disclosure_cut, scope=..., holder_id=...)`
-orders initial/observation records by `source_order` + source offset and applies
-only records revealed at or before the cut. It deliberately ignores story time.
-The normal `property_state` ignores disclosure-only records, so a fact with no
-story-time anchor does not become an initial value or an event change.
-
-The mapper's `disclosure_only=True` mode strips model-provided event anchors and
-records facts at their exact evidence position. This is the preferred path for
-"record what the reader sees" before story time is established.
-
-## Query and review
-
-`Operations.property_precheck(records, expected_revision)` returns diagnostics.
-`property_propose(...)` stores a pending candidate; `property_accept(id,version)`
-atomically validates and appends all records or none; `property_reject` retains
-the rejected candidate. UI, CLI, and model agents use these Operations methods.
-The model may only propose; it cannot accept or physically delete records.
-
-`Operations.property_state(node_id, property_id, at, as_of_revision=None)`
-returns a tagged state and supporting record IDs. `at` is a story `TimeRef`
-(number, datetime, or event boundary); omitted `at` asks for a current view
-which must report unresolved cross-line ordering instead of using insertion
-order. `property_history` returns the accepted records and retractions relevant
-to that pair. Authoritative records are stored once; query results are rebuilt
-projections and may be cached only as invalidatable derived data.
-`property_world_state(at, as_of_revision=None)` aggregates those node-local
-projections; there is no separately writable world-state table.
-
-The pure core consumes plain graph and property snapshots. It uses the reviewed
-event boundary partial order, including numeric coordinates, and never invents
-ordering between branches, unrelated timelines, or uncertain intervals. An
-incomparable conflicting update yields `conflict` with alternatives and record
-IDs. A baseline observed later than a query cannot be moved to world origin.
-For `until_changed`, the most recent provably ordered record persists; `instant`
-is visible only at its anchor. Reverse relations, such as a person's held items,
-are queries over the authoritative item `holder` property, not duplicated writes.
-
-Implementation boundary for parallel work: `property_core.validate_records(
-records, graph_snapshot, accepted_records) -> list[dict]` returns diagnostics
-with `severity`, `code`, `message`, and optional `object_id`;
-`property_core.state_at(graph_snapshot, accepted_records, node_id, property_id,
-at=None) -> dict` returns a `state` cell, `record_ids`, and `reason`;
-`property_core.history(accepted_records, node_id, property_id) -> list[dict]`.
-The storage adapter owns revision filtering and calls these functions; the core
-never imports SQLite, Qt, model gateways, or Operations.
-
-The v5 property system does not implement cognitive masks, information flow
-policies, or an automatic world-rule engine.
+按原文时间点撤销使用 `rollback_preview` / `rollback_to`：保留边界点，删除后续事实、清理引用并重新开放被截断的旧区间。原文、附件与原始任务输出不删除；节点旧名称等旧编辑版本无法恢复，因为不存储这些副本。

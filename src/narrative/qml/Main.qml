@@ -84,10 +84,8 @@ ApplicationWindow {
         {key: "browse", label: "数据浏览", hint: "按分类看节点"},
         {key: "relations", label: "关系图", hint: "人物与关系"},
         {key: "source", label: "原文", hint: "导入与回查"},
-        {key: "extract", label: "提取", hint: "按章提取"},
-        {key: "property", label: "属性", hint: "披露序列"},
-        {key: "review", label: "审核", hint: "候选接受"},
-        {key: "model", label: "模型", hint: "服务与运行"}
+        {key: "static_check", label: "静态检查", hint: "约束与问题定位"},
+        {key: "project_settings", label: "工程设置", hint: "提取粒度与模型"}
     ]
 
     function goTo(key) {
@@ -96,9 +94,18 @@ ApplicationWindow {
 
     // 从节点/属性跳回原文：切到原文页并把引文位置滚到眼前。
     function openSource(sourceId, start) {
+        app.openSourceSpan(sourceId, start, -1)
+    }
+
+    function openSourceSpan(sourceId, start, end) {
         if (!sourceId) return
         currentPage = "source"
-        sourcePage.load(sourceId, start)
+        sourcePage.load(sourceId, start, end)
+    }
+
+    function focusBrowseNode(nodeId, target) {
+        currentPage = "browse"
+        browsePage.focusIssue(nodeId, target || ({}))
     }
 
     function toast(message, isError) {
@@ -122,14 +129,40 @@ ApplicationWindow {
         function onResultReady(kind, payload) {
             resultKinds = resultKinds.concat([kind])
             if (kind === "project") {
+                errorText = ""
                 project = payload.project || ({})
                 notice = "已打开 " + (project.title || project.name || "工程")
                 enterWorkspace()
+            } else if (kind === "project_renamed") {
+                project = payload.project || project
+                notice = "工程名称已更新为 " + (project.title || "")
+                bridge.loadRecentProjects()
             } else if (kind === "project_closed") {
                 project = ({})
                 mode = "launcher"
-            } else if (kind === "node_edit" || kind === "extraction_commit" || kind === "review") {
-                notice = "修订号 " + (payload.revision || project.revision || "")
+                assistantOpen = false
+            } else if (kind === "static_check_target" && !payload.superseded) {
+                if (payload.kind === "source") app.openSourceSpan(payload.source_id, payload.start, payload.end)
+                else app.focusBrowseNode(payload.node_id, payload)
+            } else if (kind === "conversation_progress") {
+                if (payload.graph_reset_required && payload.revision !== undefined
+                    && (!payload.project_path || bridge.recentProjectKey(payload.project_path) === bridge.recentProjectKey(project.path || ""))) {
+                    var refreshed = ({})
+                    for (var field in project) refreshed[field] = project[field]
+                    refreshed.revision = payload.revision
+                    project = refreshed
+                }
+                if (mode === "workspace" && payload.event === "task_started"
+                    && (!payload.project_path || bridge.recentProjectKey(payload.project_path) === bridge.recentProjectKey(project.path || "")))
+                    assistantOpen = true
+            } else if (kind === "node_edit" || ((kind === "assistant" || kind === "rollback") && payload.graph_reset_required)) {
+                if (payload.revision !== undefined) {
+                    var updated = ({})
+                    for (var key in project) updated[key] = project[key]
+                    updated.revision = payload.revision
+                    project = updated
+                }
+                notice = "修订号 " + (payload.revision !== undefined ? payload.revision : project.revision)
             }
         }
         function onErrorOccurred(kind, message) {
@@ -297,6 +330,7 @@ ApplicationWindow {
                     SplitView.minimumWidth: 520
                     Layout.fillHeight: true
                     spacing: 0
+                    clip: true
 
                     Rectangle {
                         Layout.fillWidth: true
@@ -355,13 +389,11 @@ ApplicationWindow {
                             return 0
                         }
 
-                        BrowsePage { app: app }
+                        BrowsePage { id: browsePage; app: app }
                         RelationPage { app: app }
                         SourcePage { id: sourcePage; app: app }
-                        ExtractPage { app: app }
-                        PropertyPage { app: app }
-                        ReviewPage { app: app }
-                        ModelPage { app: app }
+                        StaticCheckPage { app: app }
+                        ProjectSettingsPage { app: app }
                     }
                 }
 

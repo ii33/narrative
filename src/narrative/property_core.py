@@ -1,4 +1,4 @@
-"""Pure validation and projection for append-only node-property records.
+"""Pure validation and projection for current definitions and value intervals.
 
 This module intentionally has no storage, UI, or model-service dependencies.
 It consumes JSON-shaped dictionaries and the reviewed graph snapshot.
@@ -12,10 +12,6 @@ from typing import Any
 _KINDS = {
     "property_definition",
     "property_value",
-    "property_categorization",
-    "property_merge",
-    "property_rename",
-    "property_retraction",
 }
 # "any" means the shape is not fixed: one property may hold a number, a
 # description and a relative phrase over time.
@@ -27,32 +23,9 @@ _SCOPES = {"world", "cognition", "claim"}
 _COMMON = {"id", "kind", "evidence"}
 _SCOPED_FIELDS = {"scope", "holder_id", "disclosure"}
 _FIELDS = {
-    "property_definition": _COMMON
-    | {"value_type", "cardinality", "target_node_types"},
-    "property_value": _COMMON | _SCOPED_FIELDS
-    | {"node_id", "property_id", "value", "event_id", "anchor_basis", "applies_to",
-       "source", "related_nodes", "category"},
-    # A category move is editorial, not a disclosure: it points at one value
-    # record and says where to show it. No evidence — nothing here comes from
-    # the source text.
-    "property_categorization": _COMMON | {"target_id", "category", "note"},
-    # Two names for one aspect, merged: `alias_id` is read as `target_id`.
-    # Nothing is rewritten; the alias definition and its records stay as they are.
-    "property_merge": _COMMON | {"alias_id", "target_id", "note"},
-    # One aspect under a new name: `from_id` reads as `to_id` from now on.
-    # Also a read-time alias, but the definition moves with it — a rename says
-    # "this aspect is called that", not "these two names are the same aspect".
-    # `to_id` may be a name that did not exist yet; that is the difference.
-    "property_rename": _COMMON | {"from_id", "to_id", "note"},
-    # Two ways to invalidate a record, told apart by `event_id`:
-    #   without it — the record was wrong, it never counted (a correction);
-    #   with it    — the record was true, but from this reading position it is no
-    #                longer part of the state (superseded by a later disclosure).
-    # `basis` says who decided: the structural pass (audit), the review round (review),
-    # or a human.
-    "property_retraction": _COMMON | {
-        "target_id", "reason", "event_id", "disclosure", "basis",
-    },
+    "property_definition": _COMMON | {"value_type", "cardinality", "target_node_types", "semantic", "symmetric"},
+    "property_value": _COMMON | _SCOPED_FIELDS | {"node_id", "property_id", "value", "event_id",
+        "anchor_basis", "applies_to", "source", "related_nodes", "category", "valid_from", "valid_to"},
 }
 
 
@@ -62,7 +35,7 @@ def _record_scope(record: dict) -> str:
 
 
 def _scope_matches(record: dict, scope: str, holder_id: str | None) -> bool:
-    if record.get("kind") in {"property_definition", "property_retraction"}:
+    if record.get("kind") in {"property_definition"}:
         return True
     if _record_scope(record) != scope:
         return False
@@ -85,149 +58,35 @@ def _all_objects(snapshot: dict) -> dict[str, dict]:
 
 
 def _active(records: list[dict]) -> tuple[list[dict], set[str]]:
-    retracted: set[str] = set()
-    for record in records:
-        if isinstance(record, dict) and record.get("kind") == "property_retraction":
-            target = record.get("target_id")
-            if isinstance(target, str):
-                retracted.add(target)
-    # A retraction record cannot itself erase another record, but malformed
-    # cyclic chains are harmless because only target IDs are removed here.
-    return [r for r in records if isinstance(r, dict) and r.get("id") not in retracted], retracted
+    ended = {row["id"] for row in records if isinstance(row.get("id"), str)
+             and row.get("kind") == "property_value" and row.get("valid_to")}
+    return [row for row in records if row.get("id") not in ended], ended
 
 
-def _alias_edges(records: list[dict]) -> dict[str, str]:
-    """One name read as another: a merge and a rename are both read-time aliases."""
-    edges: dict[str, str] = {}
-    for record in records:
-        if not isinstance(record, dict):
+def definition_reference_issues(records: list[dict], nodes: list[dict]) -> list[dict]:
+    """A prospective current value cannot outlive its aspect definition."""
+    active, _ = _active(records)
+    definitions = canonical_definitions(active)
+    retired = {node["id"] for node in nodes if node.get("retracted")}
+    issues = []
+    for row in active:
+        if row.get("kind") != "property_value":
             continue
-        kind = record.get("kind")
-        if kind == "property_merge":
-            source, target = record.get("alias_id"), record.get("target_id")
-        elif kind == "property_rename":
-            source, target = record.get("from_id"), record.get("to_id")
-        else:
+        node_id = row.get("node_id")
+        if isinstance(node_id, str) and node_id in retired:
             continue
-        if isinstance(source, str) and source and isinstance(target, str) and target:
-            edges[source] = target
-    return edges
-
-
-def alias_map(records: list[dict]) -> dict[str, str]:
-    """Alias → canonical name, following chains.
-
-    A merge and a rename both say "read this name as that one"; the difference is
-    what happens to the definition, and that is decided where definitions are
-    built. Chains are followed so `a→b` then `b→c` reads `a` as `c`, and a cycle
-    (only reachable from damaged input) stops at the first name it repeats.
-    """
-    edges = _alias_edges(records)
-    resolved: dict[str, str] = {}
-    for alias in edges:
-        seen = {alias}
-        cursor = edges[alias]
-        while cursor in edges and cursor not in seen:
-            seen.add(cursor)
-            cursor = edges[cursor]
-        resolved[alias] = cursor
-    return resolved
+        name = row.get("property_id")
+        if not isinstance(name, str) or name not in definitions:
+            issues.append(_issue("PROPERTY_REF", "当前属性值引用的属性定义不存在", row.get("id")))
+    return issues
 
 
 def canonical_definitions(records: list[dict]) -> dict[str, dict]:
-    """Definitions under the name they are read by.
-
-    A renamed aspect keeps its shape (value type, cardinality) under
-    the new name. A merged alias lends its shape to the target only when the
-    target has no definition of its own; either way it stops being a definition
-    of its own, because it is no longer a separate aspect.
-    """
-    aliases = alias_map(records)
-    definitions: dict[str, dict] = {}
-    for record in records:
-        if record.get("kind") != "property_definition":
-            continue
-        name = record.get("id")
-        if isinstance(name, str) and name not in aliases:
-            definitions.setdefault(name, record)
-    for record in records:
-        if record.get("kind") != "property_definition":
-            continue
-        name = record.get("id")
-        if isinstance(name, str) and name in aliases:
-            canonical = aliases[name]
-            if canonical not in definitions:
-                definitions[canonical] = record | {"id": canonical}
-    return definitions
-
-
-def canonical_records(records: list[dict]) -> list[dict]:
-    """The same records, read under canonical names.
-
-    Values keep their id — a retraction points at it — and only the name changes,
-    so a projection can group, label and audit by aspect without the caller
-    knowing that a rename or a merge happened. Definitions follow their name; an
-    alias that has a real definition of its own is dropped, because two names for
-    one aspect would otherwise be counted as one aspect plus one unused name.
-    """
-    aliases = alias_map(records)
-    if not aliases:
-        return records
-    definitions = {
-        record["id"]: record for record in records
-        if record.get("kind") == "property_definition"
-        and isinstance(record.get("id"), str)
-    }
-    # A name that is nobody's alias owns its definition. An aliased name lends its
-    # shape to the name it reads as, but only when that name has no definition.
-    owned = set(definitions) - set(aliases)
-    moved: dict[str, str] = {}
-    for name in definitions:
-        if name in aliases and aliases[name] not in owned:
-            moved[name] = aliases[name]
-            owned.add(aliases[name])
-    result: list[dict] = []
-    for record in records:
-        kind = record.get("kind")
-        if kind == "property_definition":
-            name = record.get("id")
-            if not isinstance(name, str):
-                result.append(record)
-            elif name in moved:
-                result.append(record | {"id": moved[name]})
-            elif name in aliases:
-                continue  # the same aspect under a name that already has one
-            else:
-                result.append(record)
-        elif kind == "property_value":
-            name = record.get("property_id")
-            if isinstance(name, str) and name in aliases:
-                record = record | {"property_id": aliases[name]}
-            result.append(record)
-        else:
-            result.append(record)
-    return result
+    return {row["id"]: row for row in records if row.get("kind") == "property_definition"}
 
 
 def _definition_map(records: list[dict]) -> dict[str, dict]:
-    """Definitions by every name they answer to.
-
-    A value may still be stored under a name that has since been merged or
-    renamed away; it has to validate against the same shape, so both spellings
-    resolve to one definition here.
-    """
-    definitions = {
-        r["id"]: r
-        for r in records
-        if r.get("kind") == "property_definition" and isinstance(r.get("id"), str)
-    }
-    result = dict(definitions)
-    for alias, canonical in alias_map(records).items():
-        shape = definitions.get(canonical) or definitions.get(alias)
-        if shape is not None:
-            result.setdefault(canonical, shape)
-            result.setdefault(alias, shape)
-    return result
+    return canonical_definitions(records)
 
 
 def _valid_value(value: Any, definition: dict, graph_nodes: dict[str, dict]) -> bool:
@@ -312,7 +171,7 @@ def _valid_ref(ref: Any, nodes: dict[str, dict]) -> bool:
         event_id = ref.get("event_id")
         event = nodes.get(event_id) if isinstance(event_id, str) else None
         return bool(
-            event and event.get("node_type") == "event" and ref.get("boundary") in {"start", "end"}
+            event and event.get("node_type") in {"event", "action"} and ref.get("boundary") in {"start", "end"}
         )
     return False
 
@@ -356,7 +215,7 @@ def validate_records(
     combined = [r for r in accepted_records if isinstance(r, dict)] + [
         r for r in records if isinstance(r, dict)
     ]
-    active, retracted = _active(combined)
+    active, _ = _active(combined)
     defs = _definition_map(active)
     existing_ids = {r.get("id") for r in accepted_records if isinstance(r, dict)}
     seen: set[str] = set()
@@ -381,10 +240,6 @@ def validate_records(
         missing = {
             "property_definition": {"value_type", "cardinality"},
             "property_value": {"node_id", "property_id", "value", "event_id"},
-            "property_categorization": {"target_id", "category"},
-            "property_merge": {"alias_id", "target_id"},
-            "property_rename": {"from_id", "to_id"},
-            "property_retraction": {"target_id", "reason"},
         }[kind] - set(record)
         if extra:
             issues.append(_issue("FORMAT", f"unexpected fields: {', '.join(sorted(extra))}", rid))
@@ -431,6 +286,10 @@ def validate_records(
                             _issue("DISCLOSURE", "disclosure start must be a valid source offset", rid)
                         )
         if kind == "property_definition":
+            if "symmetric" in record and type(record["symmetric"]) is not bool:
+                issues.append(_issue("DEFINITION", "symmetric must be a boolean", rid))
+            if record.get("semantic") not in {None, "item_holder"}:
+                issues.append(_issue("DEFINITION", "unknown property semantic", rid))
             if record.get("value_type") not in _VALUE_TYPES:
                 issues.append(_issue("DEFINITION", "invalid property value_type", rid))
             if record.get("cardinality") not in _CARDINALITIES:
@@ -448,130 +307,7 @@ def validate_records(
                     _issue("DEFINITION", "target_node_types only applies to node properties", rid)
                 )
             continue
-        if kind == "property_categorization":
-            target_id = record.get("target_id")
-            target = next((item for item in combined if item.get("id") == target_id), None)
-            if target is None or target.get("kind") not in {"property_value", "property_definition"}:
-                issues.append(
-                    _issue("CATEGORY_TARGET", "categorization must target a property record", rid)
-                )
-            category = record.get("category")
-            if not isinstance(category, str) or not category.strip():
-                issues.append(_issue("CATEGORY", "categorization requires a category", rid))
-            elif len(category.strip()) > 20:
-                issues.append(_issue("CATEGORY", "category name is too long", rid))
-            note = record.get("note")
-            if note is not None and not isinstance(note, str):
-                issues.append(_issue("CATEGORY", "note must be a string", rid))
-            continue
-        if kind == "property_merge":
-            alias_id = record.get("alias_id")
-            target_id = record.get("target_id")
-            if alias_id == target_id:
-                issues.append(_issue("MERGE", "merge needs two different names", rid))
-            for name in (alias_id, target_id):
-                definition = next(
-                    (item for item in combined
-                     if item.get("id") == name and item.get("kind") == "property_definition"),
-                    None,
-                )
-                if definition is None:
-                    issues.append(
-                        _issue("MERGE", "merge must reference two property definitions", rid)
-                    )
-            # A cycle would make the canonical name depend on reading order.
-            chained: set[str] = set()
-            cursor = target_id
-            while isinstance(cursor, str) and cursor not in chained:
-                chained.add(cursor)
-                cursor = next(
-                    (item.get("target_id") for item in combined
-                     if item.get("kind") == "property_merge"
-                     and item.get("alias_id") == cursor),
-                    None,
-                )
-                if cursor == alias_id:
-                    issues.append(_issue("MERGE", "merge would create a cycle", rid))
-                    break
-            note = record.get("note")
-            if note is not None and not isinstance(note, str):
-                issues.append(_issue("MERGE", "note must be a string", rid))
-            continue
-        if kind == "property_rename":
-            from_id = record.get("from_id")
-            to_id = record.get("to_id")
-            if not isinstance(from_id, str) or not from_id.strip():
-                issues.append(_issue("RENAME", "rename needs the name it starts from", rid))
-            if not isinstance(to_id, str) or not to_id.strip():
-                issues.append(_issue("RENAME", "rename needs a new name", rid))
-            elif len(to_id.strip()) > 40:
-                issues.append(_issue("RENAME", "new property name is too long", rid))
-            elif from_id == to_id:
-                issues.append(_issue("RENAME", "rename needs two different names", rid))
-            # The old name has to be something: a definition, or a name an
-            # earlier rename/merge already produces. A rename to a name nobody
-            # has does not need a definition — creating it is the point. The
-            # record under validation is left out of the alias graph, or it would
-            # vouch for the very name it starts from.
-            others = [item for item in combined if item is not record]
-            aliases = alias_map(others)
-            known = set(defs) | set(aliases) | set(aliases.values())
-            if isinstance(from_id, str) and from_id.strip() and from_id not in known:
-                issues.append(
-                    _issue("RENAME", "rename must start from an existing property name", rid)
-                )
-            # A cycle would make the canonical name depend on reading order.
-            chained: set[str] = set()
-            cursor = to_id
-            while isinstance(cursor, str) and cursor not in chained:
-                chained.add(cursor)
-                cursor = next(
-                    (item.get("to_id") if item.get("kind") == "property_rename"
-                     else item.get("target_id")
-                    for item in others
-                     if item.get("kind") in {"property_rename", "property_merge"}
-                     and (item.get("from_id") or item.get("alias_id")) == cursor),
-                    None,
-                )
-                if cursor == from_id:
-                    issues.append(_issue("RENAME", "rename would create a cycle", rid))
-                    break
-            note = record.get("note")
-            if note is not None and not isinstance(note, str):
-                issues.append(_issue("RENAME", "note must be a string", rid))
-            continue
-        if kind == "property_retraction":
-            target_id = record.get("target_id")
-            target = next((item for item in combined if item.get("id") == target_id), None)
-            if target is None or target.get("kind") not in _KINDS - {"property_retraction"}:
-                issues.append(
-                    _issue("RETRACTION_TARGET", "retraction must target a property record", rid)
-                )
-            elif target_id in retracted and not any(
-                r.get("id") == rid and r.get("target_id") == target_id
-                for r in records
-                if isinstance(r, dict)
-            ):
-                issues.append(_issue("RETRACTION_TARGET", "target is already retracted", rid))
-            if not isinstance(record.get("reason"), str) or not record.get("reason", "").strip():
-                issues.append(
-                    _issue("RETRACTION_REASON", "retraction requires a non-empty reason", rid)
-                )
-            # Where it stops counting. Absent means "everywhere" — the record was
-            # misread, not superseded.
-            anchor = record.get("event_id")
-            if anchor is not None:
-                event = nodes.get(anchor) if isinstance(anchor, str) else None
-                if event is None or event.get("node_type") != "event":
-                    issues.append(_issue(
-                        "RETRACTION_ANCHOR", "retraction event must be an existing event", rid
-                    ))
-            basis = record.get("basis")
-            if basis is not None and basis not in {"audit", "review", "human"}:
-                issues.append(_issue(
-                    "RETRACTION_BASIS", "retraction basis must be audit, review or human", rid
-                ))
-            continue
+
         node_id = (
             record.get("node_id") if kind in {"property_initial", "property_observation"} else None
         )
@@ -601,7 +337,7 @@ def validate_records(
             if (
                 not isinstance(event_id, str)
                 or not nodes.get(event_id)
-                or nodes[event_id].get("node_type") != "event"
+                or nodes[event_id].get("node_type") not in {"event", "action"}
             ):
                 issues.append(_issue("EVENT_REF", "property_value must reference an event node", rid))
             # How the information was expressed (narration, speech, thought,
@@ -638,7 +374,7 @@ def validate_records(
             if applies_to is not None and (
                 not isinstance(applies_to, str)
                 or not nodes.get(applies_to)
-                or nodes[applies_to].get("node_type") != "event"
+                or nodes[applies_to].get("node_type") not in {"event", "action"}
             ):
                 issues.append(_issue("EVENT_REF", "applies_to must reference an event node", rid))
         if kind == "event_change":
@@ -646,7 +382,7 @@ def validate_records(
             if (
                 not isinstance(event_id, str)
                 or not nodes.get(event_id)
-                or nodes[event_id].get("node_type") != "event"
+                or nodes[event_id].get("node_type") not in {"event", "action"}
             ):
                 issues.append(_issue("EVENT_REF", "event_change must reference an event node", rid))
             if record.get("boundary") not in {"start", "end"}:
@@ -742,33 +478,12 @@ def history(
     scope: str = "world",
     holder_id: str | None = None,
 ) -> list[dict]:
-    """Return the append-only records relevant to one node/property pair."""
+    """Return value intervals relevant to one node/property pair."""
     records = [
         r for r in accepted_records
         if isinstance(r, dict) and _scope_matches(r, scope, holder_id)
     ]
-    by_id = {r.get("id"): r for r in records if isinstance(r.get("id"), str)}
-
-    def is_relevant(record: dict) -> bool:
-        kind = record.get("kind")
-        if kind == "property_definition":
-            return record.get("id") == property_id
-        if kind == "property_value":
-            return record.get("node_id") == node_id and record.get("property_id") == property_id
-        if kind == "property_retraction":
-            target = by_id.get(record.get("target_id"))
-            return bool(target and is_relevant(target))
-        return False
-
-    # Recursion guard is important for damaged imported history.
-    def relevant(record: dict, seen: set[str]) -> bool:
-        rid = record.get("id")
-        if not isinstance(rid, str) or rid in seen:
-            return False
-        seen.add(rid)
-        if record.get("kind") == "property_retraction":
-            target = by_id.get(record.get("target_id"))
-            return bool(target and relevant(target, seen))
-        return is_relevant(record)
-
-    return [r for r in records if relevant(r, set())]
+    return [row for row in records if
+            row.get("kind") == "property_definition" and row.get("id") == property_id or
+            row.get("kind") == "property_value" and row.get("node_id") == node_id
+            and row.get("property_id") == property_id]

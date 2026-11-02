@@ -10,6 +10,7 @@ import contextlib
 import json
 import os
 import sqlite3
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -141,3 +142,30 @@ def write_project(path: str | Path, *, title: str, project_id: str,
 
 def project(found: Layout) -> dict:
     return read_entry(found.entry)
+
+
+def update_title(path: str | Path, title: str) -> dict:
+    """Update only the display title in an existing project entry file."""
+    normalized = title.strip()
+    if not normalized:
+        raise ValueError("工程名称不能为空")
+    entry = Path(path).resolve()
+    data = read_entry(entry)
+    data["project"]["title"] = normalized
+    data["project"]["updated_at"] = datetime.now(UTC).isoformat()
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{entry.name}.", suffix=".tmp", dir=entry.parent
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+            file.write(json.dumps(data, ensure_ascii=False, indent=2))
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, entry)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    return data

@@ -1,186 +1,207 @@
-# 给程序和模型的接口（MCP / CLI）
+# 工程工具与统一对话
 
-同一套能力有两个门：**命令行**（人用）和 **MCP 服务**（模型用）。两者都落在
-`src/narrative/tool_api.py` 的同一张工具表上，所以「这个场景结束时各方是什么状态」这个
-问题，人敲命令和模型调工具得到的答案不可能不一致。
+Qt 界面、CLI、MCP 和模型工具都通过 `Operations` 访问工程能力。工具名称、参数和读写标记以 `tool_api.describe()` 返回的当前工具表为准。当前数据库格式为 schema 10；旧版工程明确拒绝打开，不自动转换或修改原库。
 
-界面（Qt Quick）不是这套接口的依赖：这里没有任何窗口状态，只有工程文件。
+## 统一对话
 
-## 一条规则：`cut` 是阅读位置
+协作者在当前聊天的同一个常驻模型进程中完成阅读、提取、自审和提交。任务没有硬性总时限，可手动停止；网络响应空闲检测不作为整项任务的时长上限。一次用户任务可以包含多次模型输出与工具调用，不预设提取轮和审核轮。模型可按需要查阅完整已导入原文和已有图数据。
 
-所有读操作都可以带 `cut`（事件编号）。它回答的是「读到这一步时，读者知道什么」，
-不是「故事里最终是什么」。
+提取、自审的目的，是从原文中识别节点、事件、属性和具体人物关系，核对重复、冲突以及旧属性是否仍然有效。失效判断由模型结合原文作出；程序负责引文、结构和预检等确定性校验。
 
-- 省略 `cut` = 最新
-- `cut=34` = 读到事件 34 为止；之后的披露不算，失效的记录不出现
-- `scene_state` 的 `cut` 自动取这个场景的最后一个事件
+模型每次公开输出的文本都按顺序进入当前聊天，包括工具调用之间的说明和最终回答；过程消息会保存，重开聊天后仍可查看。内部推理字段不作为聊天正文。
 
-## 工具表
+## 提取工具
 
-| 工具 | 做什么 | |
-|---|---|---|
-| `list_projects` | 列出某个目录下的工程包（只读，不打开） | 读 |
-| `project_info` | 工程标题、修订号、节点数、原文数、待审候选数 | 读 |
-| `list_nodes` | 按阅读位置列出节点；可按类型、关键字筛选，返回分类计数 | 读 |
-| `list_moments` | 阅读位置的层级：场景 → 事件，一列一层；`cut` 只能用这里的编号 | 读 |
-| `node_material` | 一个节点的资料卡：标题、详情、带说明的图片，各自的有效区间 | 读 |
-| `get_node` | 一个节点的全部字段与它在某阅读位置上的属性 | 读 |
-| `node_properties` | 一个节点在某阅读位置上的属性（失效的不返回） | 读 |
-| `scene_state` | 一个场景：它包含的节点，以及这一场结束时各方是什么状态 | 读 |
-| `event_state` | 一个事件：相关节点，以及读到这一步时各方是什么状态 | 读 |
-| `statistics` | 统计：节点分类计数、原文、属性记录种类、撤回数、审核计数 | 读 |
-| `search` | 按关键字检索节点与属性记录 | 读 |
-| `list_sources` / `read_source` | 原文清单；按字符位置读一段 | 读 |
-| `list_source_slices` / `read_source_slice` | 列出某份原文的切片／读取单片完整内容及原文位置 | 读 |
-| `create_source_slices` | agent 阅读原文并分析边界后批量创建切片，不修改原文或图中事实 | 写 |
-| `property_categories` | 每个节点类型的大类表（显示分组，不是事实） | 读 |
-| `audit_properties` | 属性审核：重复值、缺定义、缺证据、锚点缺失等结构问题 | 读 |
-| `list_candidates` | 列出候选（默认待审） | 读 |
-| `add_property` | 补录一条属性披露：立刻生效；更早的值从这次披露起失效 | 写 |
-| `correct_property` | 更正一条取值：追加正确的记录并撤回原来那条 | 写 |
-| `retract_properties` | 让记录不再显示：给了 `event_id` 是「从这一步起不算」，省略是「从来不算」（删除） | 写 |
-| `add_material_card` | 给节点加一张资料卡：标题、详情、生效/失效各挑一个场景或事件 | 写 |
-| `update_material_card` / `delete_material_card` | 改一张资料卡（只改给了的字段）；删一张卡，图片一起走 | 写 |
-| `add_material_image` / `delete_material_image` | 给资料卡加图（拷进工程，可带说明）；删掉某张图 | 写 |
-| `revise_node` | 修订节点的名称、类型、别名或说明（立刻生效） | 写 |
-| `attach_scenes` | 把一个或多个场景挂到大事件下面（立刻生效；场景原有归属会被替换） | 写 |
-| `relation_map` | 人物关系网：人是点，关系是有方向的边（含状态） | 读 |
-| `relation_map` | 人物关系网：人是点，关系是有方向的边（含状态） | 读 |
-| `attach_scenes` | 把一个或多个场景挂到大事件下面（立刻生效；场景原有归属会被替换） | 写 |
-| `merge_properties` / `rename_property` | 两个名字合成一个方面；一个方面改名 | 写 |
-| `categorize_records` | 把记录移到某个显示大类 | 写 |
-| `accept_candidate` / `reject_candidate` | 处理候选（节点/属性/提取结果） | 写 |
-| `import_source` | 导入一段原文（标题 + 正文），返回原文编号 | 写 |
-| `get_slice_extraction` | 读取指定切片的最近提取结果、轮次及持久会话编号 | 读 |
-| `extract_slice` | 对指定切片提取，保持原文全局字符位置，不自动入图 | 写 |
-| `review_slice` | 重读已提取切片查漏补缺、合并新增项，保留前轮合法数据 | 写 |
-| `commit_slice_extraction` | 按既有置信规则入图或生成待审候选，支持全审 | 写 |
-| `extract_propose` | 提取第一步：模型读整章，出节点、事件、属性（只读原文） | 写 |
-| `extract_review` | 提取第二步：拿库里已有的值对照提议，只丢确定的重复 | 写 |
-| `extract_build` | 提取第三步：落成对象与记录，**只算不写**；编号、锚点、取代都在这里定 | 读 |
-| `extract_commit` | 提取第四步：把落好的结果变成一个待审候选 | 写 |
-| `extract_source` | 用工程配置的模型提取一篇原文；`commit=true` 同时生成待审候选 | 写 |
+| 工具 | 行为 |
+| --- | --- |
+| `preview_extraction` | 校验完整提取草稿并返回诊断，不写入图 |
+| `submit_extraction` | 校验完整提取草稿，通过后自动入库，返回实际结果 |
 
-## 提取四步
+两者使用相同参数：`source_id`、`result`，以及可选的 `start`、`end`。省略范围时使用完整原文。`result` 包含 `nodes`、`properties`、失效处理和自审说明；具体结构以工具 schema 为准。
 
-提取拆成四个工具，因为前两步要调模型（慢、要钱、可能失败），后两步是纯函数：
+原文位置使用 Python Unicode 字符坐标，范围为 `[start, end)`。引文必须逐字出自本次目标范围；读取其他原文帮助理解，不会扩大本次提交的证据范围。
 
-| 步 | 工具 | 做什么 |
-|---|---|---|
-| 1 | `extract_propose` | 模型读整章，出节点、事件、属性；引文逐字校验，结果落在 `<工程>_extraction/<原文>.json` |
-| 2 | `extract_review` | 拿库里已有的值对照，只丢确定的重复 |
-| 3 | `extract_build` | 落成对象与记录——**只算不写**，编号、锚点、取代都在这里定，返回诊断 |
-| 4 | `extract_commit` | 变成一个待审候选（图要人接受才变） |
+提交不再生成待人工确认队列。合法结果通过 `Operations` 自动采用，模型存疑与程序诊断保留在结果和内部审计中。校验失败不能冒充入库成功；若已经提交成功，而后续模型回答失败，已发生的入库动作仍须如实记录。
 
-`extract_source` 是四步连跑，不是第二套实现。
+产品中没有独立的提取、属性、入库记录工作台，也没有对应的分轮提取、复核后提交或兼容转发接口。属性数据模型、阅读位置投影和自动入库所需的内部审计继续服务统一对话与数据浏览。
 
-写操作遵守界面里那套规则，不是另一套：
+## 静态检查
 
-- 记录不原地改。更正 = 追加正确的 + 撤回错的，两半在同一个候选里。
-- 补录会立刻生效，并把同方面更早的值从这次披露起标为失效。
-- 记录不物理删除：库里 append-only，所谓「失效」「删除」都只是不再被投影读到。
-- 两句话分得开：`retract_properties` 带 `event_id` 是「从这一步起不算」，省略是「从来不算」——
-  后者就是界面上的「删除」按钮。
-- 没有引文就没有原文位置：这条记录算「该事件里最后说的」。
+`Operations.check_project()` 与 `check_project` 工具在一个只读事务内采样固定修订，统一检查结构、证据、引用、活动属性定义、事件归属及物品持有者等约束。已失效的历史记录仅作为引用背景，不误当成当前违规；运行不创建候选、不提升修订号。
+返回 `checked_revision`、`current_revision`、严重级别计数和问题列表。问题携带可用的节点、属性记录及原文范围定位；无法唯一定位的引文不伪造高亮。左侧静态检查页可手动运行、筛选、查看详情和跳转，工程发生新修订时标明结果过期。
 
-## 命令行
+## 通用工程读写
 
-```bash
-# 通用两件套：永远和工具表同步
-narrative tool list
-narrative tool call get_node '{"node_id": "7", "cut": "34"}' --project <工程.sqlite3>
+`get_schema` 返回图对象与属性记录合同；`read_project_state` 返回当前工程结构及属性有效区间，供 agent 查漏补缺。
+`preview_changes` 只做静态预检；`apply_changes` 使用同样的 `graph_objects`、`property_records`、`expected_revision`，另加写入依据 `reason`，通过后原子提交。
+新增与修订节点、场景包含、上下文和时间轴可在同一批完成；属性状态变化关闭旧值区间并新增取值；录入错误直接更正或删除。节点只保存当前对象，revision只用于并发检查。
+过期修订、非法引用或包含环拒绝整批写入；每个活动事件最终须归属同语境活动场景。旧格式工程不迁移或写入；当前工程若已有孤立事件，可同批修复结构后再提交。
+这些工具与属性、资料卡等现有业务写入工具都向统一 agent 开放，不依赖独立工作台或人工审核。
 
-# 名字更短的别名，参数是真 flag
-narrative info   --project P
-narrative nodes  --project P --type person --limit 10
-narrative node 7 --project P --cut 34
-narrative scene 28 --project P
-narrative event 34 --project P
-narrative stats  --project P
-narrative search 火纹石 --project P
-narrative moments --project P            # 分级阅读位置：场景 → 事件
-narrative material 7 --project P --cut 34
+## 物品持有者
 
-# 编辑
-narrative add-property 7 state 神色平静 164 --project P
-narrative correct-property value_abc123 三十一岁 --project P --reason 抄错了
-narrative retract --ids value_abc123 --reason 这句读错了 --project P
-narrative revise-node 2 --name 沈砚 --project P
+每个活动 `item` 必须有当前有效的世界事实层持有者记录，值是合法节点引用或显式“无”“未知”。未知必须明确记录，不能省略；`scope=cognition/claim` 的观点及其 `holder_id` 不替代世界事实层的物品持有者。“门派归属”“持有时间”等属性也不满足这条规则。
+写入在完整拟写图与属性记录上校验；可同批新增物品、场景事件和持有者。换手时新增状态并保留历史，不允许仅撤掉最后一个有效持有状态而留下缺失。只读打开旧工程不伪造记录；界面的未记录或尚未披露提示不视为已入库的“未知”。
 
-# 资料卡（图片拷进工程，不引用原路径）
-narrative add-material 7 青衫少年 --detail 洗得发白的青衫 --from E3 --project P
-narrative add-material-image 7 <资料编号> ./ref.png --caption 正面 --project P
-narrative material 7 --project P --cut E5
-narrative delete-material 7 <资料编号> --project P
-narrative import-source 第一章 --file ch1.txt --project P   # 长文本走文件
-narrative categories --project P
-# 提取分四步：每一步都能单独跑，产物落在 <工程>_extraction/<原文编号>.json
-narrative extract-propose <source_id> --project P   # 模型读整章
-narrative extract-review  <source_id> --project P   # 对照库里的值
-narrative extract-build   <source_id> --project P   # 只算不写：看会生成什么
-narrative extract-commit  <source_id> --project P   # 变成待审候选
-narrative extract <source_id> --commit --project P  # 一次跑完四步
-```
+若旧“持有者”定义为 `node`，不能直接写入“无”或“未知”。可显式将当前定义改为 `either`，或经 `merge_properties` 物理合并到兼容定义；保留 `item_holder` 语义，直接重写引用，不建立别名链。
 
-默认输出是给人看的一行行；加 `--json` 得到完整结构。
+## 五层结构与名称
 
-## MCP
+主要故事与大事件都只保存一个 `name`，直接使用清晰概括名；未完成也不使用“暂称”字段或名称后缀。`provisional_name` 不属于当前节点或提取合同，输入会被拒绝；`storyline`、`big_event` 名称尾部的 `（暂称）`、`(暂称)` 返回静态诊断供模型修正，不由宿主裁剪名称。
 
-```bash
-narrative-mcp --project data/graph-projects/example.sqlite3
-```
+## 节点身份与重复提交
 
-stdio、换行分隔的 JSON-RPC 2.0（MCP 的标准传输），只支持 `initialize`、`tools/list`、
-`tools/call`、`ping`。给了 `--project` 之后工具不必再传工程；没给的话每个工具会多一个
-必填的 `project` 参数。
+### 节点引用
 
-客户端配置（WorkBuddy / Claude Desktop 之类）大致长这样：
+已有节点优先使用实际正式 ID；程序分配的短 ID 带类型语义，例如 `P1` 为人物、`I1` 为物品、`E2` 为事件、`A1` 为动作、`S1` 为场景、`B1` 为大事件、`T1` 为主要故事。名称用于搜索和展示，不需要在每处引用中重抄。类型前缀不是父子关系或跨类型时间刻度，归属和先后仍由结构及原文披露位置表达。
+
+同批新节点按完整 `result.nodes` 数组的位置使用从 **1** 开始的 `@1`、`@2` 等引用，允许前向引用。它们只在本次草稿内有效，程序解析后保存为正式 ID；不能拿上次草稿的 `@1` 当作工程 ID。节点声明只写一次名字，参与者、父级和属性等节点引用位置优先写 ID 或 `@序号`。
+
+成功提交（`accepted` 或 `unchanged`）返回紧凑的 `node_ids`，例如 `{"@1":"P1","@2":"S1"}`，可供后续调用直接使用，不必再次查询编号；同身份重复槽可指向同一正式 ID。`preview` 不返回可供后续调用的正式编号，`nodes:[]` 不返回空映射。
+
+已有节点不必重新列入 `nodes`、复制名称或重复提供旧引文；只新增属性时可直接引用其正式 ID。唯一名称仍可作便利输入，显式正式 ID 和 `@序号` 优先；名称匹配有多个候选时必须报歧义诊断，不能选择第一个匹配。
+
+这些引用用于 `nodes.participants/scene/event/big_event/storyline/children`、`properties.node/holder/related_nodes/at_event`，以及 `value_type=node/either` 的节点值。`either` 的“无”“未知”保留字面值。失效处理中的节点选择、节点值及 `at_event`、`valid_to.event_id` 使用同一规则；`existing_id` 必须是已存在的正式节点 ID，`context_id` 必须是现有语境 ID，不能写 `@序号`。
+
+`name`、`quotes`、来源信息与 `string/any` 属性值是普通内容，不因字面上像 `@1` 或 `P1` 就改写。越界序号、引用缺失及类型或语境不符均返回诊断；解析前后排序、过滤不会改变 `@序号` 指向的原数组位置。
+
+
+例如，假设工程已有乙 `P2`，以下草稿仅声明甲、大事件、场景和事件一次：
 
 ```json
 {
-  "mcpServers": {
-    "narrative-graph": {
-      "command": "C:/a/wk/narrative/.venv/Scripts/python.exe",
-      "args": ["-m", "narrative.mcp_server",
-               "--project", "C:/a/wk/narrative/data/graph-projects/example.sqlite3"]
-    }
-  }
+  "nodes": [
+    {"type":"person","name":"甲","quotes":["甲与乙握手。"]},
+    {"type":"big_event","name":"双方会面","quotes":["甲与乙握手。"]},
+    {"type":"scene","name":"会面","big_event":"@2","quotes":["甲与乙握手。"]},
+    {"type":"event","name":"握手","scene":"@3","participants":["@1","P2"],"quotes":["甲与乙握手。"]}
+  ],
+  "properties": [
+    {"node":"@1","property":"经历","value":"与乙握手","at_event":"@4","quotes":["甲与乙握手。"]}
+  ]
 }
 ```
 
-一条 `tools/call` 的样子：
+
+只为已有 `P1` 增加一条以已有 `E1` 为披露锚点的属性时，不必再次声明这两个节点：
 
 ```json
-{"jsonrpc":"2.0","id":3,"method":"tools/call",
- "params":{"name":"scene_state","arguments":{"scene_id":"28"}}}
+{"nodes":[],"properties":[{"node":"P1","property":"经历","value":"与乙握手","at_event":"E1","quotes":["甲与乙握手。"]}]}
 ```
 
-结果在 `result.content[0].text` 里，是一段 JSON 文本；工具自己出错时是
-`isError: true` 加一句人话，协议层出错才是 JSON-RPC `error`。
+草稿节点可用 `existing_id` 引用当前工程已查证的节点，程序验证存在性、类型和语境；事件换了引文后仍可沿用原 ID，属性继续挂在同一事件上。`existing_id` 不与 `new_occurrence` 同时使用。
 
-## 从代码里用
+正式节点的 `evidence_spans` 保存所有逐字引文的 `source_id/start/end/quote`，预检核对字符位置及原文。主 `evidence/disclosure` 继续表示首个披露锚点，不因补证据而后移。章节标记 `source_marks` 不用来承载这些证据。
+
+无显式 ID 时，自动复用要求同名或已知别名、同源、同场景与参与者，以及同一位置完整证据的唯一命中；同名、相近位置或宽泛段落重叠都不足以直接合并。无法唯一确认时，诊断把候选交给 agent 查证，不生成待人工审批队列。确是同名的另一次发生，可在原文依据支持下声明 `new_occurrence=true`。
+
+事件引文在本次提交范围内出现多次时，必须先通过更完整的上下文或明确范围消歧；程序不能任取第一次出现的位置作为身份依据。
+
+事件声明 `scene`、场景声明 `big_event`、大事件可声明 `storyline` 时，父节点引用可使用本批的 `@序号` 或当前工程正式 ID，无需为补充子事件重新提交父节点及其引文。已声明的包含关系必须解析并保存，现有父节点的子项保留后追加；缺失、歧义、类型或语境不符须返回诊断，不能静默丢掉关联。每个活动事件必须属于一个活动场景，哪怕该场景只有一个事件；可经事件包含路径归属场景。程序不按位置猜测或自动补造场景。
+
+旧节点仍可凭原主证据精确命中复用。完整草稿哈希只解决相同提交的幂等，不能替代事件身份判断。程序不读取历史响应来偷偷补写旧证据。
+
+复核还需检查已有重复事件。模型查阅两个事件与原文后，用 `preview_event_merge` 预检，再用 `merge_events` 显式合并；必须提供保留与并入的事件 ID、当前修订号、逐字原文位置和判断理由。同名本身不触发合并。 两个工具均使用 `source_event_id`（并入方）、`target_event_id`（保留方）、`expected_revision`、`evidence` 和 `reason`；`evidence` 为精确 `source_id/start/end/quote` 列表，须覆盖双方已有原文依据。该能力仅支持同一语境中的事件，不支持任意类型节点合并。
+
+合并保留原节点、原属性记录及修订审计，以正式身份映射形成当前投影：旧事件退出活动列表，其属性与结构引用指向保留事件，证据合并保存。合并前的修订仍可重建当时两个节点；当前查询旧 ID 会明确告知合并去向。复核不能仅忽略重复节点后宣称已处理。
+
+## 读取与原文组织
+
+| 工具 | 用途 |
+| --- | --- |
+| `project_info`、`statistics` | 工程信息与统计 |
+| `list_nodes`、`get_node`、`search` | 查找节点及详情 |
+| `list_moments`、`scene_state`、`event_state` | 阅读位置及场景、事件状态 |
+| `node_properties`、`property_categories` | 节点属性与显示分类 |
+| `relation_map` | 人物及有方向的具体关系 |
+| `list_sources`、`read_source`、`locate_source` | 原文清单、分段阅读与逐字定位 |
+| `list_source_slices`、`read_source_slice` | 原文切片索引与完整切片内容 |
+| `create_source_slices` | 批量创建浏览索引，保留完整原文 |
+| `preview_pattern_slices` | 可选地试查标题模式，返回计数及首尾样例，不产生计划令牌 |
+| `create_pattern_slices` | 按模式在一个程序事务中重算、校验并创建切片，无须抄hash |
+| `node_material` | 节点资料卡与图片 |
+| `audit_properties` | 属性结构诊断 |
+
+支持 `cut` 的读工具用它表示阅读位置：省略时为最新，指定事件时只显示读到该处已披露且有效的事实。它不是强行把故事时间移到结尾。
+
+规则章节先用少量原文样例确定标题模式，再让程序批处理，无需模型通读全文或逐章定位：
+
+直接调用 `create_pattern_slices(pattern, start_index=0, limit=3)`，程序在同一事务内读原文、扫描、校验并创建；需要单独试查时才调用 `preview_pattern_slices`。两者都不要求模型传回hash或计划令牌。
+
+`start_index` 是从零开始的标题匹配序号，区别于原文字符位置 `start`。范围结束取下一标题的起点；即使只选前三章，第三章仍以第四个标题为终点，只有原文最后一章才延至末尾。首个标题前的文字明确作为未纳入前缀返回，原文不删除。
+
+没有稳定标题模式时，仍可读取内容后用 `create_source_slices` 批量提供明确范围：
+
+```json
+{"source_id":"原文编号","slices":[{"title":"第一章","start":0,"end":120}]}
+```
+
+字符位置不是 UTF-8 字节数或 UTF-16 单元数；可通过 `locate_source` 获取准确边界。切片只是索引，不代表已经提取，不改动原文或图中事实。完整已导入原文仍可按需要查阅。
+
+同一关系性质可以指向多个对象；各对象分别保留披露与有效性。新增另一位朋友或下属不会自动使原对象失效。关系图与数据浏览都按阅读位置应用显式失效记录；物品持有者等非关系单值属性仍遵循原来的替代规则。
+
+## 数据编辑
+
+数据浏览和显式编辑工具仍支持节点修订、属性补录、更正、失效、分类整理以及资料卡维护。它们通过 `Operations` 校验并保存，不依赖已删除的工作台。更正与失效保留历史记录；阅读位置决定当前可见投影。
+
+桌面协作者通过 `assistant.tool_catalog()` 获得当前工程全部业务写入工具，可以在同一任务中补建、修订节点与属性、调整包含结构及纠正记录。写入经 `Operations` 静态校验和原子提交，不以固定提取工具白名单或人工接受步骤限制查漏补缺。
+
+## CLI 与 MCP
+
+```powershell
+narrative tool list
+narrative tool call get_node '{"node_id":"P1"}' --project C:/projects/example.nproj
+narrative nodes --project C:/projects/example.nproj --type person
+narrative sources --project C:/projects/example.nproj
+narrative-mcp --project C:/projects/example.nproj
+```
+
+CLI 的通用 `tool call` 与命名命令都使用同一工具注册表；未知或已删除工具直接报错，不转发到旧流程。长文本可用文件输入的命令，参数以各命令 `--help` 为准。
+
+MCP 使用 stdio 上换行分隔的 JSON-RPC 2.0，支持 `initialize`、`tools/list`、`tools/call`、`ping`。指定 `--project` 后工具无需再传工程；否则工具参数须提供工程。
+
+```json
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"event_state","arguments":{"event_id":"E1"}}}
+```
+
+工具返回的 JSON 位于 `result.content[0].text`。工具执行失败使用 `isError: true`；协议错误使用 JSON-RPC `error`。
+
+Python 调用使用相同入口：
 
 ```python
 from narrative import tool_api
 
-payload = tool_api.call("event_state", {"event_id": "34"}, project="data/graph-projects/example.sqlite3")
+result = tool_api.call("event_state", {"event_id": "E1"}, project="C:/projects/example.nproj")
 ```
 
-`tool_api.describe()` 给出 MCP 形状的工具清单，可以直接喂给任何需要 tools 定义的模型。
+原始响应、usage、终止原因及校验诊断保存在任务审计中。历史任务快照与报告用于核对当时结果，不作为当前代码或工具合同。
 
+## 提取粒度与按需动作
 
-## Agent 分析原文后创建切片
+`Operations.load_project_settings()` / `save_project_settings({extraction_granularity, profile})` 读取和保存本工程的粒度与模型设置。粒度为 `standard`（默认阅读粒度）或 `fine`（改编用更密集事件）。每个统一助手任务读取当时的设置，改变粒度不自动重提旧数据；只改粒度不固化原本继承的全局模型配置。
 
-导入文件保留完整原文，不自动按固定字数分割。agent 使用 `list_sources` 找到文件，
-使用 `read_source` 分段阅读并分析章节、场景或语义边界，使用 `list_source_slices`
-检查已有切片，然后通过 `create_source_slices` 一次提交一个批次：
+事件的 `participants` 引用原文明示出场或实际起作用的人物；有原文支持的事件地点用属性 `地点` 引用 `location` 节点（`value_type=node`、`scope=world`、`at_event` 指向该事件，quotes 提供原文证据）。地点不可证时不猜，上层容器通过成员派生，无需重复抄写。精细档额外细查非关键、无名但原文可区分的人物和具体地点，不臆造姓名/身份，也不拆分无法区分的泛称。
 
-```json
-{"source_id": "source_id", "slices": [{"title": "第一章", "start": 0, "end": 120}]}
-```
+标准、精细都默认不创建动作。明确请求动作提取时，草稿可使用 `type: action`，以 `event` 优先引用直属事件的正式 ID 或本批 `@序号`（唯一名称可作便利输入），并给出逐字原文引文。动作必须有且只有一个同语境父事件，不能直接归属场景或含子项。已有动作经查证后用 `existing_id` 复用。节点编辑器的“动作提取”按钮将明确父事件 ID 发送到当前统一对话，不另起专用进程。
 
-`start` 和 `end` 是完整原文从 0 开始的 **Python Unicode codepoint** 位置，范围为
-`[start, end)`，不是 UTF-8 字节数或 UTF-16 单元数。`read_source.start` 使用同一坐标；
-读取后续窗口时应加上窗口起点。整批范围校验成功后才会写入，不会替换原文。
-`read_source_slice` 需要 `source_id` 和 `slice_id`，返回该片文本和范围。
-内置协作者只额外开放这一种写工具，不能改动节点、属性、原文或审核候选。
+四级阅读位置为故事线、场景、事件、动作；节点编号 A/E 仅表达各类身份，跨类型顺序按原文来源与披露坐标计算。
+
+## 简短编号与模型工具输入输出
+
+原文SRCn、属性取值PVn、切片SRCn-SLn由程序分配，不要求模型编造随机ID；工具调用ID仅留SDK协议和原始审计，普通工具详情不显示。内容hash用于程序完整性校验，不作模型来回抄写的业务ID。
+
+恰好一份原文时source_id可省略；多原文不猜测。`locate_source({quotes:["引文甲","引文乙"]})` 批量定位，结果按输入index关联坐标，不重复回显原句与hash。`count_is_exact=false` 时match_count仅为已知下界，truncated明确标识未返回全部。
+
+常规提取直接`submit_extraction`，程序自动定位草稿引文和静态检查后一次提交。成功仅返回状态、修订和计数等必要信息；完整诊断、原始模型消息及存疑理由保留宿主审计。无临时候选ID、accepted嵌套对象或聊天ID往返。preview仅用于独立试查。
+
+层级为主要故事（storyline/T）→大事件（big_event/B）→场景（scene/S）→事件（event/E）→动作（action/A）。主要故事仅在完整篇章结束后总结：草稿给出逐字且唯一的 `closing_quote`，程序以其末端生成 `completion`，并可用 `children:[B1,B2]` 归并已有大事件，无需重列。未结束的大事件可暂不归主要故事。主要故事进展 `storyline_progress` 记录在大事件上，大事件进展 `big_event_progress` 记录在场景上。
+
+大事件在同语境内依原文顺序形成 `[start,next.start)` 的连续阅读区间。末个大事件已归入完成的主要故事时，以该主要故事的 `completion` 为末端；否则保持 `end=null`。这不是故事发生时间区间。`attach_children(parent_id,child_ids)` 可直接归入已有直属子项，主要故事归大事件、大事件归场景、场景归事件（或嵌套场景）、事件归动作；不保留旧场景直属主要故事的接口。
+
+关系方向统一以主体为参照：`node=A,property=父亲,value=B` 表示“B是A的父亲”，`property` 描述对方相对 `node` 的身份、关系或作用中的角色，节点型 `value` 为被指向的对方ID。普通 `string/any` 内容仍按字面保存。程序不依据关系词表翻转方向，不因对称关系补造反向记录。
+
+`add_property` 对新属性定义必须显式提供顶层 `value_type`；已有定义可省略沿用。节点引用使用 `node/either`，`string/any` 中的P样字符串仍是字面内容，不画作人物关系。可显式提供严格布尔 `symmetric`（新定义默认false）；与已有类型或对称标识冲突时原子拒绝，须另行显式修改定义，不能暗中改写。
+
+关系核对不仅看长期身份与称谓，也包括对叙事有意义、原文明示已发生的人际作用角色；不因一次发生就排除，也不由共现或单次作用外推长期立场。任务完成情况以实际工具返回为准，不将未调用或未成功的工具声称为已完成。
+
+人物心理意图、所知所信也需查漏。`scope=world` 保存原文支持的客观事实；`cognition` 保存人物所知所信或主观判断，`claim` 保存言说主张，后二者须用 `holder` 标明认知者／说话人，`node` 仍为被认知／谈论的主体。经旁证支持的对白内容可属于世界事实，不按对白形式机械全归主张；不同scope及holder不能覆盖客观取值。

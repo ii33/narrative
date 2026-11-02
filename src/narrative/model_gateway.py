@@ -4,6 +4,8 @@ Translates request parameters and provider session headers. It never retries, fo
 prompts or credentials, or changes the model response. The SDK still owns turns.
 """
 
+import ctypes
+import hashlib
 import http.client
 import json
 import os
@@ -16,6 +18,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 from urllib.parse import urlsplit
 
 COMPACTION_MODEL = "__narrative_compaction__"
@@ -63,6 +66,7 @@ class UsageObserver:
         self.complete = False
         self.content: list[str] = []
         self.finish_reason: str | None = None
+        self.tools: dict[tuple[int, int], dict] = {}
 
     def feed(self, chunk: bytes):
         frames = re.split(rb"\r?\n\r?\n", self.buffer + chunk)
@@ -88,23 +92,102 @@ class UsageObserver:
                     part = delta.get("content") if isinstance(delta, dict) else None
                     if isinstance(part, str):
                         self.content.append(part)
+                    if not isinstance(delta, dict):
+                        continue
+                    for call in delta.get("tool_calls") or []:
+                        if not isinstance(call, dict):
+                            continue
+                        index = call.get("index", 0)
+                        choice_index = choice.get("index", 0)
+                        if type(index) is not int or type(choice_index) is not int:
+                            continue
+                        tool = self.tools.setdefault((choice_index, index), {
+                            "choice_index": choice_index, "index": index,
+                            "id": "", "name": "", "argument_fragments": [],
+                        })
+                        if isinstance(call.get("id"), str) and call["id"]:
+                            tool["id"] = tool["id"] or call["id"]
+                        function = call.get("function") or {}
+                        if not isinstance(function, dict):
+                            continue
+                        if isinstance(function.get("name"), str) and function["name"]:
+                            tool["name"] = tool["name"] or function["name"]
+                        arguments = function.get("arguments")
+                        if isinstance(arguments, str):
+                            tool["argument_fragments"].append(arguments)
         # Usage frames are small; never retain an unbounded malformed event.
         if len(self.buffer) > 1024 * 1024:
             self.buffer = b""
 
 
+    def tool_snapshot(self) -> list[dict]:
+        """Preserve provider arguments verbatim; validation never repairs them."""
+        result = []
+        for key in sorted(self.tools):
+            tool = self.tools[key]
+            raw = "".join(tool["argument_fragments"])
+            error = None
+            try:
+                json.loads(raw)
+            except json.JSONDecodeError as exc:
+                error = {"message": exc.msg, "position": exc.pos,
+                         "line": exc.lineno, "column": exc.colno}
+            result.append(deepcopy(tool) | {"arguments": raw,
+                "arguments_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+                "arguments_json_valid": error is None, "arguments_json_error": error})
+        return result
+
+
+class _KeepResponseSocket(http.client.HTTPConnection):
+    """Keep the socket reachable after http.client transfers it to HTTPResponse."""
+
+    def getresponse(self):
+        self._getting_response = True
+        try:
+            return super().getresponse()
+        finally:
+            self._getting_response = False
+
+    def close(self):
+        if getattr(self, "_getting_response", False):
+            # HTTPConnection.getresponse() calls close() for Connection: close.
+            # HTTPResponse's file still reads this socket; the handler owns its
+            # final close and a concurrent stop must be able to shutdown it.
+            self.sock = None
+            return
+        super().close()
+
+
+class _UpstreamHTTPConnection(_KeepResponseSocket):
+    pass
+
+
+class _UpstreamHTTPSConnection(_KeepResponseSocket, http.client.HTTPSConnection):
+    pass
+
+
 class ModelGateway:
-    def __init__(self, settings, api_key: str):
+    def __init__(self, settings, api_key: str, *, secrets_to_redact: tuple[str, ...] = ()):
         self.settings, self._key = settings, api_key
+        self._extra_secrets = secrets_to_redact
         self.token = secrets.token_urlsafe(32)
         self._closed = threading.Event()
         self._lock = threading.Lock()
+        self._handlers_done = threading.Condition(self._lock)
         self._session_lock = threading.Lock()
         self._session_id: str | None = None
+        self._turn_epoch = 0
+        self._session_active = False
+        self._cancelled_epoch: int | None = None
+        self._handler_counts: dict[int, int] = {}
         self._usage_records: list[dict] = []
         self._compaction_failure: str | None = None
         self._blocked_generation_count = 0
         self._connections: set[http.client.HTTPConnection] = set()
+        self._connection_epochs: dict[http.client.HTTPConnection, int] = {}
+        # getresponse() moves the socket into HTTPResponse. Keep a reference to
+        # the original socket so shutdown interrupts read1 on every platform.
+        self._connection_sockets: dict[http.client.HTTPConnection, socket.socket] = {}
         self.error: str | None = None
         # Last upstream response-byte activity, recorded from the socket read
         # itself. This is deliberately separate from any local heartbeat.
@@ -162,7 +245,13 @@ class ModelGateway:
                     return
                 sent_headers = False
                 connection = None
+                response = None
                 purpose = None
+                observer = None
+                usage_record: dict | None = None
+                with gateway._lock:
+                    turn_epoch = gateway._turn_epoch
+                    gateway._handler_counts[turn_epoch] = gateway._handler_counts.get(turn_epoch, 0) + 1
                 try:
                     size = int(self.headers.get("Content-Length", "0"))
                     if not 0 < size <= 16 * 1024 * 1024:
@@ -185,6 +274,8 @@ class ModelGateway:
                         "compaction" if payload.get("model") == COMPACTION_MODEL else "generation"
                     )
                     with gateway._lock:
+                        if not gateway._turn_live_locked(turn_epoch):
+                            raise ValueError("当前模型任务已取消")
                         if gateway._compaction_failure is not None:
                             if purpose == "generation":
                                 gateway._blocked_generation_count += 1
@@ -195,21 +286,23 @@ class ModelGateway:
                     headers = gateway._upstream_headers()
                     url = urlsplit(settings.base_url)
                     connection_type = (
-                        http.client.HTTPSConnection
+                        _UpstreamHTTPSConnection
                         if url.scheme == "https"
-                        else http.client.HTTPConnection
+                        else _UpstreamHTTPConnection
                     )
                     connection = connection_type(
                         url.hostname, url.port, timeout=settings.timeout_seconds
                     )
                     with gateway._lock:
-                        if gateway._closed.is_set():
-                            raise ValueError("模型调用已停止")
+                        if not gateway._turn_live_locked(turn_epoch):
+                            raise ValueError("当前模型任务已取消")
                         gateway._connections.add(connection)
-                        usage_record: dict = {
+                        gateway._connection_epochs[connection] = turn_epoch
+                        usage_record = {
                             "usage": None,
                             "complete": False,
                             "raw": "",
+                            "tool_calls": [],
                             "purpose": purpose,
                             "finish_reason": None,
                             "max_tokens": settings.compaction_max_tokens
@@ -217,9 +310,16 @@ class ModelGateway:
                             else settings.max_tokens,
                         }
                         gateway._usage_records.append(usage_record)
+                    if not gateway._turn_live(turn_epoch):
+                        raise ValueError("当前模型任务已取消")
                     connection.connect()
-                    if gateway._closed.is_set():
-                        raise ValueError("模型调用已停止")
+                    with gateway._lock:
+                        upstream_socket = connection.sock
+                        if upstream_socket is not None:
+                            gateway._connection_sockets[connection] = upstream_socket
+                        live = gateway._turn_live_locked(turn_epoch)
+                    if not live:
+                        raise ValueError("当前模型任务已取消")
                     connection.request(
                         "POST",
                         url.path.rstrip("/") + "/chat/completions",
@@ -228,7 +328,9 @@ class ModelGateway:
                     )
                     response = connection.getresponse()
                     # A response header is the first upstream byte activity.
-                    gateway._note_upstream_activity()
+                    if not gateway._turn_live(turn_epoch):
+                        raise ValueError("当前模型任务已取消")
+                    gateway._note_upstream_activity(epoch=turn_epoch)
                     # Never forward a redirect carrying the provider's credential.
                     status = response.status
                     if 300 <= status < 400:
@@ -242,7 +344,7 @@ class ModelGateway:
                     sent_headers = True
                     if status >= 400:
                         error = response.read(65536)
-                        gateway._note_upstream_activity(len(error))
+                        gateway._note_upstream_activity(len(error), epoch=turn_epoch)
                         if gateway._key:
                             error = error.replace(gateway._key.encode(), b"[REDACTED]")
                         with gateway._lock:
@@ -256,10 +358,12 @@ class ModelGateway:
                             )
                         except (ValueError, AttributeError):
                             detail = error.decode("utf-8", errors="replace")
-                        gateway.error = f"HTTP {status}：{str(detail)[:1000]}"
+                        message = f"HTTP {status}：{str(detail)[:1000]}"
+                        gateway._set_error(message, turn_epoch)
                         if purpose == "compaction":
-                            gateway.fail_compaction(gateway.error)
-                        self.wfile.write(error)
+                            gateway.fail_compaction(message, epoch=turn_epoch)
+                        if gateway._turn_live(turn_epoch):
+                            self.wfile.write(error)
                     else:
                         observer = UsageObserver()
                         converter = None
@@ -267,18 +371,21 @@ class ModelGateway:
                             from .messages_bridge import MessagesStream
 
                             converter = MessagesStream(model=settings.model)
-                        while not gateway._closed.is_set():
+                        while gateway._turn_live(turn_epoch):
                             chunk = response.read1(65536)
+                            if not gateway._turn_live(turn_epoch):
+                                break
                             if not chunk:
                                 break
                             observer.feed(chunk)
-                            gateway._note_upstream_activity(len(chunk))
+                            gateway._note_upstream_activity(len(chunk), epoch=turn_epoch)
                             if purpose == "compaction" and observer.finish_reason not in {
                                 None,
                                 "stop",
                             }:
                                 gateway.fail_compaction(
-                                    f"摘要流未完整结束（finish_reason={observer.finish_reason}）"
+                                    f"摘要流未完整结束（finish_reason={observer.finish_reason}）",
+                                    epoch=turn_epoch,
                                 )
                             with gateway._lock:
                                 usage_record["usage"] = observer.usage
@@ -287,6 +394,12 @@ class ModelGateway:
                                 usage_record["finish_reason"] = observer.finish_reason
                             if converter is not None:
                                 out = converter.feed(chunk)
+                                if not out:
+                                    # Real upstream bytes can contain reasoning
+                                    # or a partial SSE frame without visible text.
+                                    # Reflect that activity without exposing it;
+                                    # never generate traffic while upstream is idle.
+                                    out = b'event: ping\ndata: {"type":"ping"}\n\n'
                                 if debug:
                                     with open(debug, "a", encoding="utf-8") as dump:
                                         dump.write(out.decode("utf-8", "replace"))
@@ -294,31 +407,37 @@ class ModelGateway:
                             else:
                                 self.wfile.write(chunk)
                             self.wfile.flush()
-                        if converter is not None:
+                        # Persist the upstream arguments before block-stop makes
+                        # the SDK validate them and potentially end the turn.
+                        with gateway._lock:
+                            usage_record["tool_calls"] = observer.tool_snapshot()
+                        if converter is not None and gateway._turn_live(turn_epoch):
                             self.wfile.write(converter.finish())
                             self.wfile.flush()
-                        observer.feed(b"\n\n")
+                        if gateway._turn_live(turn_epoch):
+                            observer.feed(b"\n\n")
                         with gateway._lock:
                             usage_record["usage"] = observer.usage
                             usage_record["complete"] = observer.complete
                             usage_record["raw"] = "".join(observer.content)
                             usage_record["finish_reason"] = observer.finish_reason
-                        if purpose == "compaction" and (
+                        if gateway._turn_live(turn_epoch) and purpose == "compaction" and (
                             not observer.complete or observer.finish_reason != "stop"
                         ):
                             gateway.fail_compaction(
-                                f"摘要流未完整结束（finish_reason={observer.finish_reason or 'unknown'}，complete={observer.complete}）"
+                                f"摘要流未完整结束（finish_reason={observer.finish_reason or 'unknown'}，complete={observer.complete}）",
+                                epoch=turn_epoch,
                             )
                 except (OSError, ValueError, http.client.HTTPException) as exc:
                     if purpose == "compaction":
-                        gateway.fail_compaction(str(exc))
-                    if not sent_headers:
+                        gateway.fail_compaction(str(exc), epoch=turn_epoch)
+                    if not sent_headers and gateway._turn_live(turn_epoch):
                         message = (
                             str(exc).replace(gateway._key, "[REDACTED]")
                             if gateway._key
                             else str(exc)
                         )
-                        gateway.error = message[:1000]
+                        gateway._set_error(message[:1000], turn_epoch)
                         content = json.dumps(
                             {"error": {"message": message}}, ensure_ascii=False
                         ).encode()
@@ -331,10 +450,24 @@ class ModelGateway:
                         except OSError:
                             pass
                 finally:
+                    if observer is not None and usage_record is not None:
+                        with gateway._lock:
+                            usage_record["tool_calls"] = observer.tool_snapshot()
                     if connection:
                         with gateway._lock:
                             gateway._connections.discard(connection)
+                            gateway._connection_epochs.pop(connection, None)
+                            interrupt_socket = gateway._connection_sockets.pop(connection, None)
+                        if response is not None:
+                            response.close()
+                        if interrupt_socket is not None:
+                            interrupt_socket.close()
                         connection.close()
+                    with gateway._handlers_done:
+                        gateway._handler_counts[turn_epoch] -= 1
+                        if not gateway._handler_counts[turn_epoch]:
+                            del gateway._handler_counts[turn_epoch]
+                        gateway._handlers_done.notify_all()
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._server.daemon_threads = True
@@ -353,18 +486,84 @@ class ModelGateway:
             raise ValueError("OpenCode Go 会话标识须为 1–256 个非空白 ASCII 字符")
         if not self._session_lock.acquire(blocking=False):
             raise ValueError("同一模型运行器不能同时执行多个会话")
+        turn_epoch: int | None = None
         try:
             with self._lock:
+                self._turn_epoch += 1
+                self._session_active = True
+                self._cancelled_epoch = None
                 self._session_id = session_id
                 self.error = None
                 self._usage_records = []
                 self._compaction_failure = None
                 self._blocked_generation_count = 0
+                self._upstream_activity_utc = None
+                self._upstream_activity_monotonic = None
+                self._upstream_response_bytes = 0
+                self._upstream_response_events = 0
+                turn_epoch = self._turn_epoch
             yield
         finally:
-            with self._lock:
+            # An ended SDK turn must not leave an old handler writing into the
+            # next turn. Cancellation shuts down its sockets to drain promptly.
+            with self._handlers_done:
+                while turn_epoch is not None and self._handler_counts.get(turn_epoch, 0):
+                    self._handlers_done.wait()
+                self._session_active = False
                 self._session_id = None
             self._session_lock.release()
+
+    def _turn_live_locked(self, epoch: int) -> bool:
+        return (
+            not self._closed.is_set()
+            and epoch == self._turn_epoch
+            and epoch != self._cancelled_epoch
+            and (epoch == 0 or self._session_active)
+        )
+
+    def _turn_live(self, epoch: int) -> bool:
+        with self._lock:
+            return self._turn_live_locked(epoch)
+
+    @staticmethod
+    def _shutdown_socket(upstream_socket: socket.socket) -> None:
+        try:
+            upstream_socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        if os.name == "nt":
+            # Winsock shutdown does not reliably wake a synchronous recv in
+            # another thread while socket.makefile() still owns the handle.
+            # Detach first so its later cleanup cannot close a reused handle.
+            handle = upstream_socket.detach()
+            if handle != -1:
+                ctypes.windll.ws2_32.closesocket(ctypes.c_size_t(handle))
+        else:
+            upstream_socket.close()
+
+    def cancel_active_turn(self) -> None:
+        """Interrupt only this SDK turn's upstream requests, keeping the gateway resident."""
+        with self._lock:
+            if not self._session_active or self._cancelled_epoch == self._turn_epoch:
+                return
+            epoch = self._turn_epoch
+            self._cancelled_epoch = epoch
+            connections = [
+                connection for connection in self._connections
+                if self._connection_epochs.get(connection) == epoch
+            ]
+            sockets = [
+                self._connection_sockets.get(connection) or connection.sock
+                for connection in connections
+            ]
+        for upstream_socket in sockets:
+            if upstream_socket is not None:
+                self._shutdown_socket(upstream_socket)
+
+    def _set_error(self, detail: str, epoch: int) -> None:
+        with self._lock:
+            if self._turn_live_locked(epoch):
+                self.error = detail
 
     def usage_snapshot(self) -> list[dict | None]:
         with self._lock:
@@ -372,11 +571,11 @@ class ModelGateway:
 
     def raw_snapshot(self) -> list[str]:
         with self._lock:
-            return [record["raw"] for record in self._usage_records]
+            return self._redact([record["raw"] for record in self._usage_records])
 
     def request_snapshot(self) -> list[dict]:
         with self._lock:
-            return deepcopy(
+            return self._redact(deepcopy(
                 [
                     {
                         key: record[key]
@@ -386,28 +585,50 @@ class ModelGateway:
                             "usage",
                             "complete",
                             "raw",
+                            "tool_calls",
                             "finish_reason",
                         )
                     }
                     for record in self._usage_records
                 ]
-            )
+            ))
+
+    def _redact(self, value) -> Any:
+        secrets_to_hide = [secret for secret in (self._key, self.token, *self._extra_secrets) if secret]
+        if isinstance(value, str):
+            for secret in secrets_to_hide:
+                value = value.replace(secret, "[REDACTED]")
+            return value
+        if isinstance(value, list):
+            return [self._redact(item) for item in value]
+        if isinstance(value, dict):
+            result = {key: self._redact(item) for key, item in value.items()}
+            arguments = value.get("arguments")
+            if isinstance(arguments, str) and any(secret in arguments for secret in secrets_to_hide):
+                # A credential may cross fragment boundaries. Never expose its
+                # pieces merely because each separate piece was not a full key.
+                result["argument_fragments"] = ["[REDACTED: credential-containing arguments]"]
+                result["arguments_redacted"] = True
+            return result
+        return value
 
     def compaction_snapshot(self) -> list[dict]:
         with self._lock:
-            return deepcopy(
+            return self._redact(deepcopy(
                 [record for record in self._usage_records if record["purpose"] == "compaction"]
-            )
+            ))
 
     def usage_incomplete(self) -> bool:
         with self._lock:
             return any(not record["complete"] for record in self._usage_records)
 
-    def _note_upstream_activity(self, byte_count: int = 0) -> None:
+    def _note_upstream_activity(self, byte_count: int = 0, *, epoch: int | None = None) -> None:
         """Record bytes received from upstream; never derived from a local timer."""
         received_at = time.monotonic()
         timestamp = datetime.now(UTC).isoformat()
         with self._lock:
+            if epoch is not None and not self._turn_live_locked(epoch):
+                return
             self._upstream_activity_monotonic = received_at
             self._upstream_activity_utc = timestamp
             self._upstream_response_bytes += max(0, int(byte_count))
@@ -427,12 +648,14 @@ class ModelGateway:
                 "source": "model_gateway_upstream",
             }
 
-    def fail_compaction(self, detail: str):
+    def fail_compaction(self, detail: str, *, epoch: int | None = None):
         """Fail closed for this turn; the SDK may otherwise warn and continue generation."""
         if self._key:
             detail = detail.replace(self._key, "[REDACTED]")
         detail = detail.replace(self.token, "[REDACTED]")
         with self._lock:
+            if epoch is not None and not self._turn_live_locked(epoch):
+                return
             if self._compaction_failure is None:
                 self._compaction_failure = f"上下文压缩未完成：{detail[:1000]}"
             self.error = self._compaction_failure
@@ -465,13 +688,16 @@ class ModelGateway:
             return
         self._closed.set()
         with self._lock:
-            for connection in self._connections:
-                if connection.sock:
-                    try:
-                        connection.sock.shutdown(socket.SHUT_RDWR)
-                    except OSError:
-                        pass
-                connection.close()
+            connections = list(self._connections)
+            sockets = [
+                self._connection_sockets.get(connection) or connection.sock
+                for connection in connections
+            ]
+        for upstream_socket in sockets:
+            if upstream_socket is not None:
+                self._shutdown_socket(upstream_socket)
+        for connection in connections:
+            connection.close()
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(1)

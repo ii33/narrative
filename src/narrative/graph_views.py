@@ -23,7 +23,6 @@ class GraphViewSpec(GraphModel):
     node_types: list[NodeType] | None = None
     context_id: str = Field(default="canon", min_length=1)
     disclosure_cut: DisclosureRef | None = None
-    as_of_revision: int | None = Field(default=None, ge=0, strict=True)
     limit: int = Field(default=200, ge=1, le=2000, strict=True)
     offset: int = Field(default=0, ge=0, strict=True)
     group_by: Literal["node_type"] = "node_type"

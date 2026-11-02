@@ -2,15 +2,11 @@
 
 Each facade exposes one narrow capability group and depends only on the service
 that implements it, so a new adapter can import one facade instead of the whole
-project surface. ``GraphOperations`` keeps the historical method names as thin
-delegations to these facades.
+project surface. Operations exposes these capabilities to every adapter.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
-from .change_service import ChangeService
 from .graph_profile_ops import ProfileService
 from .graph_read_ops import GraphReadService
 from .graph_service import GraphService
@@ -18,8 +14,6 @@ from .graph_store import GraphStore
 from .graph_timeline_ops import TimelineService
 from .graphrag_ops import GraphRagService
 from .property_store import PropertyStore
-
-ReviewCallback = Callable[[str, str, int, int | None], None]
 
 
 class GraphProjectFacade:
@@ -45,86 +39,31 @@ class GraphProjectFacade:
     def import_source(self, title: str, text: str) -> str:
         return self.service.import_source(title, text)
 
-    def locate(self, source_id: str, quote: str) -> list[dict]:
-        return self.service.locate(source_id, quote)
+    def locate(self, source_id: str, quotes: list[str], *, limit_per_quote: int = 20) -> list[dict]:
+        return self.service.locate(source_id, quotes, limit_per_quote=limit_per_quote)
 
     def schema(self) -> dict:
         return self.read.schema()
 
 
-class GraphReviewFacade:
-    """Graph object review: precheck, propose, edit, accept, reject."""
-
-    def __init__(self, service: GraphService, *, review_callback: ReviewCallback | None = None):
-        self.service = service
-        self._review_callback = review_callback
-
-    def precheck(self, objects: list[dict], expected_revision: int) -> list[dict]:
-        return self.service.precheck(objects, expected_revision)
-
-    def propose(self, objects: list[dict], expected_revision: int, **kwargs) -> str:
-        return self.service.propose(objects, expected_revision, **kwargs)
-
-    def candidates(self, status: str | None = None) -> list[dict]:
-        return self.service.candidates(status)
-
-    def candidate(self, candidate_id: str) -> dict:
-        return self.service.candidate(candidate_id)
-
-    def edit(self, candidate_id: str, objects: list[dict], version: int) -> dict:
-        return self.service.edit_candidate(candidate_id, objects, version)
-
-    def select_operations(self, candidate_id: str, keep_ids: list[str], version: int) -> dict:
-        return self.service.select_operations(candidate_id, keep_ids, version)
-
-    def accept(self, candidate_id: str, version: int) -> int:
-        revision = self.service.accept(candidate_id, version)
-        if self._review_callback is not None:
-            self._review_callback("graph_accept", candidate_id, version, revision)
-        return revision
-
-    def reject(self, candidate_id: str, version: int) -> None:
-        self.service.reject(candidate_id, version)
-        if self._review_callback is not None:
-            self._review_callback("graph_reject", candidate_id, version, None)
 
 
 class GraphPropertyFacade:
-    """Property records: review plus story-time and disclosure projections."""
+    """Current property intervals and disclosure projections."""
 
-    def __init__(self, properties: PropertyStore, *, review_callback: ReviewCallback | None = None):
+    def __init__(self, properties: PropertyStore):
         self.properties = properties
-        self._review_callback = review_callback
 
     def precheck(self, records: list[dict], expected_revision: int) -> list[dict]:
         return self.properties.precheck(records, expected_revision)
 
-    def propose(self, records: list[dict], expected_revision: int, **kwargs) -> str:
-        return self.properties.propose(records, expected_revision, **kwargs)
 
-    def candidates(self, status: str | None = None) -> list[dict]:
-        return self.properties.candidates(status)
 
-    def candidate(self, candidate_id: str) -> dict:
-        return self.properties.candidate(candidate_id)
 
-    def records(
-        self, as_of_revision: int | None = None, *, include_retracted: bool = False
-    ) -> list[dict]:
-        return self.properties.accepted_records(
-            as_of_revision, include_retracted=include_retracted
-        )
+    def records(self) -> list[dict]:
+        return self.properties.accepted_records()
 
-    def accept(self, candidate_id: str, version: int) -> int:
-        revision = self.properties.accept(candidate_id, version)
-        if self._review_callback is not None:
-            self._review_callback("property_accept", candidate_id, version, revision)
-        return revision
 
-    def reject(self, candidate_id: str, version: int) -> None:
-        self.properties.reject(candidate_id, version)
-        if self._review_callback is not None:
-            self._review_callback("property_reject", candidate_id, version, None)
 
     def state(self, node_id: str, property_id: str, at=None, **kwargs) -> dict:
         return self.properties.state(node_id, property_id, at, **kwargs)
@@ -138,21 +77,20 @@ class GraphPropertyFacade:
     def node_properties(
         self,
         node_id: str,
-        as_of_revision: int | None = None,
         cut: object = None,
         include_derived: bool = False,
     ) -> dict:
         return self.properties.node_properties(
-            node_id, as_of_revision, cut, include_derived=include_derived
+            node_id, cut, include_derived=include_derived
         )
 
     def audit(
-        self, node_ids: set[str] | None = None, as_of_revision: int | None = None
+        self, node_ids: set[str] | None = None
     ) -> dict:
-        return self.properties.audit(node_ids, as_of_revision)
+        return self.properties.audit(node_ids)
 
-    def world_state(self, at=None, as_of_revision: int | None = None) -> dict:
-        return self.properties.world_state(at, as_of_revision=as_of_revision)
+    def world_state(self, at=None) -> dict:
+        return self.properties.world_state(at, )
 
     def categories(self) -> dict[str, list[str]]:
         return self.properties.categories()
@@ -163,56 +101,12 @@ class GraphPropertyFacade:
     def categorize(self, targets: list[str], category: str, note: str = "") -> dict:
         return self.properties.categorize(targets, category, note)
 
-    def merge(self, alias_id: str, target_id: str, note: str = "") -> dict:
-        return self.properties.merge(alias_id, target_id, note)
-
-    def rename(self, names: object, to_id: str, note: str = "") -> dict:
-        return self.properties.rename(names, to_id, note)
-
-    def aliases(self) -> dict[str, str]:
-        return self.properties.aliases()
-
-    def retract(
-        self, targets: list[str], reason: str, *, event_id: str | None = None,
-        basis: str = "human",
-    ) -> dict:
-        return self.properties.retract(targets, reason, event_id=event_id, basis=basis)
-
-    def supersede(self, pairs: list[dict], note: str = "") -> dict:
-        return self.properties.supersede(pairs, note)
 
 
-class GraphChangeFacade:
-    """Unified mixed candidate: graph objects and property records together."""
 
-    def __init__(self, changes: ChangeService, *, review_callback: ReviewCallback | None = None):
-        self.changes = changes
-        self._review_callback = review_callback
 
-    def precheck(self, graph_objects, property_records, expected_revision: int) -> list[dict]:
-        return self.changes.precheck(graph_objects, property_records, expected_revision)
 
-    def propose(self, graph_objects, property_records, expected_revision: int, **kwargs) -> str:
-        return self.changes.propose(
-            graph_objects, property_records, expected_revision, **kwargs
-        )
 
-    def candidates(self, status: str | None = None) -> list[dict]:
-        return self.changes.candidates(status)
-
-    def candidate(self, candidate_id: str) -> dict:
-        return self.changes.candidate(candidate_id)
-
-    def accept(self, candidate_id: str, version: int) -> int:
-        revision = self.changes.accept(candidate_id, version)
-        if self._review_callback is not None:
-            self._review_callback("change_accept", candidate_id, version, revision)
-        return revision
-
-    def reject(self, candidate_id: str, version: int) -> None:
-        self.changes.reject(candidate_id, version)
-        if self._review_callback is not None:
-            self._review_callback("change_reject", candidate_id, version, None)
 
 
 class GraphQueryFacade:
@@ -230,9 +124,6 @@ class GraphQueryFacade:
 
     def display_map(self, **kwargs) -> dict:
         return self.read.display_map(**kwargs)
-
-    def candidate_preview(self, candidate_id: str) -> dict:
-        return self.read.candidate_preview(candidate_id)
 
     def timeline_view(self, **kwargs) -> dict:
         return self.timeline.timeline(**kwargs)

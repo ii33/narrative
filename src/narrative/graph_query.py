@@ -66,9 +66,10 @@ def query_graph(
     }
 
     needle = query.strip().casefold()
-    selected = set(node_ids or [])
+    requested = set(node_ids or [])
     if node_id:
-        selected.add(node_id)
+        requested.add(node_id)
+    selected = requested
     if needle:
         selected |= {
             key for key, node in nodes.items()

@@ -13,32 +13,22 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from PySide6.QtCore import QObject, Signal, Slot
 
 from . import graph_profile_ops, project_catalog, project_package, providers
 from .browse_view import moment_tree
-from .extraction import extract_chapter
 from .graph_operations import GraphOperations
-from .harness import HarnessRunner, HarnessSettings, harness_env
-from .native_models import CanvasState, candidate_summary, node_detail, search_result
+from .harness import HarnessRunner, harness_env
+from .native_models import CanvasState, node_detail, search_result
 from .node_material import MaterialStore, holds_at
 from .order_ids import order_key
 from .provider_store import GLOBAL_SCOPE, ProviderStore
 
-_NODE_TYPES = {"person", "group", "item", "location", "event", "scene", "storyline", "other"}
-
-
-def _read_before(node: dict, cut: dict | None, orders: list[dict]) -> bool:
-    """这个节点是否在阅读位置之前（同一份原文比 start，不同原文比顺序）。"""
-    if not cut or not node:
-        return False
-    ordinal = {row["source_id"]: row["ordinal"] for row in orders}
-    disclosure = node.get("disclosure") or {}
-    mine = (ordinal.get(disclosure.get("source_id"), 0), disclosure.get("start") or 0)
-    here = (ordinal.get(cut.get("source_id"), 0), cut.get("start") or 0)
-    return mine < here
+_NODE_TYPES = {"person", "group", "item", "location", "event", "action", "scene", "big_event", "storyline", "other"}
 
 
 class NativeBridge(QObject):
@@ -59,6 +49,7 @@ class NativeBridge(QObject):
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
+        self.resultReady.connect(self._invalidate_conversation_graph)
         self._project_path: Path | None = None
         self._canvas = CanvasState()
         self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="narrative-native")
@@ -66,6 +57,8 @@ class NativeBridge(QObject):
             int, tuple[str, int, Callable[[dict], dict] | None, int | None, float]
         ] = {}
         self._next_request = 0
+        self._static_scan_generation = 0
+        self._static_target_generation = 0
         self._epoch = 0
         self._query_epoch = 0
         self._recent_generation = 0
@@ -79,7 +72,12 @@ class NativeBridge(QObject):
         self._state_cut: str = ""
         self._closed = False
         # 常驻协作者：一个工程一条会话，模型看得见自己前面的工具调用。
+        self._assistant_runtime = None
         self._assistant_runner = None
+        self._assistant_tool_host = None
+        self._assistant_steps: list[dict] = []
+        self._assistant_task_lock = threading.Lock()
+        self._assistant_jobs: dict[int, dict] = {}
         self._assistant_chat = ""
         self._assistant_resumed: set[str] = set()
         self._assistant_lock = threading.Lock()
@@ -134,8 +132,17 @@ class NativeBridge(QObject):
 
         future.add_done_callback(completed)
 
+    @Slot(str, "QVariantMap")
+    def _invalidate_conversation_graph(self, kind, payload):
+        if (kind == "conversation_progress" and payload.get("graph_reset_required")
+                and self._project_path is not None
+                and self.recentProjectKey(payload.get("project_path", "")) == self.recentProjectKey(str(self._project_path))):
+            self._canvas.clear(preserve_positions=True)
+
     @Slot(int, object, object)
     def _on_worker_done(self, request_id: int, payload: object, error: object) -> None:
+        with self._assistant_lock:
+            self._assistant_jobs.pop(request_id, None)
         request = self._requests.pop(request_id, None)
         if not self._requests:
             self.busyChanged.emit(False)
@@ -179,7 +186,9 @@ class NativeBridge(QObject):
         stale = [
             (request_id, request)
             for request_id, request in self._requests.items()
-            if request[0] != "slice_extraction_action"
+            # Conversation tasks run until completion or explicit stop; short
+            # graph-refresh reads must never discard their terminal result.
+            if request[0] not in {"assistant", "static_check"}
             and now - request[4] > self.STALE_AFTER_SECONDS
         ]
         if not stale:
@@ -261,7 +270,6 @@ class NativeBridge(QObject):
         return {
             "project": info,
             "sources": ops.sources(),
-            "candidate_count": len(ops.graph_candidates("pending")),
             "provider": {
                 key: ops.provider_profile().get(key) for key in (
                     "provider", "model", "max_tokens", "context_window", "output_reserve",
@@ -306,6 +314,9 @@ class NativeBridge(QObject):
         self._query_canvas = None
         self._close_assistant()
         self.resultReady.emit("project_closed", {})
+        # The launcher stays mounted while a project is open. Refresh its
+        # initial snapshot after changing epoch, so it includes this visit.
+        self.loadRecentProjects()
 
     @Slot(str, result=str)
     def urlToPath(self, url: str) -> str:
@@ -572,12 +583,8 @@ class NativeBridge(QObject):
         self._canvas.clear(preserve_positions=True)
 
         def work(ops) -> dict:
-            revision = requested.get("as_of_revision")
-            if revision is None:
-                revision = ops.graph_project_info()["revision"]
-            pinned = requested | {"as_of_revision": revision}
-            view = ops.graph_view(pinned | {"view": "table"})
-            return {"view": view, "labels": ops.graph_display_map(as_of_revision=revision)["items"]}
+            view = ops.graph_view(requested | {"view": "table"})
+            return {"view": view, "labels": ops.graph_display_map()["items"]}
 
         def apply(result: dict) -> dict:
             view = result["view"]
@@ -586,106 +593,6 @@ class NativeBridge(QObject):
             return {"canvas": view, "labels": result["labels"]}
 
         self._project_task("graph_view", work, apply)
-
-    @Slot(str)
-    def loadPropertyContext(self, node_id: str = "") -> None:
-        """Load selectable nodes and the reviewed node-local property projection."""
-        def work(ops) -> dict:
-            snapshot = ops.graph_snapshot()
-            world = ops.property_world_state()
-            return {
-                "revision": snapshot["revision"],
-                "nodes": [{key: node.get(key) for key in ("id", "name", "node_type")}
-                          for node in snapshot.get("nodes", [])],
-                "world": world,
-                "selected_node_id": node_id,
-            }
-        self._project_task("property_context", work)
-
-    @Slot(str, str, str)
-    def queryProperty(self, node_id: str, property_id: str, at_json: str = "") -> None:
-        """Query one property and its append-only history through Operations."""
-        try:
-            at = json.loads(at_json) if at_json.strip() else None
-        except json.JSONDecodeError as exc:
-            self.errorOccurred.emit("property_state", f"at 必须是 JSON TimeRef：{exc.msg}")
-            return
-
-        def work(ops) -> dict:
-            return {
-                "node_id": node_id,
-                "property_id": property_id,
-                "at": at,
-                "state": ops.property_state(node_id, property_id, at),
-                "history": ops.property_history(node_id, property_id),
-            }
-        self._project_task("property_state", work)
-
-    @Slot(str, str, "QVariantMap", str, str)
-    def queryPropertyDisclosure(
-        self, node_id: str, property_id: str, cut: dict,
-        scope: str = "world", holder_id: str = "",
-    ) -> None:
-        """Reader-facing disclosure projection; ignores story time."""
-        if not node_id.strip() or not property_id.strip():
-            self.errorOccurred.emit("property_disclosure", "节点和属性不能为空")
-            return
-        if not cut.get("source_id") or cut.get("start") is None:
-            self.errorOccurred.emit("property_disclosure", "披露切点须包含 source_id 和 start")
-            return
-
-        def work(ops) -> dict:
-            return {
-                "node_id": node_id, "property_id": property_id,
-                "scope": scope or "world", "holder_id": holder_id or None,
-                "cut": dict(cut),
-                "state": ops.property_disclosure_state(
-                    node_id, property_id, dict(cut),
-                    scope=scope or "world", holder_id=holder_id or None,
-                ),
-            }
-        self._project_task("property_disclosure", work)
-
-    @Slot(str)
-    def loadPropertyWorldState(self, at_json: str = "") -> None:
-        """Load the aggregate projection; inverse holder lookups derive from it."""
-        try:
-            at = json.loads(at_json) if at_json.strip() else None
-        except json.JSONDecodeError as exc:
-            self.errorOccurred.emit("property_world", f"at 必须是 JSON TimeRef：{exc.msg}")
-            return
-        self._project_task("property_world", lambda ops: {"world": ops.property_world_state(at)})
-
-    @Slot(str, int)
-    def proposePropertyRecords(self, records_json: str, expected_revision: int) -> None:
-        """Precheck and stage property records; acceptance remains a human action."""
-        try:
-            records = json.loads(records_json)
-        except json.JSONDecodeError as exc:
-            self.errorOccurred.emit("property_stage", f"记录 JSON 无效：{exc.msg}")
-            return
-        if not isinstance(records, list) or not records or not all(isinstance(row, dict) for row in records):
-            self.errorOccurred.emit("property_stage", "请提供非空 JSON 对象数组")
-            return
-
-        def work(ops) -> dict:
-            diagnostics = ops.property_precheck(records, expected_revision)
-            if any(item.get("severity") == "error" for item in diagnostics):
-                return {"status": "precheck_failed", "diagnostics": diagnostics,
-                        "expected_revision": expected_revision}
-            candidate_id = ops.property_propose(records, expected_revision, source="manual")
-            return {"status": "pending", "candidate": ops.property_candidate(candidate_id),
-                    "diagnostics": diagnostics}
-        self._project_task("property_stage", work)
-
-    @Slot()
-    def auditProperties(self) -> None:
-        """Whole-graph property audit; the review page shows the findings."""
-        from .review_display import humanize_report
-
-        self._project_task("property_audit", lambda ops: humanize_report(
-            ops.graph_snapshot(), ops.property_records(), ops.property_audit(),
-        ))
 
     @Slot()
     @Slot(str, bool)
@@ -731,7 +638,7 @@ class NativeBridge(QObject):
         def apply(result: dict) -> dict:
             cut = result.get("cut") or {}
             # The property pane cuts at the same anchor event the list uses.
-            self._state_cut = str(cut.get("event_id") or "")
+            self._state_cut = str(requested.get("cut_id") or cut.get("event_id") or "")
             return result
 
         self._submit("browse", work, apply, query_epoch=epoch)
@@ -791,42 +698,18 @@ class NativeBridge(QObject):
         self._project_task("property_categorize", work)
 
     @Slot(str, str)
-    def mergeProperties(self, alias_id: str, target_id: str) -> None:
-        """Read one property name as another; records keep their own name."""
-        if not alias_id.strip() or not target_id.strip():
-            self.errorOccurred.emit("property_merge", "请提供两个属性名")
-            return
-
-        def work(ops) -> dict:
-            return ops.property_merge(alias_id.strip(), target_id.strip())
-
-        self._project_task("property_merge", work)
+    def mergeProperties(self, source_id: str, target_id: str) -> None:
+        """Physically merge definitions and their references."""
+        self._project_task("property_merge", lambda ops: ops.merge_properties(
+            source_id, target_id, "用户合并属性", ops.graph_project_info()["revision"],
+        ) | {"target_id": target_id})
 
     @Slot(str, str)
-    def renameProperty(self, names_json: str, to_id: str) -> None:
-        """Give an aspect a new name; the records keep the name they were captured under.
-
-        ``names_json`` is the whole row, because one aspect may be spread over two
-        spellings and renaming the line has to move both.
-        """
-        try:
-            names = json.loads(names_json)
-        except json.JSONDecodeError as exc:
-            self.errorOccurred.emit("property_rename", f"属性名列表无效：{exc.msg}")
-            return
-        if isinstance(names, str):
-            names = [names]
-        if not isinstance(names, list) or not all(isinstance(item, str) for item in names):
-            self.errorOccurred.emit("property_rename", "请提供属性名数组")
-            return
-        if not to_id.strip():
-            self.errorOccurred.emit("property_rename", "请填写新的属性名")
-            return
-
-        def work(ops) -> dict:
-            return ops.property_rename([str(item) for item in names], to_id.strip())
-
-        self._project_task("property_rename", work)
+    def renameProperty(self, from_id: str, to_id: str) -> None:
+        """Rename the current definition and update references."""
+        self._project_task("property_rename", lambda ops: ops.rename_property(
+            from_id, to_id, "用户重命名属性", ops.graph_project_info()["revision"],
+        ) | {"to_id": to_id})
 
     def _manual_record(self, payload: dict) -> dict:
         """One hand-written disclosure from a QVariantMap.
@@ -834,8 +717,6 @@ class NativeBridge(QObject):
         The quote is optional but checked the same way as a model's: it has to be
         an exact, unique substring of the source, or the precheck refuses it.
         """
-        from uuid import uuid4
-
         node_id = str(payload.get("node_id") or "").strip()
         property_id = str(payload.get("property_id") or "").strip()
         event_id = str(payload.get("event_id") or "").strip()
@@ -846,7 +727,6 @@ class NativeBridge(QObject):
             raise ValueError("值不能为空")
         record: dict = {
             "kind": "property_value",
-            "id": f"manual_{uuid4().hex[:12]}",
             "node_id": node_id,
             "property_id": property_id,
             "value": value,
@@ -866,8 +746,8 @@ class NativeBridge(QObject):
             record["evidence"] = {"source_id": source_id, "quote": quote}
         return record
 
-    def _stage_records(self, kind: str, build) -> None:
-        """Precheck a hand-written batch and stage it as one candidate."""
+    def _save_property_edit(self, kind: str, build) -> None:
+        """Precheck and save an explicit user property edit."""
 
         def work(ops) -> dict:
             revision = ops.graph_project_info()["revision"]
@@ -881,15 +761,9 @@ class NativeBridge(QObject):
                         "object_id": None, "message": str(exc),
                     }],
                 }
-            diagnostics = ops.property_precheck(records, revision)
-            if any(item.get("severity") == "error" for item in diagnostics):
-                return {"status": "precheck_failed", "diagnostics": diagnostics}
-            candidate = ops.property_propose(records, revision, source="manual", note=note)
-            # A hand-written record is the acceptance step: the precheck already
-            # proved the quote sits in the source and the fields line up. Model
-            # output still waits on the review page, because there a person has to
-            # decide — here the person already did.
-            revision_after = ops.property_accept(candidate, 1)
+            committed = ops.apply_changes([], records, revision, note)
+            if committed["status"] not in {"accepted", "unchanged"}:
+                return committed
             anchor = next(
                 (item.get("event_id") for item in records
                  if item.get("kind") == "property_value"),
@@ -899,13 +773,7 @@ class NativeBridge(QObject):
                 node["id"]: node.get("name") or node["id"]
                 for node in ops.graph_snapshot().get("nodes", [])
             }
-            return {
-                "status": "accepted",
-                "revision": revision_after,
-                "anchor": anchor,
-                "anchor_name": names.get(anchor or "", ""),
-                "diagnostics": diagnostics,
-            }
+            return committed | {"anchor": anchor, "anchor_name": names.get(anchor or "", "")}
 
         def apply(result: dict) -> dict:
             # The edit landed where its disclosure sits. If that is beyond the
@@ -928,7 +796,7 @@ class NativeBridge(QObject):
         source_id = str(payload.get("source_id") or "").strip()
         if not quote or not source_id:
             return None
-        found = ops.locate(source_id, quote)
+        found = ops.locate(source_id, [quote], limit_per_quote=2)[0]["matches"]
         if len(found) == 1:
             record["disclosure"] = {"source_id": source_id, "start": found[0]["start"]}
             return None
@@ -938,7 +806,7 @@ class NativeBridge(QObject):
 
     @Slot("QVariantMap")
     def addPropertyRecord(self, payload: dict) -> None:
-        """Stage one hand-written disclosure; acceptance still happens on the review page."""
+        """Save one hand-written disclosure after deterministic prechecks."""
         try:
             record = self._manual_record(payload)
         except ValueError as exc:
@@ -963,102 +831,87 @@ class NativeBridge(QObject):
                     "value_type": "any", "cardinality": "one",
                 })
             records.append(record)
-            # 更早的那条由 accept 统一按取代规则标失效，这里不再重复算一遍。
+            # 更早的单值由提交统一结束有效期，这里不再重复算一遍。
             return records, "人工补录"
 
-        self._stage_records("property_add", build)
+        self._save_property_edit("property_add", build)
 
     @Slot(str, "QVariantMap")
     def correctPropertyRecord(self, record_id: str, payload: dict) -> None:
-        """Correct one disclosure: append the right one, take the wrong one back.
-
-        A record is never rewritten, so a correction is two records in one
-        candidate — the corrected disclosure and the retraction of the one it
-        replaces. They travel together, so a correction can never land without
-        its retraction. The retraction carries no event: the old record was
-        misread, so it never counted, anywhere.
-        """
-        from uuid import uuid4
-
-        try:
-            record = self._manual_record(payload)
-        except ValueError as exc:
-            self.errorOccurred.emit("property_correct", str(exc))
-            return
-
-        def build(ops) -> tuple[list[dict], str]:
-            problem = self._place_evidence(ops, record, payload)
-            if problem:
-                raise ValueError(problem)
-            records: list[dict] = [{
-                "kind": "property_retraction",
-                "id": f"retract_{uuid4().hex[:12]}",
-                "target_id": record_id,
-                "reason": str(payload.get("reason") or "更正：以新记录为准"),
-            }]
-            records.append(record)
-            return records, f"更正 {record['property_id']}"
-
-        self._stage_records("property_correct", build)
+        """Correct an input error in place; this is not a new story state."""
+        def work(ops) -> dict:
+            options = {key: payload[key] for key in (
+                "event_id", "source_id", "quote", "category", "scope", "holder_id"
+            ) if payload.get(key) not in (None, "")}
+            return {"status": "accepted", **ops.correct_property(
+                record_id, payload.get("value"), str(payload.get("reason") or "用户更正录入错误"),
+                **options,
+            )}
+        self._project_task("property_correct", work)
 
     @Slot(str, str)
-    def retractPropertyRecords(self, targets_json: str, reason: str) -> None:
-        """Invalidate records; the rows stay for audit but stop being read."""
+    def expirePropertyRecords(self, targets_json: str, reason: str) -> None:
+        """End validity at the current reading boundary without a retraction row."""
         try:
             targets = json.loads(targets_json)
-        except json.JSONDecodeError as exc:
-            self.errorOccurred.emit("property_retract", f"记录 ID 列表无效：{exc.msg}")
+            if not isinstance(targets, list) or not all(isinstance(item, str) for item in targets):
+                raise ValueError("请提供记录 ID 数组")
+        except (ValueError, json.JSONDecodeError) as exc:
+            self.errorOccurred.emit("property_expire", str(exc))
             return
-        if not isinstance(targets, list) or not all(isinstance(item, str) for item in targets):
-            self.errorOccurred.emit("property_retract", "请提供记录 ID 数组")
-            return
-
+        reading_cut, state_cut = dict(self._reading_cut), self._state_cut
         def work(ops) -> dict:
-            # 失效从读者站的位置起算：后面的状态不能回头改写前面的。
-            # 「读错了，从来不算」是更正那条路（追加新值 + 撤回旧值），不是这里。
-            return ops.property_retract(
-                [str(item) for item in targets], reason,
-                event_id=self._reading_anchor(ops),
-            )
-
-        self._project_task("property_retract", work)
+            boundary = self._reading_boundary(ops, reading_cut, state_cut)
+            return ops.expire_properties(targets, boundary["source_id"], boundary["start"],
+                                         event_id=boundary.get("event_id"), reason=reason)
+        self._project_task("property_expire", work)
 
     @Slot(str)
     def deletePropertyRecords(self, targets_json: str) -> None:
-        """删除一条记录：它从来不算，不是「从这一步起不算」。
-
-        和「失效」分开：失效锚在读者站的位置，之前读到的仍算；删除说的是这条
-        本来就不该在。记录照样留在库里（append-only），只是不再出现在任何投影里。
-        """
+        """Physically delete erroneous records, rather than changing story history."""
         try:
             targets = json.loads(targets_json)
-        except json.JSONDecodeError as exc:
-            self.errorOccurred.emit("property_delete", f"记录 ID 列表无效：{exc.msg}")
+            if not isinstance(targets, list) or not all(isinstance(item, str) for item in targets):
+                raise ValueError("请提供记录 ID 数组")
+        except (ValueError, json.JSONDecodeError) as exc:
+            self.errorOccurred.emit("property_delete", str(exc))
             return
-        if not isinstance(targets, list) or not all(isinstance(item, str) for item in targets):
-            self.errorOccurred.emit("property_delete", "请提供记录 ID 数组")
-            return
+        self._project_task("property_delete", lambda ops: ops.delete_property_records(targets, "用户删除错误记录") | {"deleted": targets})
 
-        def work(ops) -> dict:
-            return ops.property_retract(
-                [str(item) for item in targets], "手工删除", event_id=None
-            )
+    @staticmethod
+    def _reading_boundary(ops, reading_cut: dict, state_cut: str) -> dict:
+        if reading_cut.get("source_id") and type(reading_cut.get("start")) is int:
+            return dict(reading_cut)
+        if state_cut:
+            node = next((row for row in ops.graph_snapshot()["nodes"] if row["id"] == state_cut), {})
+            boundary = dict(node.get("disclosure") or {})
+            if boundary.get("source_id") and type(boundary.get("start")) is int:
+                return boundary | {"event_id": state_cut}
+            raise ValueError("该阅读位置没有精确原文边界，无法设置有效期")
+        sources = ops.sources()
+        if not sources:
+            raise ValueError("工程没有原文，无法设置有效期")
+        orders = ops.graph_snapshot().get("source_orders", [])
+        source_id = max(orders, key=lambda row: row["ordinal"])["source_id"] if orders else sources[-1]["id"]
+        return {"source_id": source_id, "start": len(ops.source(source_id)["text"])}
 
-        self._project_task("property_delete", work)
+    @Slot(str, int)
+    def previewRollback(self, source_id: str, start: int) -> None:
+        self._project_task("rollback_preview", lambda ops: ops.rollback_preview(
+            source_id, start, ops.graph_project_info()["revision"],
+        ))
 
-    def _reading_anchor(self, ops) -> str:
-        """读者现在站在哪：停在某个阅读位置就用它，停在「最新」就用最后一个事件。
-
-        失效和撤销失效都落在这个位置上——状态是一段接一段叠出来的，
-        写在后面的记录不该回头改写前面已经读过的。
-        """
-        from .browse_view import steps
-
-        event_id = str(self._state_cut or "")
-        if event_id:
-            return event_id
-        all_events = steps(ops.graph_snapshot(), "event")
-        return all_events[-1]["id"] if all_events else ""
+    @Slot(str, int, int, str)
+    def rollbackTo(self, source_id: str, start: int, expected_revision: int, reason: str) -> None:
+        def apply(result: dict) -> dict:
+            if result.get("status") == "accepted":
+                self._canvas.clear()
+                self._query_canvas = None
+                result = result | {"graph_reset_required": True}
+            return result
+        self._project_task("rollback", lambda ops: ops.rollback_to(
+            source_id, start, expected_revision, reason,
+        ), apply)
 
     @Slot(str)
     def loadNodeEditor(self, node_id: str) -> None:
@@ -1079,17 +932,17 @@ class NativeBridge(QObject):
         """生效/失效下拉用的分级阅读位置：一列一层（大事件 → 场景 → 事件）。
 
         层级表在 `browse_view.MOMENT_LEVELS`，父子关系看谁把谁列在 `events` 里。
-        带上当前阅读位置和属性取值：大事件在读完之前显示暂称，它的「走到哪了」
+        带上当前阅读位置和属性取值：大事件的「走到哪了」
         由已经读过的场景那句话攒出来——同一份数据，读者停在哪就显示到哪。
         """
         return moment_tree(
             ops.graph_snapshot(),
             cut_event_id=self._state_cut,
-            records=ops.property_records(include_retracted=True),
+            records=ops.property_records(),
         )
 
     def _material_payload(self, ops, node_id: str) -> dict:
-        return self._material().view(node_id, cut=self._state_cut) | {
+        return self._material().view(node_id, cut=self._state_cut, snapshot=ops.graph_snapshot()) | {
             "moments": self._material_moments(ops)
         }
 
@@ -1112,12 +965,12 @@ class NativeBridge(QObject):
 
         def work(ops) -> dict:
             store = self._material()
-            changed = change(store)
+            changed = change(store, ops.graph_snapshot())
             payload = self._material_payload(ops, node_id)
             # 刚改的那张如果不在当前阅读位置上，界面要说一声——否则像是没保存。
             if isinstance(changed, dict) and changed.get("id"):
                 payload["changed_id"] = changed["id"]
-                payload["changed_visible"] = holds_at(changed, self._state_cut)
+                payload["changed_visible"] = holds_at(changed, self._state_cut, snapshot=ops.graph_snapshot())
             return payload
 
         self._project_task("material", work)
@@ -1144,8 +997,8 @@ class NativeBridge(QObject):
         images = self._images_from_json(images_json)
         self._material_task(
             node_id,
-            lambda store: store.add_card(
-                node_id, title, detail, valid_from, valid_to, images
+            lambda store, snapshot: store.add_card(
+                node_id, title, detail, valid_from, valid_to, images, snapshot=snapshot
             ),
         )
 
@@ -1163,7 +1016,7 @@ class NativeBridge(QObject):
         images = self._images_from_json(images_json)
         self._material_task(
             node_id,
-            lambda store: store.update_card(
+            lambda store, snapshot: store.update_card(
                 node_id,
                 card_id,
                 title=title,
@@ -1171,17 +1024,18 @@ class NativeBridge(QObject):
                 valid_from=valid_from,
                 valid_to=valid_to,
                 images=images,
+                snapshot=snapshot,
             ),
         )
 
     @Slot(str, str)
     def removeMaterialCard(self, node_id: str, card_id: str) -> None:
-        self._material_task(node_id, lambda store: store.remove_card(node_id, card_id))
+        self._material_task(node_id, lambda store, snapshot: store.remove_card(node_id, card_id))
 
     @Slot(str, str, str, str)
     def addMaterialImage(self, node_id: str, card_id: str, path: str, caption: str) -> None:
         self._material_task(
-            node_id, lambda store: store.add_image(node_id, card_id, Path(path), caption)
+            node_id, lambda store, snapshot: store.add_image(node_id, card_id, Path(path), caption)
         )
 
     @Slot(str, str, str, str)
@@ -1190,24 +1044,14 @@ class NativeBridge(QObject):
     ) -> None:
         self._material_task(
             node_id,
-            lambda store: store.update_image_caption(node_id, card_id, image_id, caption),
+            lambda store, snapshot: store.update_image_caption(node_id, card_id, image_id, caption),
         )
 
     @Slot(str, str, str)
     def removeMaterialImage(self, node_id: str, card_id: str, image_id: str) -> None:
         self._material_task(
-            node_id, lambda store: store.remove_image(node_id, card_id, image_id)
+            node_id, lambda store, snapshot: store.remove_image(node_id, card_id, image_id)
         )
-
-    @Slot(str, int)
-    def acceptPropertyCandidate(self, candidate_id: str, version: int) -> None:
-        """Accept a staged property candidate; the human action stays explicit."""
-
-        def work(ops) -> dict:
-            revision = ops.property_accept(candidate_id, version)
-            return {"status": "accepted", "revision": revision}
-
-        self._project_task("property_review", work)
 
     @Slot(str, "QVariantList")
     def searchNodes(self, query: str, types: list) -> None:
@@ -1237,100 +1081,68 @@ class NativeBridge(QObject):
             )}
             span = spans.get(node_id)
             detail["span"] = span
-            # 还没读到它收尾那一步，就只知道个暂称；读到了才用正式名。
-            provisional = str((detail.get("node") or {}).get("provisional_name") or "")
-            if provisional and span:
-                nodes = {row["id"]: row for row in snapshot["nodes"]}
-                last = nodes.get(span["last"]) or {}
-                if _read_before(last, cut, snapshot.get("source_orders") or []):
-                    detail["display_name"] = provisional
-                    detail["name_provisional"] = True
             return detail
 
         self._project_task("detail", work)
-
-    def _extraction_dir(self) -> Path:
-        from .project_package import layout
-
-        return layout(self._project()).extraction
-
-    @Slot(str)
-    def loadExtraction(self, source_id: str) -> None:
-        """Read a stored extraction for one source, if it exists."""
-        directory = self._extraction_dir()
-        path = directory / f"{source_id}.json"
-
-        def work() -> dict:
-            if not path.is_file():
-                return {"source_id": source_id, "nodes": [], "grouped": {}, "counts": {},
-                        "rejected": [], "missing": True}
-            return json.loads(path.read_text(encoding="utf-8"))
-
-        self._submit("extraction", work)
-
-    @Slot(str)
-    def startExtraction(self, source_id: str) -> None:
-        """Read the whole source and extract nodes and events with the project model."""
-        directory = self._extraction_dir()
-
-        def work(ops) -> dict:
-            source = ops.source(source_id)
-            settings = HarnessSettings.model_validate(
-                ops.harness_settings() | {"timeout_seconds": 600}
-            )
-            api_key = os.environ.get(settings.key_env) or os.environ.get("DEEPSEEK_API_KEY")
-            if not api_key:
-                raise ValueError(f"缺少 {settings.key_env} 或 DEEPSEEK_API_KEY")
-            data = extract_chapter(
-                source["title"], source["text"],
-                settings=settings, api_key=api_key,
-                workdir=directory / source_id / "sdk", ops=ops,
-                source_id=source_id,
-            )
-            data.pop("raw", None)
-            data["source_id"] = source_id
-            data["source_hash"] = source["hash"]
-            data["extracted_at"] = __import__("datetime").datetime.now().isoformat(timespec="seconds")
-            directory.mkdir(parents=True, exist_ok=True)
-            (directory / f"{source_id}.json").write_text(
-                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            return data
-
-        self._project_task("extraction", work)
-
-    @Slot(str)
-    def commitExtraction(self, source_id: str) -> None:
-        """落进图：可信的直接进，拿不准的留成待审候选。"""
-        from .extraction import commit_extraction
-
-        path = self._extraction_dir() / f"{source_id}.json"
-
-        def work(ops) -> dict:
-            if not path.is_file():
-                raise ValueError("还没有提取结果")
-            data = json.loads(path.read_text(encoding="utf-8"))
-            result = commit_extraction(ops, data)
-            candidate = result.get("candidate")
-            return result | {
-                "candidate": ops.change_candidate(candidate) if candidate else None,
-            }
-
-        self._project_task("extraction_commit", work)
 
     # -- 常驻协作者 ------------------------------------------------------
 
     def _close_assistant(self) -> None:
         with self._assistant_lock:
-            runner = self._assistant_runner
+            for job in self._assistant_jobs.values():
+                job["stop_reason"] = "project_cancelled"
+                job["cancel"].set()
+            self._assistant_jobs.clear()
+            runtime = self._assistant_runtime
+            self._assistant_runtime = None
             self._assistant_runner = None
+            self._assistant_tool_host = None
+            self._assistant_steps = []
             self._assistant_resumed = set()
-        if runner is not None:
-            try:
-                # 关窗口时可能正好有一轮在跑：强制关掉，别让进程挂着。
-                runner.close(force=True)
-            except Exception:
-                pass
+            self._assistant_chat = ""
+        if runtime is not None:
+            runtime.close("project_closed")
+
+    def _attach_conversation_runtime(self, ops, settings, api_key, expected_path):
+        from .conversation_runtime import get_runtime
+
+        runtime = get_runtime(ops, settings, api_key, runner_factory=HarnessRunner)
+        with self._assistant_lock:
+            cancelled = self._closed or self._project_path != expected_path
+            if not cancelled:
+                self._assistant_runtime = runtime
+                self._assistant_runner = runtime.runner
+                self._assistant_tool_host = runtime.host
+                self._assistant_resumed = runtime._resumed
+        if cancelled:
+            runtime.close("project_closed")
+            raise ValueError("工程已切换，任务已停止")
+        return runtime
+
+    def _clear_closed_conversation(self, runtime) -> None:
+        with self._assistant_lock:
+            if self._assistant_runtime is runtime and runtime.closed:
+                self._assistant_runtime = None
+                self._assistant_runner = None
+                self._assistant_tool_host = None
+                self._assistant_resumed = set()
+                self._assistant_steps = []
+
+    def _conversation_event(self, ops, expected_path, event: dict, *, busy=True):
+        if self._closed or self._project_path != expected_path:
+            return
+        store = self._chats(ops)
+        chat_id = event.get("chat_id")
+        if not chat_id:
+            chat = store.active(create=False)
+            chat_id = chat["id"] if chat else ""
+        if not chat_id:
+            return
+        self.resultReady.emit("conversation_progress", {
+            **event, "chat_id": chat_id, "chat": store.load(chat_id), "items": store.list(),
+            "current": self._assistant_chat, "project_path": str(project_package.layout(expected_path).entry),
+            "busy": busy,
+        })
 
     def _chats(self, ops):
         from .chat_store import ChatStore
@@ -1343,17 +1155,16 @@ class NativeBridge(QObject):
 
         def work(ops) -> dict:
             store = self._chats(ops)
-            items = store.list()
-            if not self._assistant_chat and items:
-                self._assistant_chat = items[0]["id"]
-            return {"items": items, "current": self._assistant_chat}
+            chat = store.active(create=False)
+            self._assistant_chat = chat["id"] if chat else ""
+            return {"items": store.list(), "current": self._assistant_chat}
 
         self._project_task("chats", work)
 
     @Slot(str)
     def openChat(self, chat_id: str) -> None:
         def work(ops) -> dict:
-            chat = self._chats(ops).load(chat_id)
+            chat = self._chats(ops).set_active(chat_id)
             self._assistant_chat = chat["id"]
             return {"chat": chat, "items": self._chats(ops).list()}
 
@@ -1383,26 +1194,32 @@ class NativeBridge(QObject):
         def work(ops) -> dict:
             store = self._chats(ops)
             store.delete(chat_id)
-            if self._assistant_chat == chat_id:
-                self._assistant_chat = ""
+            active = store.active(create=False)
+            self._assistant_chat = active["id"] if active else ""
             items = store.list()
-            if not self._assistant_chat and items:
-                self._assistant_chat = items[0]["id"]
-            chat = store.load(self._assistant_chat) if self._assistant_chat else {
-                "id": "", "session": "", "title": "新会话", "messages": []
-            }
+            chat = active or {"id": "", "session": "", "title": "新会话", "messages": []}
             return {"chat": chat, "items": items, "removed": chat_id}
 
         self._project_task("chat", work)
 
     @Slot(str, str)
     def assistantTurn(self, text: str, image_path: str = "") -> None:
+        self._assistant_turn(text, image_path, self._assistant_chat)
+
+    def _assistant_turn(self, text: str, image_path: str, requested_chat: str | None) -> None:
         """Run an assistant turn with the tools in assistant.ASSISTANT_TOOLS.
 
-        Source slice creation is its only write capability; graph edits still
-        follow the existing candidate review workflow. Chats persist on disk.
+        Native tools create source slices, plan exact pattern ranges, and
+        precheck and automatically submit extraction batches through Operations.
+        Chats persist on disk.
         """
-        from .assistant import run_turn
+        from .assistant import ASSISTANT_VERSION, _call, _public, run_turn, tool_catalog
+        from .conversation_session import (
+            ConversationCancelled,
+            open_conversation_session,
+            publish_event,
+            use_chat,
+        )
 
         message = (text or "").strip()
         if not message:
@@ -1415,43 +1232,272 @@ class NativeBridge(QObject):
             return
         image = str(image_path or "").strip()
 
+        job = {"chat_id": requested_chat, "task_id": f"{datetime.now(UTC):%Y%m%dT%H%M%S%fZ}-{uuid4().hex[:8]}", "runtime": None,
+               "cancel": threading.Event(), "stop_reason": "user_stopped"}
+
+        def check_cancelled(metadata=None):
+            if job.get("control_error"):
+                raise RuntimeError("停止控制通道失败，运行时已关闭：" + job["control_error"])
+            if job["cancel"].is_set():
+                raise ConversationCancelled(metadata, reason=job["stop_reason"])
+
         def work(ops) -> dict:
-            store = self._chats(ops)
-            chat_id = self._assistant_chat
-            if not chat_id or not store.path_for(chat_id).is_file():
-                chat_id = store.create()["id"]
-                self._assistant_chat = chat_id
-            chat = store.append(chat_id, "user", message, image=image)
+            def observer(event):
+                if not job["cancel"].is_set():
+                    self._conversation_event(ops, path, event)
+            with self._assistant_task_lock, use_chat(ops, requested_chat, on_event=observer) as selected:
+                if self._closed or self._project_path != path:
+                    raise ValueError("工程已切换，协作者任务已停止")
+                started = time.monotonic()
+                starting_revision = ops.graph_project_info()["revision"]
+                store = self._chats(ops)
+                chat_id = selected["id"]
+                if not self._assistant_chat or self._assistant_chat == requested_chat:
+                    self._assistant_chat = chat_id
+                store.append(chat_id, "user", message, image=image)
+                task_id = job["task_id"]
+                with self._assistant_lock:
+                    job["chat_id"] = chat_id
+                publish_event(ops, {"event": "assistant_started", "chat_id": chat_id, "task_id": task_id})
+                extraction_granularity = ops.load_project_settings()["extraction_granularity"]
+                settings, api_key, workdir = harness_env(ops)
+                runtime = self._attach_conversation_runtime(ops, settings, api_key, path)
+                with self._assistant_lock:
+                    job.update(chat_id=chat_id, runtime=runtime)
+                entry = project_package.layout(path).entry
+                task_id = job["task_id"]
+                with self._assistant_lock:
+                    job["task_id"] = task_id
+                audit_dir = workdir / "assistant" / "tasks" / task_id
+                audit_dir.mkdir(parents=True)
+                audit = {"version": ASSISTANT_VERSION, "task_id": task_id,
+                         "chat_id": chat_id, "status": "running", "calls": [],
+                         "extraction_granularity": extraction_granularity,
+                         "config": settings.model_dump(exclude={"key_env"}),
+                         "response_idle_timeout_seconds": settings.timeout_seconds,
+                         "runtime_restart": runtime.restart_reason}
+                native_steps: list[dict] = []
+                self._assistant_steps = native_steps
+                calls = 0
+                model_message_ids: list[str] = []
+                message_lock = threading.RLock()
 
-            settings, api_key, workdir = harness_env(ops)
-            with self._assistant_lock:
-                if self._assistant_runner is None:
-                    self._assistant_runner = HarnessRunner(
-                        settings, api_key, workdir / "assistant"
+                def model_message(event):
+                    message_id = str(event.get("message_id") or "")
+                    if not message_id:
+                        return
+                    with message_lock:
+                        if message_id in model_message_ids:
+                            return
+                        store.append(
+                            chat_id, "assistant", event.get("text") or "",
+                            kind="model_output", sdk_turn=True, task_id=task_id,
+                            message_id=message_id, full_output=event.get("full_output"),
+                            content=event.get("content"), seq=event.get("seq"),
+                        )
+                        model_message_ids.append(message_id)
+                    if not job["cancel"].is_set():
+                        self._conversation_event(ops, path, {
+                            "event": "model_message", "chat_id": chat_id,
+                            "task_id": task_id, "message_id": message_id,
+                        })
+
+                session_runner = None
+                host = runtime.host
+                if host is None:
+                    raise ValueError("会话工具服务未就绪")
+                task_secrets = [api_key, host.token]
+
+                def redact(value: str) -> str:
+                    for secret in task_secrets:
+                        if secret:
+                            value = value.replace(secret, "[REDACTED]")
+                    return value
+
+                def save(name, value):
+                    (audit_dir / name).write_text(
+                        redact(json.dumps(value, ensure_ascii=False, indent=2)), encoding="utf-8",
                     )
-                    self._assistant_resumed = set()
-                runner = self._assistant_runner
-                session = chat["session"]
-                if session not in self._assistant_resumed:
-                    # 老会话：让运行时把上下文捡回来；不认就从空的开始，记录还在。
-                    runner.resume(session)
-                    self._assistant_resumed.add(session)
 
-            def ask(instruction) -> str:
-                return runner.agent_turn(instruction, session).raw
+                native_call_lock = threading.Lock()
 
-            result = run_turn(ask, message, project=project_package.layout(path).entry, image=image)
-            saved = store.append(
-                chat_id, "assistant", result.get("answer") or "",
-                steps=result.get("steps") or [],
-            )
-            return result | {
-                "chat_id": chat_id,
-                "title": saved["title"],
-                "items": store.list(),
-            }
+                def native_call(name, args):
+                    with native_call_lock:
+                        check_cancelled()
+                        step = _call(entry, name, args)
+                        native_steps.append(step)
+                        if not step["ok"]:
+                            raise ValueError(step["error"])
+                        return step["result"]
 
-        self._project_task("assistant", work)
+                save("task.json", audit)
+
+                try:
+                    check_cancelled()
+                    session_runner, session = open_conversation_session(
+                        ops, settings, api_key, HarnessRunner,
+                        task_tools=tool_catalog(), tool_handler=native_call,
+                        chat_id=chat_id,
+                    )
+                    audit["session_id"] = session
+                    with self._assistant_lock:
+                        job["binding_nonce"] = session_runner.binding_nonce
+
+                    def ask(instruction) -> str:
+                        nonlocal calls
+                        check_cancelled()
+                        calls += 1
+                        save(f"prompt-{calls}.json", {"instruction": instruction})
+                        try:
+                            reply = session_runner.agent_turn(instruction, session, on_message=model_message)
+                        except Exception as exc:
+                            failed_metadata = getattr(exc, "metadata", None) or session_runner.usage_metadata()
+                            save(f"metadata-{calls}.json", failed_metadata)
+                            save(f"partial-raw-{calls}.json", {"responses": session_runner.partial_raw()})
+                            audit["calls"].append(failed_metadata)
+                            save("task.json", audit)
+                            check_cancelled(failed_metadata)
+                            raise
+                        (audit_dir / f"raw-{calls}.txt").write_text(redact(reply.raw), encoding="utf-8")
+                        save(f"metadata-{calls}.json", reply.metadata)
+                        for event in reply.metadata.get("model_messages") or []:
+                            model_message(event)
+                        audit["calls"].append(reply.metadata)
+                        save("task.json", audit)
+                        check_cancelled(reply.metadata)
+                        return reply.raw
+
+                    def on_format_error(event):
+                        check_cancelled(event.get("metadata"))
+                        diagnostic_path = event.get("diagnostic_path") or str(audit_dir / f"metadata-{calls}.json")
+                        audit.setdefault("format_repairs", []).append({
+                            "attempt": event.get("attempt"), "code": event.get("code"),
+                            "diagnostic_path": diagnostic_path,
+                            "metadata_path": str(audit_dir / f"metadata-{calls}.json"),
+                        })
+                        save("task.json", audit)
+                        store.append(
+                            chat_id, "system", "工具参数格式错误，已反馈同一任务修正。",
+                            kind="format_correction", task_id=task_id,
+                            diagnostic_path=diagnostic_path, audit_directory=str(audit_dir),
+                            error_code=event.get("code"), attempt=event.get("attempt"),
+                        )
+                        self._conversation_event(ops, path, {
+                            "event": "format_correction", "chat_id": chat_id, "task_id": task_id,
+                        })
+
+                    result = run_turn(
+                        ask, message, project=entry, image=image, steps=native_steps,
+                        on_format_error=on_format_error,
+                        extraction_granularity=extraction_granularity,
+                    )
+                    check_cancelled()
+                    if model_message_ids:
+                        saved = store.annotate_message(
+                            chat_id, model_message_ids[-1],
+                            steps=result.get("steps") or [], task_version=ASSISTANT_VERSION,
+                        )
+                    else:
+                        saved = store.append(
+                            chat_id, "assistant", result.get("answer") or "",
+                            steps=result.get("steps") or [], task_id=task_id,
+                            task_version=ASSISTANT_VERSION, sdk_turn=True,
+                        )
+                    audit["status"] = "completed"
+                    revision = ops.graph_project_info()["revision"]
+                    result.update(revision=revision, graph_reset_required=revision != starting_revision)
+                    return result | {"chat_id": chat_id, "title": saved["title"], "chat": saved,
+                                     "items": store.list(), "task_id": task_id,
+                                     "audit_directory": str(audit_dir)}
+                except Exception as exc:
+                    if job["cancel"].is_set() and not job.get("control_error") and not isinstance(exc, ConversationCancelled):
+                        exc = ConversationCancelled(getattr(exc, "metadata", None), reason=job["stop_reason"])
+                    cancelled = isinstance(exc, ConversationCancelled)
+                    audit.update(status="cancelled" if cancelled else "incomplete",
+                                 error_type=type(exc).__name__, error=redact(str(exc)))
+                    if not cancelled or session_runner is not None and not session_runner.turn_settled or not runtime.healthy():
+                        if session_runner is not None:
+                            session_runner.cancel()
+                        else:
+                            runtime.close("task_failed")
+                    self._clear_closed_conversation(runtime)
+                    # An already running local operation may finish atomically.
+                    # Wait for it before reporting the actual retained revision.
+                    with native_call_lock:
+                        pass
+                    failure_metadata = getattr(exc, "metadata", None) or {}
+                    diagnostic_path = getattr(exc, "diagnostic_path", "") or str(audit_dir / "task.json")
+                    reason = redact(str(exc))
+                    if getattr(exc, "code", "") == "tool_input_invalid_json" and "提取" in message:
+                        reason = "模型工具参数 JSON 格式错误，本次提取未完成"
+                    revision = ops.graph_project_info()["revision"]
+                    if revision != starting_revision:
+                        state = f"已完成的入库变更仍保留（修订 {starting_revision} → {revision}）。"
+                        if not cancelled:
+                            state += "请勿将本次任务视为全部完成。"
+                    else:
+                        state = f"本次任务未产生新的入库变更（当前修订 {revision}）。"
+                    audit.update(finish_reason=failure_metadata.get("finish_reason"),
+                                 sdk_error_diagnostics=failure_metadata.get("sdk_error_diagnostics") or [],
+                                 diagnostic_path=diagnostic_path, starting_revision=starting_revision,
+                                 final_revision=revision)
+                    store.append(chat_id, "system", reason + "。" + state,
+                                 kind="assistant_cancelled" if cancelled else "assistant_incomplete", task_id=task_id,
+                                 diagnostic_path=diagnostic_path, audit_directory=str(audit_dir),
+                                 error_code=getattr(exc, "code", type(exc).__name__),
+                                 finish_reason=failure_metadata.get("finish_reason"),
+                                 revision=revision, starting_revision=starting_revision)
+                    if cancelled:
+                        return {"status": "cancelled", "chat_id": chat_id, "task_id": task_id,
+                                "chat": store.load(chat_id), "items": store.list(), "revision": revision,
+                                "graph_reset_required": revision != starting_revision,
+                                "audit_directory": str(audit_dir)}
+                    raise ValueError(reason + "。" + state + "诊断：" + diagnostic_path) from exc
+                finally:
+                    if session_runner is not None:
+                        session_runner.close()
+                    audit.update(steps=native_steps, public_steps=_public(native_steps),
+                                 model_calls=calls, elapsed_seconds=time.monotonic() - started)
+                    save("task.json", audit)
+                    self._conversation_event(ops, path, {
+                        "chat_id": chat_id, "event": "task_complete", "task_id": task_id,
+                        "revision": ops.graph_project_info()["revision"],
+                        "graph_reset_required": ops.graph_project_info()["revision"] != starting_revision,
+                    }, busy=False)
+
+        def apply(result: dict) -> dict:
+            if result.get("graph_reset_required"):
+                self._canvas.clear(preserve_positions=True)
+            return result
+
+        self._project_task("assistant", work, apply)
+        with self._assistant_lock:
+            self._assistant_jobs[self._next_request] = job
+
+    @Slot(str, str)
+    def assistantStop(self, chat_id: str, task_id: str) -> None:
+        """Stop only the identified running task, never another chat or queued job."""
+        if self._closed or not task_id:
+            return
+        with self._assistant_lock:
+            job = next((item for item in self._assistant_jobs.values()
+                        if item["chat_id"] == chat_id and item["task_id"] == task_id
+                        ), None)
+            if job is None:
+                return
+            job["stop_reason"] = "user_stopped"
+            job["cancel"].set()
+            runtime = job["runtime"]
+            nonce = job.get("binding_nonce")
+        if runtime is not None and nonce:
+            runtime.signal_stop(nonce)
+            def interrupt():
+                try:
+                    runtime.interrupt(nonce)
+                except Exception as exc:
+                    job["control_error"] = str(exc)
+                    runtime.close("interrupt_failed")
+            self._pool.submit(interrupt)
 
     @Slot()
     def assistantReset(self) -> None:
@@ -1460,14 +1506,10 @@ class NativeBridge(QObject):
 
     @Slot(str, "QVariantMap")
     def reviseNode(self, node_id: str, changes: dict) -> None:
-        """Correct one node (type, name, source position, retraction) as a candidate.
-
-        Nothing is written directly: the edit becomes a pending candidate that a
-        human accepts on the candidate page, same as any other change.
-        """
+        """Save an explicit user correction after deterministic prechecks."""
         allowed = {
             "node_type", "name", "aliases", "identity_note",
-            "disclosure", "retracted",
+            "disclosure",
         }
         payload = {
             key: value for key, value in (changes or {}).items() if key in allowed
@@ -1485,137 +1527,168 @@ class NativeBridge(QObject):
                 raise ValueError("节点不存在")
             updated = dict(node) | payload
             revision = ops.graph_project_info()["revision"]
-            diagnostics = ops.change_precheck([updated], [], revision)
-            errors = [item for item in diagnostics if item.get("severity") == "error"]
-            if errors:
-                return {"diagnostics": diagnostics, "candidate": None, "node_id": node_id}
-            candidate = ops.change_propose(
-                [updated], [], revision, source="correction",
-                note=f"节点修正：{node['name']}",
-            )
-            return {
-                "diagnostics": diagnostics,
-                "candidate": ops.change_candidate(candidate),
-                "node_id": node_id,
-                "changes": payload,
-            }
-
-        self._project_task("node_edit", work)
-
-    @Slot(str)
-    def loadCandidates(self, status: str) -> None:
-        self._project_task(
-            "candidates",
-            lambda ops: {"items": [candidate_summary(item) for item in ops.graph_candidates(status or None)]},
-        )
-
-    @Slot(str)
-    def loadChangeCandidates(self, status: str) -> None:
-        self._project_task(
-            "change_candidates",
-            lambda ops: {"items": ops.change_candidates(status or None)},
-        )
-
-    @Slot(str)
-    def changeCandidateDetail(self, candidate_id: str) -> None:
-        """候选详情，附一份人能读的行（可能只有几条属性，节点已经在图里了）。"""
-        from .review_display import candidate_rows
-
-        def work(ops) -> dict:
-            detail = ops.change_candidate(candidate_id)
-            return {"candidate": detail, "rows": candidate_rows(
-                ops.graph_snapshot(), detail, ops.property_records(),
-            )}
-
-        self._project_task("change_candidate", work)
-
-    @Slot(str, int)
-    def acceptChangeCandidate(self, candidate_id: str, version: int) -> None:
-        def work(ops) -> dict:
-            revision = ops.change_accept(candidate_id, version)
-            return {"candidate_id": candidate_id, "status": "accepted", "revision": revision}
+            result = ops.apply_changes([updated], [], revision, f"节点修正：{node['name']}")
+            if result["status"] in {"accepted", "unchanged"}:
+                self._canvas.clear(preserve_positions=True)
+            return result | {"graph_reset_required": result["status"] == "accepted",
+                             "node_id": node_id, "changes": payload}
 
         def apply(result: dict) -> dict:
-            self._canvas.clear(preserve_positions=True)
-            return result | {"graph_reset_required": True}
+            if result.get("status") == "accepted":
+                self._canvas.clear(preserve_positions=True)
+            return result
 
-        self._project_task("change_review", work, apply)
+        self._project_task("node_edit", work, apply)
 
-    @Slot(str, int)
-    def rejectChangeCandidate(self, candidate_id: str, version: int) -> None:
-        def work(ops) -> dict:
-            ops.change_reject(candidate_id, version)
-            return {"candidate_id": candidate_id, "status": "rejected",
-                    "revision": ops.graph_project_info()["revision"]}
-
-        self._project_task("change_review", work)
-
-    @Slot(str, str, int, str, str)
-    def proposeChange(
-        self, graph_json: str, properties_json: str,
-        expected_revision: int, source: str = "manual", note: str = "",
-    ) -> None:
+    @Slot()
+    def runStaticCheck(self) -> None:
+        self._static_scan_generation += 1
+        scan_id = self._static_scan_generation
         try:
-            graph_objects = json.loads(graph_json) if graph_json.strip() else []
-            property_records = json.loads(properties_json) if properties_json.strip() else []
-        except json.JSONDecodeError as exc:
-            self.errorOccurred.emit("change_stage", f"JSON 解析失败：{exc.msg}")
+            path = self._project()
+        except ValueError as exc:
+            self.errorOccurred.emit("static_check", str(exc))
             return
-        if not isinstance(graph_objects, list) or not isinstance(property_records, list):
-            self.errorOccurred.emit("change_stage", "图对象和属性记录都必须是 JSON 数组")
-            return
+        self.resultReady.emit("static_check_started", {"scan_id": scan_id, "project_path": str(path)})
 
         def work(ops) -> dict:
-            diagnostics = ops.change_precheck(graph_objects, property_records, expected_revision)
-            if any(item.get("severity") == "error" for item in diagnostics):
-                return {"diagnostics": diagnostics, "candidate": None}
-            candidate_id = ops.change_propose(
-                graph_objects, property_records, expected_revision,
-                source=source or "manual", note=note,
-            )
-            return {
-                "diagnostics": diagnostics,
-                "candidate": ops.change_candidate(candidate_id),
-            }
-        self._project_task("change_stage", work)
+            try:
+                report = ops.check_project()
+            except Exception as exc:
+                return {"scan_id": scan_id, "failed": True, "error": str(exc), "project_path": str(path)}
+            current = ops.graph_project_info()["revision"]
+            return report | {"scan_id": scan_id, "current_revision": current,
+                             "is_stale": current != report["revision"], "project_path": str(path)}
 
-    @Slot(str)
-    def candidateDetail(self, candidate_id: str) -> None:
-        from .review_display import candidate_rows, humanize_report
+        self._project_task("static_check", work)
+
+    @Slot()
+    def loadStaticCheckRevision(self) -> None:
+        self._project_task("static_check_revision", lambda ops: {"revision": ops.graph_project_info()["revision"]})
+
+    @Slot("QVariantMap", str, str)
+    def resolveStaticIssue(self, issue: dict, kind: str, record_id: str = "") -> None:
+        self._static_target_generation += 1
+        generation = self._static_target_generation
 
         def work(ops) -> dict:
-            detail = ops.graph_candidate(candidate_id)
-            snapshot, records = ops.graph_snapshot(), ops.property_records()
-            return {
-                "candidate": detail, "objects": detail.get("objects") or [],
-                "rows": candidate_rows(snapshot, detail, records),
-                "diagnostics": humanize_report(
-                    snapshot, records, {"issues": detail.get("diagnostics") or []},
-                )["issues"],
-                "kind": "graph",
-            }
-
-        self._project_task("candidate", work)
-
-    @Slot(str, int)
-    def acceptCandidate(self, candidate_id: str, version: int) -> None:
-        def work(ops) -> dict:
-            revision = ops.graph_accept(candidate_id, version)
-            return {"candidate_id": candidate_id, "status": "accepted", "revision": revision}
+            snapshot = ops.graph_snapshot()
+            nodes = {row["id"]: row for row in snapshot["nodes"]}
+            record = None
+            requested_record = record_id or issue.get("record_id")
+            if requested_record:
+                record = next((row for row in ops.property_records()
+                               if row["id"] == requested_record), None)
+            if kind not in {"node", "record", "source"}:
+                raise ValueError("未知的检查定位类型")
+            if kind == "record":
+                node_id = (record or {}).get("node_id")
+                target_id = (record or {}).get("target_id")
+                if not node_id and target_id:
+                    target = next((row for row in ops.property_records()
+                                   if row["id"] == target_id), {})
+                    node_id = target.get("node_id")
+            else:
+                node_id = issue.get("node_id") or (record or {}).get("node_id")
+            node = nodes.get(node_id, {})
+            if kind == "record" or (kind == "source" and record_id):
+                evidence = (record or {}).get("evidence") or {}
+                disclosure = (record or {}).get("disclosure") or {}
+                source_id = evidence.get("source_id") or disclosure.get("source_id")
+                start, end = evidence.get("start", disclosure.get("start")), evidence.get("end")
+                quote = evidence.get("quote") or ""
+            else:
+                evidence = (record or {}).get("evidence") or node.get("evidence") or {}
+                disclosure = (record or {}).get("disclosure") or node.get("disclosure") or {}
+                source_id = issue.get("source_id") or evidence.get("source_id") or disclosure.get("source_id")
+                start, end = issue.get("start"), issue.get("end")
+                quote = issue.get("quote") or evidence.get("quote") or ""
+            if kind == "record" and record is None:
+                raise ValueError("该属性记录已不存在，不能定位旧检查结果")
+            if kind == "node" and not node:
+                raise ValueError("该节点已不存在，不能定位旧检查结果")
+            if source_id:
+                try:
+                    text = ops.source(source_id)["text"]
+                except (ValueError, KeyError):
+                    if kind == "source":
+                        raise ValueError("该问题引用的原文来源不存在，不能定位") from None
+                    source_id = ""
+                    start, end = None, None
+                else:
+                    if type(start) is not int:
+                        if quote:
+                            from .source_location import locate_text
+                            hits = locate_text(text, [quote], 2)[0]["matches"]
+                            if len(hits) != 1:
+                                if kind == "source":
+                                    raise ValueError("引文无法唯一定位，请重新检查或在原文中核对")
+                            else:
+                                start, end = hits[0]["start"], hits[0]["end"]
+                        if type(start) is not int:
+                            original_start = disclosure.get("start")
+                            start = original_start if type(original_start) is int else 0
+                    if type(end) is not int:
+                        end = start + len(quote) if quote else min(len(text), start + 80)
+                    valid_range = 0 <= start <= end <= len(text)
+                    if quote and (not valid_range or text[start:end] != quote):
+                        from .source_location import locate_text
+                        hits = locate_text(text, [quote], 2)[0]["matches"]
+                        if len(hits) == 1:
+                            start, end = hits[0]["start"], hits[0]["end"]
+                            valid_range = True
+                        else:
+                            if kind == "source":
+                                raise ValueError("披露坐标不是该引文位置，且引文无法唯一定位")
+                            source_id = ""
+                            start, end = None, None
+                    elif not valid_range:
+                        if kind == "source":
+                            raise ValueError("检查结果的原文坐标已无效，请重新运行检查")
+                        source_id = ""
+                        start, end = None, None
+            elif kind == "source":
+                raise ValueError("该问题没有可定位的原文来源")
+            if kind == "record" and node_id not in nodes:
+                node_id = ""
+            return {"kind": kind, "node_id": node_id or "", "record": record or {},
+                    "record_id": requested_record or "", "source_id": source_id or "",
+                    "start": start, "end": end, "quote": quote, "generation": generation}
 
         def apply(result: dict) -> dict:
-            self._canvas.clear(preserve_positions=True)
-            return result | {"graph_reset_required": True}
+            return result | {"superseded": generation != self._static_target_generation}
 
-        self._project_task("review", work, apply)
+        self._project_task("static_check_target", work, apply)
 
-    @Slot(str, int)
-    def rejectCandidate(self, candidate_id: str, version: int) -> None:
+    @Slot(str, str, bool)
+    def runSourceTask(self, source_id: str, slice_id: str, review: bool = False) -> None:
+        """Send the selected source range to the current unified conversation."""
+        requested_chat = self._assistant_chat
+
         def work(ops) -> dict:
-            ops.graph_reject(candidate_id, version)
-            return {"candidate_id": candidate_id, "status": "rejected", "revision": ops.graph_project_info()["revision"]}
+            source = ops.source(source_id)
+            start, end = 0, len(source["text"])
+            title = source.get("title") or source_id
+            if slice_id:
+                part = ops.source_slice(source_id, slice_id)
+                start, end = part["start"], part["end"]
+                title = part.get("title") or title
+            action = "复核" if review else "提取"
+            purpose = ("请对照原文与现有图数据查漏、勘误，并判断属性和关系是否已失效。"
+                       if review else "请提取此范围的节点、属性和关系，并核对其原文依据与有效性。")
+            instruction = (f"{action}原文：{title}。\n来源 source_id={source_id}，"
+                           f"范围 start={start}, end={end}（Unicode字符坐标，左闭右开）"
+                           + (f"，slice_id={slice_id}" if slice_id else "（全文）") + "。\n"
+                           + purpose + "读取所需原文和图数据，完成后通过统一工具预检并自动入库；"
+                           "只提交这个范围的结果，引用坐标遵循工具合同。请在本会话报告实际完成情况。")
+            return {"instruction": instruction, "source_id": source_id, "slice_id": slice_id,
+                    "start": start, "end": end, "review": review, "chat_id": requested_chat}
 
-        self._project_task("review", work)
+        def apply(result: dict) -> dict:
+            self._assistant_turn(result["instruction"], "", requested_chat)
+            return result
+
+        self._project_task("source_task", work, apply)
 
     @Slot()
     def loadSources(self) -> None:
@@ -1655,86 +1728,47 @@ class NativeBridge(QObject):
             lambda ops: {"source_id": source_id, "slice": ops.source_slice(source_id, slice_id)},
         )
 
-    @Slot(str, str)
-    def loadSliceExtraction(self, source_id: str, slice_id: str) -> None:
-        def work(ops) -> dict:
-            target = self._source_extraction_target(ops, source_id, slice_id)
-            if not target:
-                return {"source_id": source_id, "slice_id": slice_id, "missing": True,
-                        "nodes": [], "properties": [], "round": 0}
-            return ops.load_slice_extraction(source_id, target) | {
-                "slice_id": slice_id, "target_slice_id": target,
-            }
+    @Slot()
+    def loadProjectSettings(self) -> None:
+        self._project_task("project_settings", lambda ops: ops.load_project_settings() | {"catalog": ops.provider_catalog()})
 
-        self._project_task(
-            "slice_extraction",
-            work,
-        )
+    @Slot("QVariantMap")
+    def saveProjectSettings(self, settings: dict) -> None:
+        payload = dict(settings)
+        payload["profile"] = self._exact_integers(dict(payload.get("profile") or {}))
+        self._project_task("project_settings", lambda ops: ops.save_project_settings(payload) | {"catalog": ops.provider_catalog(), "saved": True})
 
-    @staticmethod
-    def _source_extraction_target(ops, source_id: str, slice_id: str, *, create=False) -> str:
-        if slice_id:
-            return slice_id
-        source = ops.source(source_id)
-        for part in ops.source_slices(source_id):
-            if part["start"] == 0 and part["end"] == len(source["text"]):
-                return part["id"]
-        if not create:
-            return ""
-        # An explicit whole-file extraction is one range, not automatic segmentation.
-        title = source["title"] + "（全文）"
-        parts = ops.create_source_slices(source_id, [
-            {"title": title, "start": 0, "end": len(source["text"])},
-        ])
-        return next(part["id"] for part in parts
-                    if part["title"] == title and part["start"] == 0
-                    and part["end"] == len(source["text"]))
-
-    def _slice_extraction_action(self, source_id: str, slice_id: str, action: str) -> None:
-        # A model turn has its own configured timeout; it must not be discarded
-        # by the ten-second deadline used for ordinary UI reads.
-        if any(kind == "slice_extraction_action" and epoch == self._epoch
-               for kind, epoch, _apply, _query, _started in self._requests.values()):
+    @Slot(str)
+    def renameProject(self, title: str) -> None:
+        normalized = title.strip()
+        if not normalized:
+            self.errorOccurred.emit("project_renamed", "工程名称不能为空")
             return
 
+        def rename(ops: GraphOperations) -> dict:
+            ops.set_graph_title(normalized)
+            project = ops.graph_project_info()
+            project["path"] = str(project_package.layout(ops.project_info().path).entry)
+            return {"project": project}
+
+        self._project_task("project_renamed", rename)
+
+    @Slot(str)
+    def extractEventActions(self, node_id: str) -> None:
+        """An explicit user request, dispatched into the selected unified chat."""
+        requested_chat = self._assistant_chat
         def work(ops) -> dict:
-            target = self._source_extraction_target(
-                ops, source_id, slice_id, create=action == "extract",
-            )
-            if not target:
-                raise ValueError("当前原文尚未提取，请先提取再复核或送审")
-            if action == "commit":
-                result = ops.commit_slice_extraction(source_id, target)
-                return {"source_id": source_id, "slice_id": slice_id,
-                        "action": action, "commit": result}
-            data = ops.extract_slice(source_id, target, review=action == "review")
-            return {"source_id": source_id, "slice_id": slice_id,
-                    "action": action, "extraction": data}
-
-        self._project_task("slice_extraction_action", work)
-        if any(kind == "slice_extraction_action" and epoch == self._epoch
-               for kind, epoch, _apply, _query, _started in self._requests.values()):
-            self.resultReady.emit("slice_extraction_status", {
-                "source_id": source_id, "slice_id": slice_id, "action": action, "busy": True,
-            })
-
-    @Slot(str, str)
-    def startSliceExtraction(self, source_id: str, slice_id: str) -> None:
-        self._slice_extraction_action(source_id, slice_id, "extract")
-
-    @Slot(str, str)
-    def reviewSliceExtraction(self, source_id: str, slice_id: str) -> None:
-        self._slice_extraction_action(source_id, slice_id, "review")
-
-    @Slot(str, str)
-    def commitSliceExtraction(self, source_id: str, slice_id: str) -> None:
-        self._slice_extraction_action(source_id, slice_id, "commit")
-
-    @Slot()
-    def loadProviderProfile(self) -> None:
-        self._project_task(
-            "provider", lambda ops: {"profile": ops.provider_profile(), "catalog": ops.provider_catalog()},
-        )
+            node = next((row for row in ops.graph_snapshot()["nodes"] if row["id"] == node_id), None)
+            if node is None or node.get("node_type") != "event":
+                raise ValueError("动作提取只能针对已存在的event事件")
+            instruction = (f"请为事件 event_id={node_id}（{node.get('name') or node_id}）提取动作。"
+                           "查阅该事件的原文、证据与已有动作，避免重复。仅将有原文依据的action挂在这个父event下，"
+                           "通过统一工具静态预检并提交；不要扩展到其他事件或重提整个章节。请报告实际完成情况。")
+            return {"instruction": instruction, "event_id": node_id, "chat_id": requested_chat}
+        def apply(result: dict) -> dict:
+            self._assistant_turn(result["instruction"], "", requested_chat)
+            return result
+        self._project_task("event_actions_task", work, apply)
 
     @Slot(str)
     def loadProviderProfileFor(self, provider: str) -> None:
@@ -1746,10 +1780,3 @@ class NativeBridge(QObject):
                 "catalog": ops.provider_catalog(),
             },
         )
-
-    @Slot("QVariantMap")
-    def saveProviderProfile(self, settings: dict) -> None:
-        self._project_task(
-            "provider", lambda ops: {"profile": ops.save_provider_profile(self._exact_integers(settings))}
-        )
-

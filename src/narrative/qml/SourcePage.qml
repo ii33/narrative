@@ -14,76 +14,61 @@ Item {
     property string selectedSliceId: ""
     property var current: ({})
     property var currentSlice: ({})
-    property var extraction: ({})
-    property bool extractionLoaded: false
-    property bool extractionBusy: false
-    property string extractionAction: ""
-    property string committedRound: ""
     property string notice: ""
     property int pendingStart: -1
+    property int pendingEnd: -1
     readonly property string previewText: selectedSliceId ? (currentSlice.text || "") : (current.text || "")
 
-    function load(id, start) {
+    function load(id, start, end) {
         selectedId = id
         selectedSliceId = ""
         current = ({})
         currentSlice = ({})
-        extraction = ({})
-        extractionLoaded = false
-        committedRound = ""
         slices = []
         pendingStart = (start === undefined || start === null) ? -1 : start
+        pendingEnd = (end === undefined || end === null) ? -1 : end
         notice = ""
         bridge.sourceText(id)
         bridge.loadSourceSlices(id)
-        bridge.loadSliceExtraction(id, "")
     }
 
     function selectSlice(id) {
         selectedSliceId = id
         currentSlice = ({})
-        extraction = ({})
-        extractionLoaded = false
-        committedRound = ""
         pendingStart = -1
         if (id) {
             bridge.sourceSlice(selectedId, id)
         }
-        if (selectedId) bridge.loadSliceExtraction(selectedId, id)
         sourceScroll.contentItem.contentY = 0
     }
 
-    function runExtraction(action) {
-        if (!selectedId || extractionBusy || !extractionLoaded) return
-        if (action === "review" && extraction.missing !== false) return
-        extractionBusy = true
-        extractionAction = action
+    function runTask(review) {
+        if (!selectedId || app.busy) return
         notice = ""
-        if (action === "review") bridge.reviewSliceExtraction(selectedId, selectedSliceId)
-        else if (action === "commit") bridge.commitSliceExtraction(selectedId, selectedSliceId)
-        else bridge.startSliceExtraction(selectedId, selectedSliceId)
+        app.assistantOpen = true
+        bridge.runSourceTask(selectedId, selectedSliceId, review)
     }
 
-    function extractionSummary() {
-        if (extractionBusy)
-            return extractionAction === "review" ? "正在复核查漏…"
-                : (extractionAction === "commit" ? "正在入图／送审…" : "正在提取…")
-        if (!selectedId) return "选择原文或切片后提取"
-        if (!extractionLoaded) return "正在读取提取记录…"
-        if (extraction.missing !== false)
-            return (selectedSliceId ? "当前切片" : "完整原文")
-                + " · 未找到当前范围的提取记录，无法据此判断是否提取过"
-        return "第 " + (extraction.round || 1) + " 轮 · "
-            + (extraction.nodes || []).length + " 个节点 · "
-            + (extraction.properties || []).length + " 条属性"
+    function textPosition(codepointOffset) {
+        var text = current.text || ""
+        var position = 0
+        for (var count = 0; count < codepointOffset && position < text.length; ++count) {
+            var first = text.charCodeAt(position++)
+            if (first >= 0xD800 && first <= 0xDBFF && position < text.length) {
+                var second = text.charCodeAt(position)
+                if (second >= 0xDC00 && second <= 0xDFFF) ++position
+            }
+        }
+        return position
     }
 
-    function reveal(start) {
+    function reveal(start, end) {
         // Evidence offsets are Unicode code points; QML positions are UTF-16.
         var text = current.text || ""
-        var position = Array.from(text).slice(0, start).join("").length
+        var position = page.textPosition(start)
         if (start < 0 || position > text.length) return
-        body.select(position, Math.min(text.length, position + 80))
+        var last = end >= start ? page.textPosition(end) : position + 80
+        body.select(position, Math.min(text.length, last))
         var rect = body.positionToRectangle(position)
         var flick = sourceScroll.contentItem
         if (flick && flick.contentY !== undefined)
@@ -96,10 +81,6 @@ Item {
             selectedSliceId = ""
             current = ({})
             currentSlice = ({})
-            extraction = ({})
-            extractionLoaded = false
-            extractionBusy = false
-            committedRound = ""
             sources = []
             slices = []
             if (kind === "project") bridge.loadSources()
@@ -110,41 +91,15 @@ Item {
         } else if (kind === "source" && payload.source_id === selectedId) {
             current = payload.source || ({})
             if (page.pendingStart >= 0) {
-                Qt.callLater(function() { page.reveal(page.pendingStart); page.pendingStart = -1 })
+                Qt.callLater(function() { page.reveal(page.pendingStart, page.pendingEnd); page.pendingStart = -1; page.pendingEnd = -1 })
             }
         } else if (kind === "source_slices" && payload.source_id === selectedId) {
             slices = payload.items || []
         } else if (kind === "source_slice" && payload.source_id === selectedId
                    && payload.slice && payload.slice.id === selectedSliceId) {
             currentSlice = payload.slice
-        } else if (kind === "slice_extraction_status") {
-            extractionBusy = payload.busy === true
-            extractionAction = payload.action || ""
-        } else if (kind === "slice_extraction" && payload.source_id === selectedId
-                   && payload.slice_id === selectedSliceId) {
-            extraction = payload
-            extractionLoaded = true
-        } else if (kind === "slice_extraction_action") {
-            extractionBusy = false
-            if (payload.source_id !== selectedId || payload.slice_id !== selectedSliceId) return
-            bridge.loadSourceSlices(selectedId)
-            if (payload.action === "commit") {
-                var result = payload.commit || ({})
-                if (!result.errors) committedRound = String(extraction.round || 1)
-                var doubtful = (result.doubtful || []).length
-                notice = result.errors ? "预检未通过，请检查提取结果"
-                    : (doubtful > 0 ? doubtful + " 条待确认，请到审核页处理"
-                        : (result.accepted ? "已按现有规则处理入图" : "没有可提交的新内容"))
-            } else {
-                extraction = payload.extraction || ({})
-                extractionLoaded = true
-                committedRound = ""
-                notice = payload.action === "review" ? "复核完成，已合并本轮补充" : "切片提取完成"
-            }
         } else if (kind === "assistant" && selectedId) {
             bridge.loadSourceSlices(selectedId)
-            if (!extractionBusy)
-                bridge.loadSliceExtraction(selectedId, selectedSliceId)
         } else if (kind === "source_imported") {
             bridge.loadSources()
             if (payload.source_id) page.load(payload.source_id)
@@ -160,11 +115,8 @@ Item {
         target: bridge
         function onResultReady(kind, payload) { page.apply(kind, payload) }
         function onErrorOccurred(kind, message) {
-            if (["sources", "source", "source_slices", "source_slice", "source_imported",
-                 "slice_extraction", "slice_extraction_action"].indexOf(kind) >= 0)
+            if (["sources", "source", "source_slices", "source_slice", "source_imported", "source_task"].indexOf(kind) >= 0)
                 page.notice = message
-            if (kind === "slice_extraction_action") page.extractionBusy = false
-            if (kind === "slice_extraction") page.extractionLoaded = true
         }
     }
 
@@ -331,46 +283,25 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         visible: page.selectedId.length > 0
-                        spacing: 6
                         Button {
                             objectName: "sourceSliceExtract"
                             text: page.selectedSliceId ? "提取" : "提取全文"
-                            enabled: page.extractionLoaded && !page.extractionBusy
-                            onClicked: page.runExtraction("extract")
+                            enabled: !app.busy
+                            onClicked: page.runTask(false)
                         }
                         Button {
                             objectName: "sourceSliceReview"
-                            text: page.selectedSliceId ? "复核查漏" : "复核全文"
-                            enabled: page.extractionLoaded && !page.extractionBusy
-                                && page.extraction.missing === false
-                            onClicked: page.runExtraction("review")
+                            text: page.selectedSliceId ? "复核" : "复核全文"
+                            enabled: !app.busy
+                            onClicked: page.runTask(true)
                         }
-                        Button {
-                            objectName: "sourceSliceCommit"
-                            text: "入图／送审"
-                            enabled: page.extractionLoaded && !page.extractionBusy
-                                && page.extraction.missing === false
-                                && page.committedRound !== String(page.extraction.round || 1)
-                                && ((page.extraction.nodes || []).length > 0
-                                    || (page.extraction.properties || []).length > 0)
-                            onClicked: page.runExtraction("commit")
+                        Label {
+                            Layout.fillWidth: true
+                            text: "任务在当前协作者会话中执行，核对后自动入库"
+                            color: page.t.muted
+                            font.pixelSize: 11
+                            wrapMode: Text.Wrap
                         }
-                        BusyIndicator {
-                            running: page.extractionBusy
-                            visible: running
-                            Layout.preferredWidth: 24
-                            Layout.preferredHeight: 24
-                        }
-                        Item { Layout.fillWidth: true }
-                    }
-                    Label {
-                        objectName: "sourceSliceExtractionSummary"
-                        Layout.fillWidth: true
-                        visible: page.selectedId.length > 0
-                        text: page.extractionSummary()
-                        color: page.t.muted
-                        font.pixelSize: 11
-                        wrapMode: Text.Wrap
                     }
                     ScrollView {
                         id: sourceScroll

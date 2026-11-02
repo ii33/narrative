@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "RelationLayout.js" as RelationLayout
 
 // 人物关系图：人是点，关系是有方向的边。
 // 一条关系就是一条属性记录——属性名说的是**对方是这一方的什么人**——所以
@@ -9,11 +10,48 @@ import QtQuick.Layouts
 Item {
     id: page
     objectName: "relationPage"
+    clip: true
 
     property var app
     property var persons: []
     property var edges: []
     property string notice: ""
+    property var graphLayout: ({positions: {}, fitScale: 1})
+    property var graphLabelLayout: ({edges: [], fitScale: 1})
+    property bool labelGeometryReady: false
+    property var displayLabelLayout: ({edges: []})
+    property real measuredLabelScale: -1
+    property string hoveredEdgeKey: ""
+    readonly property real labelScreenFontSize: Math.max(10, Math.min(14, 11 * Math.pow(page.zoom, 0.18)))
+    readonly property real labelWorldFontSize: page.labelScreenFontSize / Math.max(.01, page.zoom * page.graphLabelLayout.fitScale)
+    onZoomChanged: { page.hoveredEdgeKey = ""; canvas.requestPaint() }
+
+    function labelAt(x, y) {
+        var scale = page.zoom * page.graphLabelLayout.fitScale
+        var wx = (x-canvas.width/2-page.panX)/scale, wy = (y-canvas.height/2-page.panY)/scale
+        var routes = page.displayLabelLayout.edges || []
+        for (var i=routes.length-1; i>=0; --i) {
+            var box = routes[i].label
+            if (wx>=box.x && wx<=box.x+box.w && wy>=box.y && wy<=box.y+box.h) return routes[i].edge_key
+        }
+        return ""
+    }
+    function highlightedNode(id) {
+        var routes=page.displayLabelLayout.edges || []
+        for (var i=0; i<routes.length; ++i)
+            if (routes[i].edge_key===page.hoveredEdgeKey) return routes[i].edge.from===id || routes[i].edge.to===id
+        return false
+    }
+
+    function rebuildLayout() {
+        var radii = Object.create(null)
+        for (var i = 0; i < page.persons.length; ++i) radii[page.persons[i].id] = page.radiusOf(page.persons[i])
+        page.labelGeometryReady = false
+        page.measuredLabelScale = -1
+        page.hoveredEdgeKey = ""
+        page.graphLayout = RelationLayout.layout(page.persons, page.links(), radii, canvas.width, canvas.height)
+        canvas.requestPaint()
+    }
 
     // 阅读位置与筛选：和「数据浏览」同一个概念——停在哪儿，就只画读者已经知道的关系。
     property string cutId: ""
@@ -47,37 +85,7 @@ Item {
         moments = payload.moments || ({ levels: [], nodes: [] })
         cutName = payload.cut_name || ""
         if (!page.cutId && payload.cut) page.cutId = payload.cut
-        page.syncCutIndex()
-        canvas.requestPaint()
-    }
-
-    // 时间点下拉：最新 + 每一场（按阅读顺序）。选一场就是「读到那一场」。
-    readonly property var cutOptions: {
-        var rows = [{ id: "", label: "最新（读到末尾）" }]
-        var nodes = (page.moments.nodes || [])
-        for (var i = 0; i < nodes.length; ++i) {
-            var node = nodes[i]
-            if (node.level !== "scene") continue
-            rows.push({
-                id: node.id,
-                label: (node.label_id ? node.label_id + "  " : "") + node.name
-            })
-        }
-        return rows
-    }
-
-    property int cutIndex: 0
-    function syncCutIndex() {
-        for (var i = 0; i < page.cutOptions.length; ++i) {
-            if (page.cutOptions[i].id === page.cutId) { page.cutIndex = i; return }
-        }
-        page.cutIndex = 0
-    }
-
-    function pickCut(index) {
-        var rows = page.cutOptions
-        page.cutId = (index >= 0 && index < rows.length) ? rows[index].id : ""
-        page.load()
+        page.rebuildLayout()
     }
 
     Connections {
@@ -129,14 +137,13 @@ Item {
     // -- 数据：把两条同名的反向记录读成一条双向边 ------------------------
 
     // 返回 [{from, to, kind, state, both, slot}]。
-    // `both` 是「两侧写了同一个词」——那不是两条关系，是同一件事被说了一遍，
-    // 画成两条只会让人以为方向没了。`slot` 用来把同一对人的多条边错开。
+    // 显式对称定义或同性质反向记录显示双箭头；普通单条关系保留方向。
+    // `slot` 用来把同一对人的多条边错开。
     function links() {
-        var grouped = ({})
+        var grouped = Object.create(null)
         for (var i = 0; i < page.edges.length; ++i) {
             var edge = page.edges[i]
-            var key = edge.from < edge.to ? edge.from + "|" + edge.to
-                                          : edge.to + "|" + edge.from
+            var key = JSON.stringify(edge.from < edge.to ? [edge.from, edge.to] : [edge.to, edge.from])
             if (!grouped[key]) grouped[key] = []
             grouped[key].push(edge)
         }
@@ -151,7 +158,11 @@ Item {
                 for (var s = r + 1; s < rows.length; ++s) {
                     if (used.indexOf(s) >= 0) continue
                     if (rows[s].from === row.to && rows[s].to === row.from
-                        && rows[s].kind === row.kind) {
+                        && rows[s].kind === row.kind
+                        && (rows[s].state || "") === (row.state || "")
+                        && (rows[s].scope || "world") === (row.scope || "world")
+                        && (rows[s].holder_id || "") === (row.holder_id || "")
+                        && (rows[s].context_id || "canon") === (row.context_id || "canon")) {
                         twin = s
                         break
                     }
@@ -162,7 +173,8 @@ Item {
                     from: row.from, to: row.to,
                     fromName: row.from_name, toName: row.to_name,
                     kind: row.kind, state: row.state || "",
-                    both: twin >= 0, pair: k, slot: 0
+                    scope: row.scope || "world", holder_id: row.holder_id || "", context_id: row.context_id || "canon",
+                    both: row.symmetric === true || twin >= 0, pair: k, slot: 0
                 })
             }
         }
@@ -174,17 +186,18 @@ Item {
         return out
     }
 
-    // 一个节点的关系越多，圈越大：中心的枢纽本来就该比边角的人显眼。
+    // Radius counts distinct neighbours, never parallel labels or directions.
     function degreeOf(id) {
-        var count = 0
+        var neighbors = Object.create(null)
         for (var i = 0; i < page.edges.length; ++i) {
-            if (page.edges[i].from === id) count += 1
-            if (page.edges[i].to === id) count += 1
+            var edge = page.edges[i]
+            if (edge.from === id && edge.to !== id) neighbors[edge.to] = true
+            if (edge.to === id && edge.from !== id) neighbors[edge.from] = true
         }
-        return count
+        return Object.keys(neighbors).length
     }
 
-    // 圆的大小只由关系数量决定；名称在圆内换行、缩放，不参与半径计算。
+    // Label lengths and repeated relations cannot change a node's radius.
     function radiusOf(person) {
         var degree = page.degreeOf(person.id)
         return Math.max(13, Math.min(44, 13 + 5.2 * Math.sqrt(degree)))
@@ -246,6 +259,7 @@ Item {
 
         RowLayout {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             spacing: 8
 
             Label {
@@ -255,82 +269,111 @@ Item {
                 font.weight: Font.DemiBold
             }
             Label {
-                text: page.persons.length + " 人 · " + page.edges.length + " 条关系"
+                text: page.persons.length + " 人 · " + page.links().length + " 条关系"
                     + (page.cutId ? "（读到 " + (page.cutName || page.cutId) + "）" : "")
                 color: page.muted
                 font.pixelSize: 12
                 elide: Text.ElideRight
+                Layout.minimumWidth: 0
                 Layout.maximumWidth: 320
             }
             Item { Layout.fillWidth: true }
-            Label {
-                text: "读到"
-                color: page.muted
-                font.pixelSize: 11
-            }
-            Button {
-                id: cutButton
-                objectName: "relationCut"
-                Layout.preferredWidth: 240
-                font.pixelSize: 11
-                text: page.cutName || "最新（读到末尾）"
-                onClicked: cutPopup.open()
-            }
-            CheckBox {
-                id: relatedBox
-                objectName: "relationRelatedOnly"
-                text: "只看相关"
-                enabled: page.cutId !== ""
-                checked: page.relatedOnly && page.cutId !== ""
-                font.pixelSize: 11
-                onToggled: {
-                    page.relatedOnly = checked
-                    page.load()
+        }
+
+        Flow {
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            spacing: 8
+            RowLayout {
+                width: implicitWidth
+                height: implicitHeight
+                spacing: 8
+                Label {
+                    text: "读到"
+                    color: page.muted
+                    font.pixelSize: 11
+                }
+                Button {
+                    id: cutButton
+                    objectName: "relationCut"
+                    Layout.minimumWidth: 0
+                    Layout.preferredWidth: 240
+                    Layout.maximumWidth: 240
+                    font.pixelSize: 11
+                    text: page.cutName || "最新（读到末尾）"
+                    onClicked: cutPopup.open()
+                }
+                Button {
+                    text: "最新"
+                    enabled: page.cutId !== ""
+                    onClicked: page.chooseCut("", "")
+                }
+
+                CheckBox {
+                    id: relatedBox
+                    objectName: "relationRelatedOnly"
+                    text: "只看相关"
+                    enabled: page.cutId !== ""
+                    checked: page.relatedOnly && page.cutId !== ""
+                    font.pixelSize: 11
+                    onToggled: {
+                        page.relatedOnly = checked
+                        page.load()
+                    }
                 }
             }
-            Label {
-                visible: page.notice.length > 0
-                text: page.notice
-                color: page.muted
-                font.pixelSize: 11
+            RowLayout {
+                width: implicitWidth
+                height: implicitHeight
+                spacing: 8
+                Label {
+                    objectName: "relationZoomLabel"
+                    text: Math.round(page.zoom * 100) + "%"
+                    color: page.muted
+                    font.pixelSize: 11
+                }
+                Button {
+                    objectName: "relationZoomOut"
+                    text: "−"
+                    flat: true
+                    leftPadding: 12
+                    rightPadding: 12
+                    onClicked: page.zoomAt(canvas.width / 2, canvas.height / 2, 1 / 1.2)
+                }
+                Button {
+                    objectName: "relationZoomIn"
+                    text: "+"
+                    flat: true
+                    leftPadding: 12
+                    rightPadding: 12
+                    onClicked: page.zoomAt(canvas.width / 2, canvas.height / 2, 1.2)
+                }
+                Button {
+                    objectName: "relationReset"
+                    text: "复位"
+                    flat: true
+                    leftPadding: 12
+                    rightPadding: 12
+                    onClicked: page.resetView()
+                }
+                Button {
+                    objectName: "relationRefresh"
+                    text: "刷新"
+                    flat: true
+                    leftPadding: 12
+                    rightPadding: 12
+                    onClicked: page.load()
+                }
             }
-            Label {
-                objectName: "relationZoomLabel"
-                text: Math.round(page.zoom * 100) + "%"
-                color: page.muted
-                font.pixelSize: 11
-            }
-            Button {
-                objectName: "relationZoomOut"
-                text: "−"
-                flat: true
-                leftPadding: 12
-                rightPadding: 12
-                onClicked: page.zoomAt(canvas.width / 2, canvas.height / 2, 1 / 1.2)
-            }
-            Button {
-                objectName: "relationZoomIn"
-                text: "+"
-                flat: true
-                leftPadding: 12
-                rightPadding: 12
-                onClicked: page.zoomAt(canvas.width / 2, canvas.height / 2, 1.2)
-            }
-            Button {
-                objectName: "relationReset"
-                text: "复位"
-                flat: true
-                leftPadding: 12
-                rightPadding: 12
-                onClicked: page.resetView()
-            }
-            Button {
-                text: "刷新"
-                flat: true
-                leftPadding: 12
-                rightPadding: 12
-                onClicked: page.load()
-            }
+        }
+
+        Label {
+            Layout.fillWidth: true
+            visible: page.notice.length > 0
+            text: page.notice
+            color: page.muted
+            font.pixelSize: 11
+            wrapMode: Text.Wrap
         }
 
         Rectangle {
@@ -346,8 +389,8 @@ Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
 
-            onWidthChanged: requestPaint()
-            onHeightChanged: requestPaint()
+            onWidthChanged: page.rebuildLayout()
+            onHeightChanged: page.rebuildLayout()
 
             onPaint: {
                 var ctx = getContext("2d")
@@ -361,118 +404,91 @@ Item {
                     return
                 }
 
-                // 世界坐标以 (0,0) 为中心；缩放平移只改这一层，布局不动。
+                if (!page.labelGeometryReady) {
+                    ctx.font = "11px sans-serif"
+                    var sizes = links.map(function(edge) {
+                        var text = edge.kind + (edge.state ? "（" + edge.state + "）" : "")
+                        return {width: ctx.measureText(text).width, height: 18}
+                    })
+                    page.graphLabelLayout = RelationLayout.routeEdges(page.graphLayout.positions, links, sizes, width, height)
+                    page.labelGeometryReady = true
+                }
+                var viewScale = page.zoom * page.graphLabelLayout.fitScale
+                if (page.measuredLabelScale !== viewScale) {
+                    ctx.font = "12px sans-serif"
+                    var textRatio = page.labelWorldFontSize / 12
+                    var displaySizes = links.map(function(edge) {
+                        var text=edge.kind+(edge.state?"（"+edge.state+"）":"")
+                        return {width:ctx.measureText(text).width*textRatio, height:page.labelWorldFontSize*1.5}
+                    })
+                    page.displayLabelLayout = {edges: RelationLayout.placeLabels(page.graphLayout.positions, page.graphLabelLayout.edges, displaySizes)}
+                    page.measuredLabelScale = viewScale
+                }
+                // Camera, nodes and curves stay fixed while readable labels remeasure.
                 ctx.translate(width / 2 + page.panX, height / 2 + page.panY)
-                ctx.scale(page.zoom, page.zoom)
-
-                // 谁的关系最多谁站中间：主角在圆心，边从中心发散，不会挤成一团。
-                var hub = null
-                for (var h = 0; h < people.length; ++h) {
-                    if (hub === null
-                        || page.degreeOf(people[h].id) > page.degreeOf(hub.id))
-                        hub = people[h]
-                }
-                var ring = people
-                if (hub !== null && page.degreeOf(hub.id) >= 3) {
-                    ring = []
-                    for (var k = 0; k < people.length; ++k)
-                        if (people[k].id !== hub.id) ring.push(people[k])
-                } else {
-                    hub = null
-                }
-
-                // 圆环半径跟着人数走，但不超过画布：默认视图必须一屏放得下，
-                // 想看细节靠缩放，不靠开局就被裁掉一圈人。
-                var fit = Math.min(width, height) / 2 - 70
-                var radius = Math.max(120, Math.min(fit, 90 + ring.length * 34))
-
-                var pos = ({})
-                var place = function (person, x, y) {
-                    pos[person.id] = { x: x, y: y, r: page.radiusOf(person) }
-                }
-                if (hub !== null) place(hub, 0, 0)
-                for (var i = 0; i < ring.length; ++i) {
-                    var angle = -Math.PI / 2 + i * 2 * Math.PI / ring.length
-                    place(ring[i], radius * Math.cos(angle), radius * Math.sin(angle))
-                }
-
-                // 先画线，再把标签压在线上面：标签带白底，压在线上也读得清。
-                // `placed` 记住已经放下的标签，后面挑位置时避开它们。
-                var placed = []
-                for (var e = 0; e < links.length; ++e) {
-                    var edge = links[e]
-                    var a = pos[edge.from]
-                    var b = pos[edge.to]
-                    if (!a || !b) continue
-                    var dx = b.x - a.x
-                    var dy = b.y - a.y
-                    var len = Math.sqrt(dx * dx + dy * dy) || 1
-                    var ux = dx / len
-                    var uy = dy / len
-                    // 法线方向：弧往这一侧鼓。同一对人的几条边各占一个位置。
-                    var nx = -uy
-                    var ny = ux
-                    // 法线要按「这一对人」的固定方向算：跟着边自己的方向算，两条
-                    // 反向的边会得到相反的法线，正负一抵，还是叠在一条线上。
-                    if (edge.from > edge.to) {
-                        nx = -nx
-                        ny = -ny
-                    }
-                    // 同一对人的两条边（儿子 / 父亲）要分开到标签不会互相盖住：
-                    // 差得不够远时，两条曲线叠在一起，看起来还是「一条边一个词」。
-                    var spread = edge.both ? 0.10 : (edge.slot === 0 ? 0.14 : 0.30 * edge.slot)
-                    var bow = len * spread
-                    var cx = (a.x + b.x) / 2 + nx * bow
-                    var cy = (a.y + b.y) / 2 + ny * bow
-                    // 弧别从别的圈里穿过去：穿过去就被节点盖住，读者以为这条线断了。
-                    // 往同一侧加大弯曲，最多试六次；实在绕不开就让它从下面走。
-                    var tries = 0
-                    while (tries < 6 && !page.curveIsClear(a, b, cx, cy, pos, edge.from, edge.to)) {
-                        bow *= 1.45
-                        cx = (a.x + b.x) / 2 + nx * bow
-                        cy = (a.y + b.y) / 2 + ny * bow
-                        tries += 1
-                    }
-
-                    // 端点落在圆周上，不是圆心：箭头要贴着圈。
-                    var start = circleToward(a.x, a.y, cx, cy, a.r + 2)
-                    var end = circleToward(b.x, b.y, cx, cy, b.r + 6)
-
-                    // 先描一条白边：两条线交叉时能看出谁在上面，不会糊成一团。
+                ctx.scale(viewScale, viewScale)
+                var pos = page.graphLayout.positions
+                var routes = page.displayLabelLayout.edges
+                // All strokes precede all labels, so a later edge cannot run
+                // through text that was already painted.
+                for (var e = 0; e < routes.length; ++e) {
+                    var route = routes[e]
                     ctx.beginPath()
                     ctx.lineWidth = 3.4
                     ctx.strokeStyle = "#ffffff"
-                    ctx.moveTo(start.x, start.y)
-                    ctx.quadraticCurveTo(cx, cy, end.x, end.y)
+                    ctx.moveTo(route.start.x, route.start.y)
+                    ctx.quadraticCurveTo(route.cx, route.cy, route.end.x, route.end.y)
                     ctx.stroke()
-
                     ctx.beginPath()
-                    ctx.lineWidth = 1.2
-                    ctx.strokeStyle = page.accent
-                    ctx.moveTo(start.x, start.y)
-                    ctx.quadraticCurveTo(cx, cy, end.x, end.y)
+                    ctx.lineWidth = page.hoveredEdgeKey === route.edge_key ? 2.8 : 1.2
+                    ctx.strokeStyle = page.hoveredEdgeKey && page.hoveredEdgeKey !== route.edge_key ? page.line : page.accent
+                    ctx.moveTo(route.start.x, route.start.y)
+                    ctx.quadraticCurveTo(route.cx, route.cy, route.end.x, route.end.y)
                     ctx.stroke()
-
-                    arrowHead(ctx, end.x, end.y, end.x - cx, end.y - cy)
-                    // 两侧同一个词：一条线两个箭头，方向本来就是对等的。
-                    if (edge.both) arrowHead(ctx, start.x, start.y, start.x - cx, start.y - cy)
-
-                    var label = edge.kind + (edge.state ? "（" + edge.state + "）" : "")
-                    ctx.font = "11px sans-serif"
-                    var lw = ctx.measureText(label).width
-                    // 标签别压在圈上：中点被挡住就沿着弧往两头挪。
-                    var spot = page.labelSpot(start, cx, cy, end, pos, edge.from, edge.to,
-                                              placed, lw)
-                    var mx = spot.x
-                    var my = spot.y
-                    placed.push({ x: mx - lw / 2 - 4, y: my - 8, w: lw + 8, h: 16 })
-                    ctx.fillStyle = "#ffffff"
-                    ctx.fillRect(mx - lw / 2 - 4, my - 8, lw + 8, 16)
-                    ctx.fillStyle = page.muted
-                    ctx.textAlign = "center"
-                    ctx.fillText(label, mx, my + 4)
-                    ctx.textAlign = "left"
+                    arrowHead(ctx, route.end.x, route.end.y, route.end.x-route.cx, route.end.y-route.cy)
+                    if (route.edge.both) arrowHead(ctx, route.start.x, route.start.y, route.start.x-route.cx, route.start.y-route.cy)
                 }
+                for (e = 0; e < routes.length; ++e) {
+                    route = routes[e]
+                    var leader = route.leader
+                    if (Math.abs(leader.from.x-leader.to.x) + Math.abs(leader.from.y-leader.to.y) > 2) {
+                        ctx.beginPath()
+                        ctx.lineWidth = page.hoveredEdgeKey === route.edge_key ? 1.6 : .85
+                        ctx.strokeStyle = page.accent
+                        // Manual dashes work on Qt Canvas versions without setLineDash.
+                        var leaderDx = leader.to.x-leader.from.x, leaderDy = leader.to.y-leader.from.y
+                        var leaderLength = Math.sqrt(leaderDx*leaderDx+leaderDy*leaderDy)
+                        var dash = 5/viewScale, gap = 3/viewScale
+                        for (var offset=0; offset<leaderLength; offset+=dash+gap) {
+                            var fromRatio=offset/leaderLength, toRatio=Math.min(offset+dash,leaderLength)/leaderLength
+                            ctx.moveTo(leader.from.x+leaderDx*fromRatio,leader.from.y+leaderDy*fromRatio)
+                            ctx.lineTo(leader.from.x+leaderDx*toRatio,leader.from.y+leaderDy*toRatio)
+                        }
+                        ctx.stroke()
+                        ctx.beginPath()
+                        ctx.arc(leader.to.x, leader.to.y, 2.3/viewScale, 0, 2*Math.PI)
+                        ctx.fillStyle = page.accent
+                        ctx.fill()
+                    }
+                }
+                ctx.font = "12px sans-serif"
+                ctx.textAlign = "center"
+                ctx.textBaseline = "middle"
+                for (e = 0; e < routes.length; ++e) {
+                    var box = routes[e].label
+                    ctx.fillStyle = "#ffffff"
+                    ctx.fillRect(box.x, box.y, box.w, box.h)
+                    ctx.strokeStyle = page.hoveredEdgeKey === routes[e].edge_key ? page.accent : page.line
+                    ctx.lineWidth = (page.hoveredEdgeKey === routes[e].edge_key ? 1.5 : .65)/viewScale
+                    ctx.strokeRect(box.x,box.y,box.w,box.h)
+                    ctx.fillStyle = page.accent
+                    ctx.save()
+                    ctx.translate(box.x+box.w/2,box.y+box.h/2)
+                    ctx.scale(page.labelWorldFontSize/12,page.labelWorldFontSize/12)
+                    ctx.fillText(box.text,0,0)
+                    ctx.restore()
+                }
+                ctx.textAlign = "left"
 
                 for (var p = 0; p < people.length; ++p) {
                     var person = people[p]
@@ -482,7 +498,7 @@ Item {
                     ctx.fillStyle = "#ffffff"
                     ctx.fill()
                     ctx.strokeStyle = page.accent
-                    ctx.lineWidth = 1
+                    ctx.lineWidth = page.highlightedNode(person.id) ? 2.8 : 1
                     ctx.stroke()
                     ctx.fillStyle = page.ink
                     ctx.textAlign = "center"
@@ -505,7 +521,10 @@ Item {
 
             // 拖动平移；双击回到原样。
             MouseArea {
+                objectName: "relationPointer"
                 anchors.fill: parent
+                hoverEnabled: true
+                onExited: { page.hoveredEdgeKey = ""; canvas.requestPaint() }
                 cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
                 property real lastX: 0
                 property real lastY: 0
@@ -514,7 +533,11 @@ Item {
                     lastY = mouse.y
                 }
                 onPositionChanged: function (mouse) {
-                    if (!pressed) return
+                    if (!pressed) {
+                        page.hoveredEdgeKey = page.labelAt(mouse.x, mouse.y)
+                        canvas.requestPaint()
+                        return
+                    }
                     page.panBy(mouse.x - lastX, mouse.y - lastY)
                     lastX = mouse.x
                     lastY = mouse.y
@@ -524,8 +547,16 @@ Item {
 
             // 鼠标滚轮缩放；触控板两指滑动平移，捏合（Ctrl+滚轮）缩放。
             WheelHandler {
+                target: null
+                blocking: false
                 acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
                 onWheel: function (event) {
+                    var at = page.wheelPoint(event)
+                    if (!at || !canvas.contains(at)
+                        || !page.contains(canvas.mapToItem(page, at.x, at.y))) {
+                        event.accepted = false
+                        return
+                    }
                     var pinch = (event.modifiers & Qt.ControlModifier) !== 0
                     var px = event.pixelDelta
                     var panned = px && (Math.abs(px.x) > 0 || Math.abs(px.y) > 0)
@@ -534,7 +565,6 @@ Item {
                     } else {
                         var steps = event.angleDelta.y / 120
                         if (steps !== 0) {
-                            var at = page.wheelPoint(event)
                             page.zoomAt(at.x, at.y, Math.pow(1.18, steps))
                         }
                     }
@@ -559,8 +589,9 @@ Item {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             text: "箭头从这一方指向对方：A —儿子→ B 读作「B 是 A 的儿子」，反过来写「父亲」。"
-                + "同一个词在两侧各出现一次时合成一条、两头带箭头。"
+                + "对称关系或同性质反向记录合成双箭头。"
                 + "滚轮或双指捏合缩放，拖动平移，双击复位。括号里是关系当前的状态。"
+                + "悬停标签高亮关系；虚线为标签引线。"
             color: page.muted
             font.pixelSize: 11
         }
@@ -569,228 +600,34 @@ Item {
     // 滚轮事件在哪一点上。Qt 6.6 起是 `point.position`，更早是 `position`；
     // 拿不到就退回画布中心——缩放照样能用，只是不以光标为锚。
     function wheelPoint(event) {
-        if (event.position !== undefined && event.position !== null)
-            return event.position
-        if (event.point !== undefined && event.point !== null
-            && event.point.position !== undefined)
-            return event.point.position
-        if (event.x !== undefined)
-            return { x: event.x, y: event.y }
-        return { x: canvas.width / 2, y: canvas.height / 2 }
+        if (event.point && event.point.scenePosition)
+            return canvas.mapFromItem(null, event.point.scenePosition.x, event.point.scenePosition.y)
+        if (event.position !== undefined && event.position !== null) return event.position
+        if (event.x !== undefined) return Qt.point(event.x, event.y)
+        return null
     }
 
     // 标签放在弧上哪一点：优先中点，被圈挡住就依次往两头挪。
-    function labelSpot(start, cx, cy, end, pos, skipA, skipB, placed, width) {
-        var tries = [0.5, 0.42, 0.58, 0.34, 0.66, 0.26, 0.74, 0.2, 0.8]
-        for (var i = 0; i < tries.length; ++i) {
-            var t = tries[i]
-            var u = 1 - t
-            var px = u * u * start.x + 2 * u * t * cx + t * t * end.x
-            var py = u * u * start.y + 2 * u * t * cy + t * t * end.y
-            var blocked = false
-            for (var id in pos) {
-                if (id === skipA || id === skipB) continue
-                var other = pos[id]
-                var dx = px - other.x
-                var dy = py - other.y
-                if (dx * dx + dy * dy < (other.r + 12) * (other.r + 12)) {
-                    blocked = true
-                    break
-                }
-            }
-            if (!blocked && !page.labelHits(placed, px, py, width)) return { x: px, y: py }
-        }
-        return { x: 0.25 * start.x + 0.5 * cx + 0.25 * end.x,
-                 y: 0.25 * start.y + 0.5 * cy + 0.25 * end.y }
-    }
-
-    // 这个位置会不会压到已经放下的标签。
-    function labelHits(placed, x, y, width) {
-        var left = x - width / 2 - 4
-        var top = y - 8
-        for (var i = 0; i < (placed || []).length; ++i) {
-            var box = placed[i]
-            if (left < box.x + box.w && box.x < left + width + 8
-                && top < box.y + box.h && box.y < top + 16) return true
-        }
-        return false
-    }
-
-    // 这条弧有没有从别的圈里穿过去。只采样中间段：两端本来就贴着端点。
-    function curveIsClear(a, b, cx, cy, pos, skipA, skipB) {
-        for (var t = 0.18; t <= 0.83; t += 0.1) {
-            var u = 1 - t
-            var px = u * u * a.x + 2 * u * t * cx + t * t * b.x
-            var py = u * u * a.y + 2 * u * t * cy + t * t * b.y
-            for (var id in pos) {
-                if (id === skipA || id === skipB) continue
-                var other = pos[id]
-                var dx = px - other.x
-                var dy = py - other.y
-                if (dx * dx + dy * dy < (other.r + 8) * (other.r + 8)) return false
-            }
-        }
-        return true
-    }
-
     // 时间点：与「数据浏览」同一套三层——大事件 → 场景 → 事件。
     // 列里放哪些行按 `level` 判断，不按后端算的序号，免得层级错位时串列。
-    function momentRows(rank, parentId) {
-        var levels = page.moments.levels || []
-        var key = rank < levels.length ? levels[rank].key : ""
-        var nodes = page.moments.nodes || []
-        var out = []
-        for (var i = 0; i < nodes.length; ++i) {
-            var node = nodes[i]
-            if (node.level !== key) continue
-            if ((node.parent_id || "") === (parentId || "")) out.push(node)
-        }
-        return out
-    }
-
     function chooseCut(id, name) {
         page.cutId = id || ""
         page.cutName = name || ""
         page.relatedOnly = page.relatedOnly && page.cutId !== ""
         page.load()
-        cutPopup.close()
     }
 
-    Popup {
+    ReadingPositionPicker {
         id: cutPopup
-        objectName: "relationCutPopup"
-        modal: true
-        padding: 0
-        width: Math.min(780, page.width - 80)
-        height: Math.min(380, page.height - 120)
-        anchors.centerIn: parent
-        property string firstId: ""
-        property string secondId: ""
-
-        onOpened: {
-            var here = page.momentPath(page.cutId)
-            firstId = here.storyline
-            secondId = here.scene
-            if (firstId === "") {
-                var tops = page.momentRows(0, "")
-                firstId = tops.length > 0 ? tops[0].id : ""
-            }
-            if (secondId === "") {
-                var kids = page.momentRows(1, firstId)
-                secondId = kids.length > 0 ? kids[0].id : ""
-            }
-        }
-
-        background: Rectangle {
-            color: page.t.panel
-            border.color: page.t.line
-            radius: page.t.radius
-        }
-
-        contentItem: ColumnLayout {
-            spacing: 0
-
-            RowLayout {
-                Layout.fillWidth: true
-                Layout.preferredHeight: 32
-                spacing: 8
-                Button {
-                    text: "最新（读到末尾）"
-                    flat: true
-                    font.pixelSize: 11
-                    onClicked: page.chooseCut("", "")
-                }
-                Item { Layout.fillWidth: true }
-                Button {
-                    text: "关闭"
-                    flat: true
-                    font.pixelSize: 11
-                    onClicked: cutPopup.close()
-                }
-            }
-            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: page.t.line }
-
-            RowLayout {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                spacing: 0
-
-                Repeater {
-                    model: page.moments.levels || []
-                    delegate: Item {
-                        required property var modelData
-                        required property int index
-                        Layout.preferredWidth: index === 0 ? 280 : (index === 1 ? 260 : -1)
-                        Layout.fillWidth: index === 2
-                        Layout.fillHeight: true
-
-                        ListView {
-                            id: cutList
-                            objectName: "relationCutLevel" + index
-                            anchors.fill: parent
-                            anchors.margins: 4
-                            clip: true
-                            spacing: 2
-                            model: index === 0
-                                ? page.momentRows(0, "")
-                                : page.momentRows(index,
-                                                  index === 1 ? cutPopup.firstId : cutPopup.secondId)
-                            delegate: ItemDelegate {
-                                id: cutRow
-                                required property var modelData
-                                width: ListView.view.width
-                                readonly property bool picked: page.cutId === modelData.id
-                                onClicked: {
-                                    if (index === 0) cutPopup.firstId = modelData.id
-                                    if (index === 1) cutPopup.secondId = modelData.id
-                                    page.chooseCut(modelData.id, modelData.name)
-                                }
-                                background: Rectangle {
-                                    radius: 4
-                                    color: cutRow.picked ? page.t.accentSoft
-                                        : (cutRow.hovered ? page.t.panelAlt : "transparent")
-                                }
-                                contentItem: Label {
-                                    leftPadding: 8
-                                    text: (modelData.label_id ? modelData.label_id + "　" : "")
-                                        + modelData.name
-                                        + (modelData.provisional === true ? "（暂称）" : "")
-                                    elide: Text.ElideRight
-                                    font.pixelSize: 11
-                                    font.italic: modelData.synthetic === true
-                                    font.weight: cutRow.picked ? Font.DemiBold : Font.Normal
-                                    color: cutRow.picked ? page.t.accent
-                                        : (modelData.synthetic === true ? page.t.muted : page.t.body)
-                                }
-                            }
-                        }
-
-                        Label {
-                            anchors.centerIn: parent
-                            width: parent.width - 16
-                            horizontalAlignment: Text.AlignHCenter
-                            wrapMode: Text.WordWrap
-                            visible: cutList.count === 0
-                            text: index === 0 ? "还没有大事件"
-                                : (index === 1 ? "先选一个大事件" : "先选一个场景")
-                            color: page.t.muted
-                            font.pixelSize: 10
-                        }
-
-                        Rectangle {
-                            visible: index < 2
-                            anchors.right: parent.right
-                            width: 1
-                            height: parent.height
-                            color: page.t.line
-                        }
-                    }
-                }
-            }
-        }
+        namePrefix: "relationCut"
+        tree: page.moments
+        t: page.t
+        currentId: page.cutId
+        viewportWidth: page.width
+        viewportHeight: page.height
+        onPicked: function(id, name) { page.chooseCut(id, name) }
     }
 
-    // 从圆心朝 (qx,qy) 走 r 的那一点：边要落在圆周上。
     function circleToward(px, py, qx, qy, r) {
         var vx = qx - px
         var vy = qy - py

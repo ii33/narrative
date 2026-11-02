@@ -7,17 +7,17 @@ disclosure supersedes, and properties that were never declared. This module
 finds those without asking a model, so the same input always yields the same
 findings.
 
-It never edits anything. Each finding names the records involved and suggests an
-action; applying it stays a human decision through the normal candidate flow.
+It never edits anything. Each finding names the records involved; authorized
+Operations apply repairs after the shared static validation.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any
 
-from . import property_categories, property_core, property_labels
+from . import property_categories, property_labels
 from .order_ids import order_key
+from .property_core import canonical_definitions
 
 ERROR = "error"
 WARNING = "warning"
@@ -103,16 +103,8 @@ def audit_properties(
     either "this node has problems" or "the whole extraction has problems".
     """
     names = {node["id"]: node for node in nodes}
-    # A retracted value is still a record: it is what a retraction points at, and
-    # it is what tells the audit that an aspect lost its last standing value. It
-    # is excluded from the value checks, though — a taken-back record must not be
-    # reported as an overlap or a contradiction.
-    retracted_ids = {
-        record.get("target_id") for record in records
-        if record.get("kind") == "property_retraction"
-    }
-    # 找撤回目标要索引**全部**取值：撤回可能指向别的批次（上一章）的记录，
-    # 按本次节点筛过就找不到目标，会误报「撤不掉任何东西」。分组与统计仍只看本次节点。
+    ended_ids = {row.get("id") for row in records
+                 if row.get("kind") == "property_value" and row.get("valid_to")}
     indexed_values = [
         record for record in records if record.get("kind") == "property_value"
     ]
@@ -120,11 +112,8 @@ def audit_properties(
         record for record in indexed_values
         if node_ids is None or record.get("node_id") in node_ids
     ]
-    values = [record for record in values_all if record.get("id") not in retracted_ids]
-    definitions = {
-        record["id"]: record for record in records
-        if record.get("kind") == "property_definition"
-    }
+    values = [record for record in values_all if record.get("id") not in ended_ids]
+    definitions = canonical_definitions(records)
     # A category move is one record pointing at one disclosure; the last accepted
     # one is the grouping a reader sees.
     overrides: dict[str, str] = {}
@@ -136,10 +125,9 @@ def audit_properties(
             overrides[target] = category.strip()
 
     retracted_nodes = {node["id"] for node in nodes if node.get("retracted")}
-    # What the review round would mark: older values a later disclosure replaced.
+    # Deterministic state audit: older values a later disclosure replaced.
     # Computed from the same rule the extraction uses, so the audit cannot ask for
     # a different invalidation than the one already written into a candidate.
-    values_by_id = {record["id"]: record for record in indexed_values}
     issues: list[dict] = []
     groups: dict[tuple, list[dict]] = defaultdict(list)
     per_node_names: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
@@ -240,32 +228,6 @@ def audit_properties(
             suggestion="在浏览页把它们移到合适的大类；拿不准就留在「其他」，不影响取值",
         ))
 
-    retractions = [
-        record for record in records
-        if record.get("kind") == "property_retraction"
-    ]
-    retract_groups: dict[tuple, list[dict]] = defaultdict(list)
-    for record in retractions:
-        # A retraction has no node, aspect or position of its own: it is an
-        # editorial act pointing at one disclosure. Everything about it is read
-        # from that target, so the two can never disagree.
-        target = values_by_id.get(record.get("target_id") or "")
-        if target is None:
-            issues.append(_issue(
-                "retraction_without_target", ERROR,
-                f"撤回记录指向的 {record.get('target_id') or '（空）'} 不存在，撤不掉任何东西",
-                records=[record],
-                suggestion="撤回必须指向一条已接受的取值记录",
-            ))
-            continue
-        retract_groups[(
-            target.get("node_id"), target.get("property_id"),
-            (target.get("scope") or "world"), target.get("holder_id"),
-        )].append(record)
-
-    # Groups come from every value, retracted or not: a group whose values were
-    # all taken back still has to be judged, and it would otherwise vanish from
-    # the report exactly when it became empty.
     for record in values_all:
         node_id, property_id = record.get("node_id"), record.get("property_id")
         if isinstance(node_id, str) and isinstance(property_id, str):
@@ -277,20 +239,12 @@ def audit_properties(
     for (node_id, property_id, scope, holder_id), rows in groups.items():
         node = names.get(node_id, {"id": node_id, "name": node_id})
         label = _SCOPE_LABELS.get(scope, scope)
-        retr = retract_groups.get((node_id, property_id, scope, holder_id)) or []
         # Retracted rows are not evidence of anything: they are only kept so the
         # group exists. Every check below works on what still stands.
         ordered = sorted(
-            (row for row in rows if row.get("id") not in retracted_ids), key=_position
+            (row for row in rows if row.get("id") not in ended_ids), key=_position
         )
         if not ordered:
-            if retr:
-                issues.append(_issue(
-                    "retracted_no_successor", WARNING,
-                    f"属性「{property_id}」（{label}）的记录都已撤回，当前没有有效值",
-                    node=node, property_id=property_id, records=retr,
-                    suggestion="确认这是有意终止；若之后又有新说法，补一条取值记录",
-                ))
             continue
         seen: dict[str, list[dict]] = defaultdict(list)
         for row in ordered:
@@ -355,40 +309,14 @@ def audit_properties(
                 suggestion="节点撤回时一并撤回它的属性记录，或恢复该节点",
             ))
 
-    # 属性属于**东西**和**场景**，不属于一次发生。事件只讲发生了什么；给它挂
-    # 一条状态，等于把「这一刻的样子」记在了时间点上，下一次披露就没地方放。
+    # 两级进展记录在直属子级，容器仅汇总。
+    expected_progress = {property_labels.STORYLINE_PROGRESS: "big_event", property_labels.BIG_EVENT_PROGRESS: "scene"}
     for record in values:
+        expected = expected_progress.get(str(record.get("property_id") or ""))
         node = names.get(record.get("node_id") or "") or {}
-        if node.get("node_type") == "event":
-            issues.append(_issue(
-                "property_on_event", INFO,
-                f"事件「{node.get('name')}」上挂了属性「{record.get('property_id')}」，"
-                "事件不该带属性",
-                node=node,
-                property_id=record.get("property_id"),
-                records=[record],
-                suggestion="状态记在人物/物品/地点上，或者记在它所属的场景上；"
-                           "事件名本身已经说了发生了什么",
-            ))
-
-    # 大事件不写属性：它的样子由场景那句 `storyline_progress` 攒出来。模型偶尔
-    # 还是把总结直接写在它身上，那样读者看到的就是一句静态结论，不随阅读位置变。
-    for record in values:
-        node = names.get(record.get("node_id") or "") or {}
-        if node.get("node_type") != "storyline":
-            continue
-        if str(record.get("property_id") or "") != property_labels.STORYLINE_PROGRESS:
-            continue
-        issues.append(_issue(
-            "property_on_storyline", INFO,
-            f"大事件「{node.get('name')}」自己写了一条进展，"
-            "这句话应该属于某个场景",
-            node=node,
-            property_id=record.get("property_id"),
-            records=[record],
-            suggestion="把这条改挂到它对应的场景上（场景的 `storyline_progress`），"
-                       "大事件会自己汇总",
-        ))
+        if expected and node.get("node_type") != expected:
+            issues.append(_issue("progress_owner", INFO, f"进展须记录在直属子级{expected}上", node=node,
+                                 property_id=record.get("property_id"), records=[record]))
 
     # 关系名要指清是哪一边。成对的叫法（父子）读不出谁是谁的父亲；单边称呼
     # （父亲）写两侧各一次是对的，但两侧都写同一个词，方向就没了。
@@ -444,40 +372,14 @@ def audit_properties(
         if node.get("node_type") != "scene":
             continue
         owners = [item for item in parents.get(node["id"], [])
-                  if item.get("node_type") == "storyline"]
+                  if item.get("node_type") == "big_event"]
         if owners:
             continue
         issues.append(_issue(
-            "scene_without_storyline", INFO,
+            "scene_without_big_event", INFO,
             f"场景「{node.get('name')}」没有归入任何大事件",
             node=node,
-            suggestion="在场景的 `storyline` 里写它属于哪个大事件；跨章还没走完的用暂称",
-        ))
-
-    # 一场没写进展是正常的：那一场没有实质推进，硬写就是拿上一句换了个说法。
-    # 真正的缺口是**整条大事件一句都没有**——读者从头到尾不知道它走到哪了。
-    for node in nodes:
-        if node.get("node_type") != "storyline":
-            continue
-        scenes = {
-            child for child in node.get("events") or []
-            if (names.get(child) or {}).get("node_type") == "scene"
-        }
-        if not scenes:
-            continue
-        spoken = {
-            record.get("node_id") for record in values
-            if str(record.get("property_id") or "") == property_labels.STORYLINE_PROGRESS
-        }
-        if scenes & spoken:
-            continue
-        issues.append(_issue(
-            "storyline_without_progress", INFO,
-            f"大事件「{node.get('name')}」下面 {len(scenes)} 个场景一句进展都没写，"
-            "读者看不到它走到哪了",
-            node=node,
-            suggestion="在真正让它往前走的那几场上各写一句 `storyline_progress`；"
-                       "没有实质推进的场景可以不写",
+            suggestion="在场景的 `big_event` 里写它属于哪个大事件，并直接使用清晰概括名",
         ))
 
     # 属性名要在界面上显示中文。英文标识符没有对照时，读者会看到「身份」和
@@ -505,30 +407,6 @@ def audit_properties(
                 suggestion="若无用就撤回定义，否则说明有属性被漏提",
             ))
 
-    # 同一个节点上，两个**名字不同**的方面拿着同一个值：多半是同一个方面被叫了两个名字
-    # （中文同义词程序认不出来），一条线被拆成了两条。只报不改，合并是人的决定。
-    by_node_value: dict[tuple[str, str], set[str]] = defaultdict(set)
-    for record in values:
-        node_id = record.get("node_id")
-        name = record.get("property_id")
-        value = record.get("value")
-        if isinstance(node_id, str) and isinstance(name, str) and isinstance(value, str):
-            by_node_value[(node_id, value)].add(name)
-    for (node_id, value), aspects in by_node_value.items():
-        if len(aspects) < 2:
-            continue
-        issues.append(_issue(
-            "aspect_overlap", WARNING,
-            f"同一节点上「{'」「'.join(sorted(aspects))}」记着同一个值「{value[:20]}」"
-            f"，可能是同一个方面用了两个名字",
-            node=names.get(node_id),
-            records=[
-                record for record in values
-                if record.get("node_id") == node_id and record.get("value") == value
-            ],
-            suggestion="确认是不是同一个方面；是的话用「合并」把两个名字并成一条线",
-        ))
-
     # 关系得指向人：值既不是节点编号也不是任何节点的名字，说明写成了句子
     # （「恋人 = 与沈砚是多年的恋人」）。这种在关系网上画不出来。
     by_name = {_text(node.get("name")): node for node in nodes if node.get("name")}
@@ -537,6 +415,17 @@ def audit_properties(
             continue
         node = names.get(str(record.get("node_id") or "")) or {}
         value = _text(record.get("value"))
+        target = names.get(record.get("value")) if isinstance(record.get("value"), str) else None
+        definition = definitions.get(str(record.get("property_id") or ""), {})
+        if (node.get("node_type") == "person" and target and target.get("node_type") == "person"
+                and definition.get("value_type") in {"string", "any"}):
+            issues.append(_issue(
+                "relation_untyped_reference", WARNING,
+                f"「{node.get('name')}」的「{record.get('property_id')}」分类为关系，值是人物ID「{value}」，"
+                "但定义为普通值，不会显示在人物关系图中",
+                node=node, property_id=str(record.get("property_id") or ""), records=[record],
+                suggestion="若确为节点关系，请显式将定义设为node/either；若是普通文字，请更正分类。不会自动转换取值",
+            ))
         if not node or not value or value in names or value in by_name:
             continue
         issues.append(_issue(
@@ -566,6 +455,17 @@ def audit_properties(
                 suggestion="确认这条说的是什么；说的是身份就换个方面名，说的是关系就该指向别人",
             ))
 
+    from .item_possession import item_possession_issues
+
+    for finding in item_possession_issues(list(names.values()), records):
+        identifier = finding.get("object_id")
+        if node_ids is not None and identifier not in node_ids:
+            continue
+        involved = {finding.get("record_id"), *(finding.get("record_ids") or [])}
+        issues.append(_issue(finding["code"], ERROR, finding["message"],
+                             node=names.get(identifier or ""), property_id=finding.get("property_id"),
+                             records=[row for row in records if row.get("id") in involved],
+                             suggestion="用world持有者节点或显式无/未知同批修复；认知持有人不能替代"))
     issues.sort(key=lambda item: (
         {"error": 0, "warning": 1, "info": 2}.get(item["severity"], 3),
         str(item.get("node_id") or ""),
@@ -585,33 +485,3 @@ def audit_properties(
         },
         "checked_records": len(values),
     }
-
-
-def audit_candidate(ops: Any, built: dict) -> dict:
-    """Audit an extraction that is not accepted yet.
-
-    The candidate's own records are checked together with what the project
-    already holds, limited to the nodes this extraction touches — that is the
-    window where overlaps and contradictions actually appear.
-    """
-    snapshot = ops.graph_snapshot()
-    nodes = list(snapshot.get("nodes", []))
-    nodes += [
-        obj for obj in built.get("objects", [])
-        if obj.get("kind") == "node"
-    ]
-    # Retracted rows are included: a retraction in this candidate may point at a
-    # record that was taken back earlier, and judging it needs that record.
-    records = list(ops.property_records(include_retracted=True)) + list(
-        built.get("property_records", [])
-    )
-    # A name that was renamed or merged away is not a second aspect here either:
-    # the candidate is judged under the names the reader will see.
-    records = property_core.canonical_records(records)
-    node_ids = {
-        obj["id"] for obj in built.get("objects", [])
-        if obj.get("kind") == "node"
-    }
-    return audit_properties(
-        records, nodes, node_ids=node_ids, categories=ops.property_categories()
-    )

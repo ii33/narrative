@@ -145,6 +145,8 @@ Item {
                 if (payload.notice) app.toast(payload.notice, false)
             }
         }
+        function onErrorOccurred(kind, message) {
+        }
     }
 
     ColumnLayout {
@@ -549,7 +551,7 @@ Item {
                                 inputMethodHints: Qt.ImhDigitsOnly
                             }
 
-                            Label { text: "超时（秒）"; color: t.muted; font.pixelSize: 12 }
+                            Label { text: "响应空闲超时（秒）"; color: t.muted; font.pixelSize: 12 }
                             TextField {
                                 id: timeoutField
                                 Layout.fillWidth: true

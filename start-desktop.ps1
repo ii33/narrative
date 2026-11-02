@@ -24,7 +24,7 @@ $configText = ($localConfig -join "`n") + "`n"
 if ([IO.File]::ReadAllText($config) -ne $configText) {
     [IO.File]::WriteAllText($config, $configText, (New-Object Text.UTF8Encoding($false)))
 }
-$probe = & $python -I -c 'import pathlib,sys,sysconfig,narrative; root=pathlib.Path(sys.argv[1]).resolve(); assert all(pathlib.Path(p).resolve().is_relative_to(root) for p in (sys.prefix,sys.base_prefix,sysconfig.get_path("stdlib"),narrative.__file__)), "Python environment escapes the project"' $projectRoot
+& $python -I (Join-Path $projectRoot 'scripts\check_runtime.py')
 if ($LASTEXITCODE -ne 0) {
     throw 'Project Python isolation check failed.'
 }

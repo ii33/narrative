@@ -1,8 +1,8 @@
-"""Public v5 project boundary for UI, CLI and model agents.
+"""Public schema-10 project boundary for UI, CLI and model agents.
 
 This class is a composition root: every method
 delegates to a narrow facade in :mod:`graph_facades`. New code should depend on a
-facade (`ops.project`, `ops.review`, `ops.changes`, ...) instead of this class.
+facade (`ops.project`, `ops.properties`, `ops.query`, ...) instead of this class.
 """
 
 from __future__ import annotations
@@ -10,15 +10,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .change_service import ChangeService
 from .graph_facades import (
-    GraphChangeFacade,
     GraphProfileFacade,
     GraphProjectFacade,
     GraphPropertyFacade,
     GraphQueryFacade,
     GraphRagFacade,
-    GraphReviewFacade,
 )
 from .graph_profile_ops import ProfileService
 from .graph_read_ops import GraphReadService
@@ -41,7 +38,6 @@ class GraphOperations:
         self._store = GraphStore(path, create=create)
         self._service = GraphService(self._store)
         self._properties = PropertyStore(self._store)
-        self._changes = ChangeService(self._service, self._properties)
         self._provider_store = ProviderStore()
         self._project_id = self._store.info()["project_id"]
 
@@ -51,14 +47,66 @@ class GraphOperations:
         self._graphrag = GraphRagService(self._store, self._service)
 
         self.project = GraphProjectFacade(self._store, self._service, self._read)
-        self.review = GraphReviewFacade(self._service, review_callback=self._record_extraction_review)
-        self.properties = GraphPropertyFacade(self._properties, review_callback=self._record_extraction_review)
-        self.changes = GraphChangeFacade(self._changes, review_callback=self._record_extraction_review)
+        self.properties = GraphPropertyFacade(self._properties)
         self.query = GraphQueryFacade(self._read, self._timeline)
         self.profiles = GraphProfileFacade(self._profile)
         self.graphrag = GraphRagFacade(self._graphrag)
 
     # -- project ---------------------------------------------------------
+    def check_project(self) -> dict:
+        from .project_check import check
+
+        return check(self)
+
+    def correct_property(self, record_id: str, value, reason: str, *, event_id=None,
+                         source_id=None, quote=None, category=None, scope=None, holder_id=None) -> dict:
+        from .temporal_state import correct
+        return correct(self, record_id, value, reason, event_id=event_id, source_id=source_id,
+                       quote=quote, category=category, scope=scope, holder_id=holder_id)
+
+    def expire_properties(self, record_ids: list[str], source_id: str, start: int, *,
+                          event_id=None, reason: str) -> dict:
+        from .temporal_state import expire
+        return expire(self, record_ids, source_id, start, event_id=event_id, reason=reason)
+
+    def expire_property(self, record_id: str, source_id: str, start: int, *, event_id=None, reason: str) -> dict:
+        return self.expire_properties([record_id], source_id, start, event_id=event_id, reason=reason)
+
+    def delete_property_records(self, ids: list[str], reason: str) -> dict:
+        from .temporal_state import delete_records
+        return delete_records(self, ids, reason)
+
+    def rename_property(self, from_id: str, to_id: str, reason: str, expected_revision: int) -> dict:
+        from .temporal_state import rename
+        return rename(self, from_id, to_id, reason, expected_revision)
+
+    def merge_properties(self, source_id: str, target_id: str, reason: str, expected_revision: int) -> dict:
+        from .temporal_state import rename
+        return rename(self, source_id, target_id, reason, expected_revision, merge=True)
+
+    def rollback_preview(self, source_id: str, start: int, expected_revision: int) -> dict:
+        from .temporal_state import rollback_plan
+        return rollback_plan(self, source_id, start, expected_revision)[2]
+
+    def rollback_to(self, source_id: str, start: int, expected_revision: int, reason: str) -> dict:
+        from .temporal_state import rollback
+        return rollback(self, source_id, start, expected_revision, reason)
+
+    def capture_changes(self):
+        from .batch_write import capture
+        return capture(self._store)
+
+    def prepare_changes(self, graph_objects: list[dict], property_records: list[dict],
+                        expected_revision: int, *, snapshot):
+        from .batch_write import prepare
+        if snapshot.store.path != self._store.path:
+            raise ValueError("批次快照不属于当前工程")
+        return prepare(snapshot, graph_objects, property_records, expected_revision)
+
+    def commit_changes(self, prepared, reason: str) -> dict:
+        from .batch_write import commit
+        return commit(self._store, prepared, reason)
+
     def graph_project_info(self) -> dict:
         return self.project.info()
 
@@ -83,25 +131,48 @@ class GraphOperations:
 
         return SourceSlices(self._store).create(source_id, slices)
 
+    def preview_pattern_slices(self, source_id: str, pattern: str, start_index: int = 0,
+                               limit: int | None = None) -> dict:
+        from .source_slices import SourceSlices
+
+        return SourceSlices(self._store).preview_pattern(source_id, pattern, start_index, limit)
+
+    def create_pattern_slices(self, source_id: str, pattern: str, start_index: int = 0,
+                              limit: int | None = None) -> dict:
+        from .source_slices import SourceSlices
+        return SourceSlices(self._store).create_pattern(source_id, pattern, start_index, limit)
+
     def source_slice(self, source_id: str, slice_id: str) -> dict:
         from .source_slices import SourceSlices
 
         return SourceSlices(self._store).get(source_id, slice_id)
 
-    def load_slice_extraction(self, source_id: str, slice_id: str) -> dict:
-        from .slice_extraction import load
+    def preview_event_merge(self, source_event_id: str, target_event_id: str, expected_revision: int,
+                            evidence: list[dict], reason: str) -> dict:
+        from .event_merge import preview
 
-        return load(self, source_id, slice_id)
+        return preview(self, source_event_id, target_event_id, expected_revision, evidence, reason)
 
-    def extract_slice(self, source_id: str, slice_id: str, *, review: bool = False) -> dict:
-        from .slice_extraction import extract
+    def merge_events(self, source_event_id: str, target_event_id: str, expected_revision: int,
+                     evidence: list[dict], reason: str) -> dict:
+        from .event_merge import merge
 
-        return extract(self, source_id, slice_id, review=review)
+        return merge(self, source_event_id, target_event_id, expected_revision, evidence, reason)
 
-    def commit_slice_extraction(self, source_id: str, slice_id: str, *, review: str = "doubtful") -> dict:
-        from .slice_extraction import commit
+    def preview_extraction(self, source_id: str, result: dict, start: int = 0,
+                           end: int | None = None) -> dict:
+        from .extraction_draft import preview
 
-        return commit(self, source_id, slice_id, review=review)
+        return preview(self, source_id, result, start, end)
+
+    def submit_extraction(self, source_id: str, result: dict, start: int = 0,
+                          end: int | None = None) -> dict:
+        from .extraction_draft import submit
+
+        return submit(self, source_id, result, start, end)
+
+
+
 
     def sources(self) -> list[dict]:
         return self.project.sources()
@@ -109,8 +180,8 @@ class GraphOperations:
     def source(self, source_id: str) -> dict:
         return self.project.source(source_id)
 
-    def locate(self, source_id: str, quote: str) -> list[dict]:
-        return self.project.locate(source_id, quote)
+    def locate(self, source_id: str, quotes: list[str], *, limit_per_quote: int = 20) -> list[dict]:
+        return self.project.locate(source_id, quotes, limit_per_quote=limit_per_quote)
 
     def set_graph_title(self, title: str) -> None:
         self.profiles.set_title(title)
@@ -132,70 +203,35 @@ class GraphOperations:
     def graph_view(self, spec: dict) -> dict:
         return self.query.view(spec)
 
-    def graph_snapshot(self, as_of_revision: int | None = None) -> dict:
-        return self._store.snapshot(as_of_revision)
+    def graph_snapshot(self) -> dict:
+        return self._store.snapshot()
 
     def graph_precheck(self, objects: list[dict], expected_revision: int) -> list[dict]:
-        return self.review.precheck(objects, expected_revision)
+        return self.prepare_changes(objects, [], expected_revision, snapshot=self.capture_changes()).diagnostics
 
-    def graph_propose(
-        self,
-        objects: list[dict],
-        expected_revision: int,
-        *,
-        source: str = "manual",
-        note: str = "",
-        run_id: str | None = None,
-        parent_candidate_id: str | None = None,
-    ) -> str:
-        return self.review.propose(
-            objects, expected_revision, source=source, note=note,
-            run_id=run_id, parent_candidate_id=parent_candidate_id,
-        )
 
-    def graph_candidates(self, status: str | None = None) -> list[dict]:
-        return self.review.candidates(status)
 
-    def graph_candidate(self, candidate_id: str) -> dict:
-        return self.review.candidate(candidate_id)
 
     def graph_display_map(
-        self, candidate_id: str | None = None, as_of_revision: int | None = None
+        self
     ) -> dict:
         return self.query.display_map(
-            candidate_id=candidate_id, as_of_revision=as_of_revision
+
         )
 
-    def graph_candidate_preview(self, candidate_id: str) -> dict:
-        return self.query.candidate_preview(candidate_id)
 
-    def graph_edit_candidate(self, candidate_id: str, objects: list[dict], version: int) -> dict:
-        return self.review.edit(candidate_id, objects, version)
-
-    def graph_select_operations(
-        self, candidate_id: str, keep_ids: list[str], version: int
-    ) -> dict:
-        return self.review.select_operations(candidate_id, keep_ids, version)
-
-    def graph_accept(self, candidate_id: str, version: int) -> int:
-        return self.review.accept(candidate_id, version)
-
-    def graph_reject(self, candidate_id: str, version: int) -> None:
-        self.review.reject(candidate_id, version)
 
     # -- story-time projections ------------------------------------------
     def graph_timeline(
         self,
-        candidate_id: str | None = None,
         context_id: str = "canon",
         story_cut: dict | None = None,
         disclosure_cut: dict | None = None,
-        as_of_revision: int | None = None,
         limit: int = 2000,
     ) -> dict:
         return self.query.timeline_view(
-            candidate_id=candidate_id, context_id=context_id, story_cut=story_cut,
-            disclosure_cut=disclosure_cut, as_of_revision=as_of_revision, limit=limit,
+            context_id=context_id, story_cut=story_cut,
+            disclosure_cut=disclosure_cut, limit=limit,
         )
 
     def graph_event_compare(
@@ -204,23 +240,21 @@ class GraphOperations:
         right_id: str,
         context_id: str = "canon",
         disclosure_cut: dict | None = None,
-        as_of_revision: int | None = None,
         axis: str = "disclosure",
     ) -> dict:
         return self.query.event_compare(
             left_id, right_id, context_id=context_id,
-            disclosure_cut=disclosure_cut, as_of_revision=as_of_revision, axis=axis,
+            disclosure_cut=disclosure_cut, axis=axis,
         )
 
     def graph_event_lines(
         self,
         context_id: str = "canon",
         disclosure_cut: dict | None = None,
-        as_of_revision: int | None = None,
     ) -> dict:
         return self.query.event_lines(
             context_id=context_id, disclosure_cut=disclosure_cut,
-            as_of_revision=as_of_revision,
+
         )
 
     def graph_query(
@@ -232,58 +266,31 @@ class GraphOperations:
         kinds: list[str] | None = None,
         context_id: str = "canon",
         disclosure_cut: dict | None = None,
-        as_of_revision: int | None = None,
         limit: int | None = 200,
     ) -> dict:
         return self.query.query(
             node_id=node_id, query=query, node_ids=node_ids,
             kinds=kinds, context_id=context_id,
             disclosure_cut=disclosure_cut,
-            as_of_revision=as_of_revision, limit=limit,
+            limit=limit,
         )
 
     def property_precheck(self, records: list[dict], expected_revision: int) -> list[dict]:
-        return self.properties.precheck(records, expected_revision)
+        return self.prepare_changes([], records, expected_revision, snapshot=self.capture_changes()).diagnostics
 
-    def property_propose(
-        self,
-        records: list[dict],
-        expected_revision: int,
-        source: str = "manual",
-        note: str = "",
-        *,
-        run_id: str | None = None,
-    ) -> str:
-        return self.properties.propose(
-            records, expected_revision, source=source, note=note, run_id=run_id
-        )
 
-    def property_candidates(self, status: str | None = None) -> list[dict]:
-        return self.properties.candidates(status)
 
-    def property_records(
-        self, as_of_revision: int | None = None, *, include_retracted: bool = False
-    ) -> list[dict]:
-        """Accepted property records; retracted ones are hidden unless asked for."""
-        return self.properties.records(
-            as_of_revision, include_retracted=include_retracted
-        )
+    def property_records(self) -> list[dict]:
+        return self.properties.records()
 
-    def property_candidate(self, candidate_id: str) -> dict:
-        return self.properties.candidate(candidate_id)
 
-    def property_accept(self, candidate_id: str, version: int) -> int:
-        return self.properties.accept(candidate_id, version)
 
-    def property_reject(self, candidate_id: str, version: int) -> None:
-        self.properties.reject(candidate_id, version)
 
     def property_state(
         self,
         node_id: str,
         property_id: str,
         at=None,
-        as_of_revision: int | None = None,
         *,
         scope: str = "world",
         holder_id: str | None = None,
@@ -291,7 +298,7 @@ class GraphOperations:
         include_diagnostics: bool = False,
     ) -> dict:
         return self.properties.state(
-            node_id, property_id, at, as_of_revision=as_of_revision,
+            node_id, property_id, at,
             scope=scope, holder_id=holder_id, disclosure_cut=disclosure_cut,
             include_diagnostics=include_diagnostics,
         )
@@ -368,28 +375,16 @@ class GraphOperations:
                 "axis": "story",
             }
 
-        cut = self._event_position(event_id)
-        if cut is None:
-            return {"kind": "unrecorded", "reason": "该事件没有披露位置，无法比较"}
-        applicable = [
-            item for item in records
-            if self._record_position(item) is not None
-            and self._record_position(item) <= cut
-        ]
-        if not applicable:
-            return {"kind": "unrecorded", "reason": "读到该事件时这个属性还没有披露"}
-        best = max(applicable, key=self._record_position)
-        return {
-            "kind": "known",
-            "value": best.get("value"),
-            "event_id": best.get("event_id"),
-            "record_id": best.get("id"),
-            "axis": "disclosure",
-        }
-
-    def _event_position(self, event_id: str) -> tuple[int, ...] | None:
-        """Where an event sits on the disclosure chain: its own number."""
-        return order_key(event_id)
+        reading = self.property_state(node_id, property_id, at=event_id, scope=scope, holder_id=holder_id)
+        state = dict(reading["state"])
+        state["axis"] = "disclosure"
+        record_ids = reading.get("record_ids") or []
+        if record_ids:
+            selected = next(row for row in records if row["id"] == record_ids[0])
+            state.update(event_id=selected.get("event_id"), record_id=selected["id"], record_ids=record_ids)
+        else:
+            state["reason"] = "读到该位置时没有有效的属性记录"
+        return state
 
     def _record_position(self, record: dict) -> tuple[int, ...]:
         """Where a value becomes visible: its anchor event's number."""
@@ -494,36 +489,10 @@ class GraphOperations:
         """Move disclosures to a category. Appends a record; never rewrites one."""
         return self.properties.categorize(targets, category, note)
 
-    def property_merge(self, alias_id: str, target_id: str, note: str = "") -> dict:
-        """Read one property name as another. A separate act from moving a category."""
-        return self.properties.merge(alias_id, target_id, note)
 
-    def property_rename(self, names: object, to_id: str, note: str = "") -> dict:
-        """Give an aspect a new name.
 
-        Editorial, not a disclosure: records keep the name they were captured
-        under and only the reading changes, so retracting the rename restores it.
-        ``names`` may be the whole row, when one aspect was spelled two ways.
-        """
-        return self.properties.rename(names, to_id, note)
 
-    def property_aliases(self) -> dict[str, str]:
-        """Alias → current name, so a caller can speak the names in use now."""
-        return self.properties.aliases()
 
-    def property_retract(
-        self, targets: list[str], reason: str, *, event_id: str | None = None
-    ) -> dict:
-        """Invalidate records: they stay for audit, readers stop seeing them.
-
-        Without ``event_id`` the record was misread and never counted; with it the
-        record stops counting from that disclosure on (superseded).
-        """
-        return self.properties.retract(targets, reason, event_id=event_id)
-
-    def property_supersede(self, pairs: list[dict], note: str = "") -> dict:
-        """Mark older values invalid from the disclosure that replaced them."""
-        return self.properties.supersede(pairs, note)
 
     def node_editor(self, node_id: str, cut: object = None) -> dict:
         """Everything the node editor needs: the node, its properties, the events.
@@ -577,55 +546,57 @@ class GraphOperations:
             node_id, property_id, scope=scope, holder_id=holder_id
         )
 
-    def property_world_state(self, at=None, as_of_revision: int | None = None) -> dict:
-        return self.properties.world_state(at, as_of_revision=as_of_revision)
+    def property_world_state(self, at=None) -> dict:
+        return self.properties.world_state(at, )
 
-    # -- unified change candidates ---------------------------------------
+    def get_schema(self) -> dict:
+        from .project_changes import schema
+
+        return schema(self)
+
+    def read_project_state(self) -> dict:
+        from .project_changes import state
+
+        return state(self)
+
+    def preview_changes(self, graph_objects: list[dict], property_records: list[dict], expected_revision: int) -> dict:
+        from .project_changes import preview
+
+        return preview(self, graph_objects, property_records, expected_revision)
+
+    def apply_changes(self, graph_objects: list[dict], property_records: list[dict],
+                      expected_revision: int, reason: str) -> dict:
+        from .project_changes import apply
+
+        return apply(self, graph_objects, property_records, expected_revision, reason)
+
+    # -- static batch preview --------------------------------------------
     def change_precheck(
         self,
         graph_objects: list[dict] | None,
         property_records: list[dict] | None,
         expected_revision: int,
     ) -> list[dict]:
-        return self.changes.precheck(graph_objects, property_records, expected_revision)
+        return self.prepare_changes(graph_objects or [], property_records or [], expected_revision,
+                                    snapshot=self.capture_changes()).diagnostics
 
-    def change_propose(
-        self,
-        graph_objects: list[dict] | None,
-        property_records: list[dict] | None,
-        expected_revision: int,
-        *,
-        source: str = "manual",
-        note: str = "",
-        run_id: str | None = None,
-    ) -> str:
-        return self.changes.propose(
-            graph_objects, property_records, expected_revision,
-            source=source, note=note, run_id=run_id,
-        )
 
-    def change_candidates(self, status: str | None = None) -> list[dict]:
-        return self.changes.candidates(status)
 
-    def change_candidate(self, candidate_id: str) -> dict:
-        return self.changes.candidate(candidate_id)
 
-    def change_accept(self, candidate_id: str, version: int) -> int:
-        return self.changes.accept(candidate_id, version)
 
-    def change_reject(self, candidate_id: str, version: int) -> None:
-        self.changes.reject(candidate_id, version)
 
-    def _record_extraction_review(self, action: str, candidate_id: str, version: int,
-                                  revision: int | None = None) -> None:
-        from .extraction_session import record_review_action
-
-        record_review_action(self, {"action": action, "candidate_id": candidate_id,
-                                    "version": version, "revision": revision})
 
     # -- model profiles --------------------------------------------------
     def harness_settings(self, provider: str | None = None) -> dict:
         return self.profiles.settings(provider)
+
+    def load_project_settings(self) -> dict:
+        from .project_settings import load
+        return load(self)
+
+    def save_project_settings(self, settings: dict) -> dict:
+        from .project_settings import save
+        return save(self, settings)
 
     def provider_profile(self) -> dict:
         return self.profiles.settings()

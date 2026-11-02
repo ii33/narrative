@@ -47,7 +47,7 @@ def main():
     graph_import = commands.add_parser("graph-import", help="向图项目导入 UTF-8 原文")
     graph_import.add_argument("path", type=Path)
     graph_import.add_argument("--title")
-    graph_query = commands.add_parser("graph-query", help="检索已审核的节点与属性记录")
+    graph_query = commands.add_parser("graph-query", help="检索已入库的节点与属性记录")
     graph_query.add_argument("--query", default="")
     graph_query.add_argument("--node-id")
     graph_view = commands.add_parser("graph-view", help="通过结构化 JSON 查询导图、时间轴、森林或分类表")
@@ -61,38 +61,17 @@ def main():
     graph_event_compare.add_argument("left_id")
     graph_event_compare.add_argument("right_id")
     graph_event_compare.add_argument("--context-id", default="canon")
-    graph_event_compare.add_argument("--as-of-revision", type=int)
     graph_event_compare.add_argument(
         "--axis", choices=["disclosure", "story"], default="disclosure",
         help="disclosure=读者先读到谁（线性）；story=故事里谁先发生（可分支）",
     )
     graph_event_lines = commands.add_parser("graph-event-lines", help="按阅读顺序列出事件")
     graph_event_lines.add_argument("--context-id", default="canon")
-    graph_event_lines.add_argument("--as-of-revision", type=int)
-    graph_candidate = commands.add_parser("graph-candidate", help="查看待审候选原始对象及诊断")
-    graph_candidate.add_argument("candidate_id")
-    for name in ("graph-accept", "graph-reject"):
-        review_command = commands.add_parser(name, help="人工明确审核图候选")
-        review_command.add_argument("candidate_id")
-        review_command.add_argument("version", type=int)
     property_precheck = commands.add_parser(
         "property-precheck", aliases=["graph-property-precheck"], help="只读预检 v5 属性追加记录"
     )
     _records_arguments(property_precheck)
     property_precheck.add_argument("--expected-revision", type=int)
-    property_propose = commands.add_parser(
-        "property-propose", aliases=["graph-property-propose"], help="提交 v5 属性待审候选"
-    )
-    _records_arguments(property_propose)
-    property_propose.add_argument("--expected-revision", type=int)
-    property_propose.add_argument("--source", choices=("manual", "model", "correction"), default="manual")
-    property_propose.add_argument("--note", default="")
-    for name in ("property-accept", "property-reject"):
-        review_command = commands.add_parser(
-            name, aliases=["graph-" + name], help="人工审核 v5 属性候选"
-        )
-        review_command.add_argument("candidate_id")
-        review_command.add_argument("version", type=int)
     property_state = commands.add_parser(
         "property-state", aliases=["graph-property-state"], help="查询节点属性在故事时点的投影"
     )
@@ -100,7 +79,6 @@ def main():
     property_state.add_argument("property_id")
     property_state.add_argument("at_positional", nargs="?", help="可选故事 TimeRef 值")
     property_state.add_argument("--at", help="故事 TimeRef：JSON 或 number/datetime 值；省略为当前视图")
-    property_state.add_argument("--as-of-revision", type=int)
     property_state.add_argument(
         "--scope", default="world", choices=["world", "cognition", "claim"]
     )
@@ -130,34 +108,8 @@ def main():
     change_precheck.add_argument("--graph", type=Path, help="图对象 JSON 文件")
     change_precheck.add_argument("--properties", type=Path, help="属性记录 JSON 文件")
     change_precheck.add_argument("--expected-revision", type=int)
-    change_propose = commands.add_parser(
-        "change-propose", aliases=["graph-change-propose"], help="建立统一变更候选"
-    )
-    change_propose.add_argument("--graph", type=Path)
-    change_propose.add_argument("--properties", type=Path)
-    change_propose.add_argument("--expected-revision", type=int)
-    change_propose.add_argument("--source", default="manual", choices=["manual", "model", "correction"])
-    change_propose.add_argument("--note", default="")
-    change_candidates = commands.add_parser(
-        "change-candidates", aliases=["graph-change-candidates"], help="列出统一变更候选"
-    )
-    change_candidates.add_argument("--status")
-    change_candidate = commands.add_parser(
-        "change-candidate", aliases=["graph-change-candidate"], help="查看统一变更候选"
-    )
-    change_candidate.add_argument("candidate_id")
-    change_accept = commands.add_parser(
-        "change-accept", aliases=["graph-change-accept"], help="接受统一变更候选"
-    )
-    change_accept.add_argument("candidate_id")
-    change_accept.add_argument("--version", type=int, default=1)
-    change_reject = commands.add_parser(
-        "change-reject", aliases=["graph-change-reject"], help="拒绝统一变更候选"
-    )
-    change_reject.add_argument("candidate_id")
-    change_reject.add_argument("--version", type=int, default=1)
     property_history = commands.add_parser(
-        "property-history", aliases=["graph-property-history"], help="查看节点属性的已审记录与撤回"
+        "property-history", aliases=["graph-property-history"], help="查看节点属性的取值记录与有效区间"
     )
     property_history.add_argument("node_id")
     property_history.add_argument("property_id")
@@ -170,7 +122,6 @@ def main():
     )
     property_world.add_argument("at_positional", nargs="?", help="可选故事 TimeRef 值")
     property_world.add_argument("--at", help="故事 TimeRef：JSON 或 number/datetime 值；省略为当前视图")
-    property_world.add_argument("--as-of-revision", type=int)
     tool_cli.add_commands(commands)
     args = parser.parse_args()
     if args.command.startswith("graph-property-"):
@@ -195,20 +146,13 @@ def main():
             elif args.command == "graph-event-compare":
                 result = graph.graph_event_compare(
                     args.left_id, args.right_id,
-                    context_id=args.context_id, as_of_revision=args.as_of_revision,
+                    context_id=args.context_id,
                     axis=args.axis,
                 )
             elif args.command == "graph-event-lines":
                 result = graph.graph_event_lines(
-                    context_id=args.context_id, as_of_revision=args.as_of_revision,
+                    context_id=args.context_id,
                 )
-            elif args.command == "graph-candidate":
-                result = graph.graph_candidate(args.candidate_id)
-            elif args.command == "graph-accept":
-                result = {"revision": graph.graph_accept(args.candidate_id, args.version)}
-            elif args.command == "graph-reject":
-                graph.graph_reject(args.candidate_id, args.version)
-                result = {"status": "rejected"}
             elif args.command == "property-precheck":
                 revision = (
                     args.expected_revision
@@ -216,33 +160,6 @@ def main():
                     else graph.graph_project_info()["revision"]
                 )
                 result = graph.property_precheck(_load_records(args), revision)
-            elif args.command == "property-propose":
-                revision = (
-                    args.expected_revision
-                    if args.expected_revision is not None
-                    else graph.graph_project_info()["revision"]
-                )
-                candidate_id = graph.property_propose(
-                    _load_records(args), revision, source=args.source, note=args.note
-                )
-                try:
-                    candidate = graph.property_candidate(candidate_id)
-                except (AttributeError, ValueError):
-                    candidate = {"status": "pending", "version": 1, "diagnostics": []}
-                result = {
-                    "candidate_id": candidate_id,
-                    "status": candidate["status"],
-                    "version": candidate["version"],
-                    "expected_revision": revision,
-                    "diagnostics": candidate["diagnostics"],
-                }
-            elif args.command == "property-accept":
-                result = {
-                    "revision": graph.property_accept(args.candidate_id, args.version)
-                }
-            elif args.command == "property-reject":
-                graph.property_reject(args.candidate_id, args.version)
-                result = {"status": "rejected"}
             elif args.command == "property-state":
                 at = args.at if args.at is not None else args.at_positional
                 disclosure_cut = None
@@ -257,7 +174,6 @@ def main():
                     args.node_id,
                     args.property_id,
                     _at_argument(at),
-                    as_of_revision=args.as_of_revision,
                     scope=args.scope,
                     holder_id=args.holder_id,
                     disclosure_cut=disclosure_cut,
@@ -271,7 +187,7 @@ def main():
                     scope=args.scope,
                     holder_id=args.holder_id,
                 )
-            elif args.command in {"change-precheck", "change-propose"}:
+            elif args.command == "change-precheck":
                 graph_objects = (
                     json.loads(args.graph.read_text(encoding="utf-8"))
                     if getattr(args, "graph", None) else []
@@ -283,24 +199,7 @@ def main():
                 expected = args.expected_revision
                 if expected is None:
                     expected = graph.graph_project_info()["revision"]
-                if args.command == "change-precheck":
-                    result = graph.change_precheck(graph_objects, property_records, expected)
-                else:
-                    result = {
-                        "candidate_id": graph.change_propose(
-                            graph_objects, property_records, expected,
-                            source=args.source, note=args.note,
-                        )
-                    }
-            elif args.command == "change-candidates":
-                result = graph.change_candidates(args.status)
-            elif args.command == "change-candidate":
-                result = graph.change_candidate(args.candidate_id)
-            elif args.command == "change-accept":
-                result = {"revision": graph.change_accept(args.candidate_id, args.version)}
-            elif args.command == "change-reject":
-                graph.change_reject(args.candidate_id, args.version)
-                result = {"status": "rejected"}
+                result = graph.change_precheck(graph_objects, property_records, expected)
             elif args.command == "property-history":
                 result = graph.property_history(
                     args.node_id, args.property_id,
@@ -309,7 +208,7 @@ def main():
             elif args.command == "property-world-state":
                 at = args.at if args.at is not None else args.at_positional
                 result = graph.property_world_state(
-                    _at_argument(at), as_of_revision=args.as_of_revision
+                    _at_argument(at)
                 )
             else:
                 raise AssertionError("unreachable")

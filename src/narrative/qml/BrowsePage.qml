@@ -26,6 +26,17 @@ Item {
     property string selectedType: ""
     property string query: ""
     property string selectedId: ""
+    property var focusedIssue: ({})
+
+    function focusIssue(nodeId, target) {
+        page.cutId = ""; page.cutEventId = ""; page.timeFilter = false; page.relatedOnly = false
+        page.selectedType = ""; page.query = ""; searchField.text = ""
+        if (nodeId) page.jumpTo(nodeId)
+        else page.clearSelection()
+        page.focusedIssue = target.kind === "record" ? target : ({})
+        Qt.callLater(function() { detailScroll.contentItem.contentY = 0 })
+    }
+
     property var detail: ({})
     property var counts: ({})
     property int revision: 0
@@ -33,9 +44,9 @@ Item {
 
     readonly property var typeLabels: ({
         person: "人物", group: "群体", item: "物品",
-        location: "地点", event: "事件", scene: "场景", storyline: "故事线", other: "其他"
+        location: "地点", event: "事件", action: "动作", scene: "场景", big_event: "大事件", storyline: "主要故事", other: "其他"
     })
-    readonly property var typeKeys: ["person", "group", "item", "location", "event", "scene", "storyline", "other"]
+    readonly property var typeKeys: ["person", "group", "item", "location", "event", "action", "scene", "big_event", "storyline", "other"]
 
     // 「最新」+ 当前粒度的每一步；编号即阅读顺序，所以顺序就是读者读到的顺序。
     readonly property var cutLabels: {
@@ -74,7 +85,8 @@ Item {
     property var claimRows: []         // 本节点说过的、关于别人的说法
     property var heardRows: []         // 别人说的、关于本节点的话
     property var moments: ({ levels: [], nodes: [] })   // 阅读位置的三层（后端给）
-    property var childRows: []         // 下一级时间点：大事件→场景→事件
+    property var childRows: []
+    property var involvement: ({people: [], locations: []})         // 下一级时间点：大事件→场景→事件
     // 节点资料：一张张资料卡，各有生效/失效时间。它和属性是同一类东西——
     // 「从这一步起成立，到那一步起不成立」——只是没有引文，所以不进属性记录。
     property var material: ({ node_id: "", cut: "", cards: [], hidden_count: 0,
@@ -137,7 +149,7 @@ Item {
     function applyBrowse(payload) {
         revision = payload.revision === undefined ? revision : payload.revision
         steps = payload.steps || []
-        events = payload.events || []
+        events = payload.anchor_steps || []
         timeline = payload.timeline || []
         moments = payload.moments || ({ levels: [], nodes: [] })
         counts = payload.counts || ({})
@@ -183,13 +195,14 @@ Item {
             }
             page.pendingFocus = ""
         }
-        // 属性区和资料都跟同一个锚点事件走；切点没变就不重载。
-        if (page.selectedId.length > 0 && page.appliedCut !== page.cutEventId) {
+        // Browse刷新会作废旧查询；在最终列表/切点确定后重取同一选择的整份详情。
+        if (page.selectedId.length > 0) {
             page.appliedCut = page.cutEventId
+            bridge.nodeDetail(page.selectedId)
             bridge.loadNodeProperties(page.selectedId)
-            // 资料卡有自己的生效/失效时间：换阅读位置就得重新问一次。
             bridge.loadMaterial(page.selectedId)
         }
+
     }
 
     function rebuildCategories() {
@@ -212,6 +225,7 @@ Item {
         claimRows = []
         heardRows = []
         childRows = []
+        involvement = ({people: [], locations: []})
         expandedProps = ({})
         material = ({ node_id: "", cut: "", cards: [], hidden_count: 0,
             moments: { levels: [], nodes: [] } })
@@ -308,6 +322,7 @@ Item {
     }
 
     function select(id) {
+        if (page.focusedIssue.node_id && page.focusedIssue.node_id !== id) page.focusedIssue = ({})
         selectedId = id
         detail = ({})
         propertyRows = []
@@ -316,6 +331,7 @@ Item {
         claimRows = []
         heardRows = []
         childRows = []
+        involvement = ({people: [], locations: []})
         expandedProps = ({})
         appliedCut = page.cutEventId
         material = ({ node_id: "", cut: "", cards: [], hidden_count: 0,
@@ -331,33 +347,8 @@ Item {
     // 层级表来自后端（`browse_view.MOMENT_LEVELS`），这里不写死「场景→事件」，
     // 多一层（卷、章，或者事件里的动作）只是多一列。
 
-    // 一个节点在这三层里的位置：{storyline, scene, event}。
+    // 一个节点在五层时间树里的路径：{storyline, big_event, scene, event, action}。
     // 给的是事件就往上找它的场景，给的是场景就往上找它的大事件；找不到的层留空。
-    function momentPath(id) {
-        var out = { storyline: "", scene: "", event: "" }
-        if (!id) return out
-        var rows = page.moments.nodes || []
-        var byId = ({})
-        for (var i = 0; i < rows.length; ++i) byId[rows[i].id] = rows[i]
-        var node = byId[id]
-        if (!node) return out
-        if (node.level === "event") {
-            out.event = node.id
-            out.scene = node.parent_id || ""
-        } else if (node.level === "scene") {
-            out.scene = node.id
-        } else if (node.level === "storyline") {
-            out.storyline = node.id
-        }
-        if (out.scene) {
-            var scene = byId[out.scene]
-            if (scene && scene.parent_id) out.storyline = scene.parent_id
-        }
-        // 桶（未归入大事件）不是真正的选择，只用来展开。
-        if (out.storyline.indexOf("~") === 0) out.storyline = ""
-        return out
-    }
-
     // 层级表跟着**传进来的那棵树**走：阅读位置菜单用它自己那份（browse 载荷），
     // 资料卡用它那份（material 载荷）。写死读 material 会让菜单一列都没有。
     function momentLevels(tree) {
@@ -444,6 +435,8 @@ Item {
         page.expandedCards = expanded
         page.materialNodeId = payload.node_id
         page.material = payload
+        if ((payload.diagnostics || []).length > 0)
+            app.toast("资料卡阅读位置无法判定：" + payload.diagnostics[0].message, true)
         if (payload.changed_visible === false)
             app.toast("这张资料不在当前阅读位置上，换个位置才看得到", true)
     }
@@ -570,6 +563,7 @@ Item {
     }
 
     function buildItem(item) {
+        var unrecorded = item.state === "unrecorded"
         var records = item.records || []
         var ids = []
         for (var i = 0; i < records.length; ++i) ids.push(records[i].id)
@@ -590,7 +584,7 @@ Item {
             categorySource: item.category_source || "",
             otherCategories: item.other_categories || [],
             recordIds: ids,
-            valueText: (item.is_current === false && item.retracted !== true
+            valueText: (!unrecorded && item.is_current === false
                         ? "（历史）" : "") + page.valueText(item),
             valueNodeId: item.value_node ? item.value_node.id : "",
             scopeText: scopes.length > 1 ? scopeText : (page.scopeLabels[item.scope] || "世界"),
@@ -598,10 +592,12 @@ Item {
             holderId: item.holder_id || "",
             holderName: item.holder_name
                 || (item.holder_id ? page.nameOf(item.holder_id) : ""),
-            // 有效与否是记录上的显式标记，不是算出来的区间：这里只说披露在哪儿。
-            disclosedText: item.retracted ? "" : ("披露于 " + (item.disclosed_at || "—")),
+            // 有效区间另行呈现；这里说明该值首次披露的位置。
+            disclosedText: unrecorded ? "" : ("披露于 " + (item.disclosed_at || "—")),
             // 大事件这一行是从场景借来的：说清出处，读者才知道它是跟着阅读位置变的。
-            derivedText: item.derived === true
+            derivedText: unrecorded
+                ? (item.value === "未披露" ? "截至当前阅读位置尚未披露" : "尚无该属性的记录")
+                : item.derived === true
                 ? ("来自场景 " + ((item.from_scene || {}).name || "—") + "，随阅读位置更新")
                 : "",
             records: records
@@ -609,6 +605,7 @@ Item {
     }
 
     function applyProperties(payload) {
+        if (payload.node_id !== page.selectedId) return
         var groups = payload.categories || []
         var built = []
         var all = []
@@ -630,10 +627,17 @@ Item {
         claimRows = payload.claims || []
         heardRows = payload.heard || []
         childRows = payload.children || []
+        involvement = payload.involvement || ({people: [], locations: []})
         cutLater = payload.later_count || 0
         categoryGroups = built
         propertyRows = all
         expandedProps = ({})
+        if (page.focusedIssue.record_id) {
+            var expanded = ({})
+            for (var k = 0; k < all.length; ++k)
+                if (all[k].recordIds.indexOf(page.focusedIssue.record_id) >= 0) expanded[all[k].key] = true
+            page.expandedProps = expanded
+        }
     }
 
     // 移动分类：只改整理位置，取值和披露顺序都不动。
@@ -769,6 +773,7 @@ Item {
         target: app
         function onModeChanged() {
             if (app.mode === "workspace") {
+                page.focusedIssue = ({})
                 page.selectedId = ""
                 page.detail = ({})
                 page.selectedType = ""
@@ -780,6 +785,7 @@ Item {
         claimRows = []
         heardRows = []
         childRows = []
+        involvement = ({people: [], locations: []})
                 expandedProps = ({})
                 page.cutId = ""
                 page.cutEventId = ""
@@ -798,24 +804,29 @@ Item {
     Connections {
         target: bridge
         function onResultReady(kind, payload) {
+            if (payload.graph_reset_required === true) {
+                page.load()
+                if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
+            }
+
             if (kind === "browse") {
                 page.applyBrowse(payload)
             } else if (kind === "detail") {
-                detail = payload
+                if (payload.node && payload.node.id === page.selectedId) page.detail = payload
             } else if (kind === "property_correct") {
-                if (payload.status === "accepted") {
+                if ((payload.status === "accepted" || payload.status === "unchanged")) {
                     app.toast(page.editToast("更正已生效", payload), payload.outside_window === true)
                     if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
                 } else {
                     var problem = (payload.diagnostics || [])[0] || ({})
                     app.toast("更正未通过预检：" + (problem.message || "未知原因"), true)
                 }
-            } else if (kind === "property_retract") {
-                var removed = (payload.retracted || []).length
+            } else if (kind === "property_expire") {
+                var removed = (payload.record_ids || []).length
                 // 0 条不是「成功了但没说」，是「这些记录本来就已经失效过」。
                 app.toast(removed > 0
-                    ? "已撤回 " + removed + " 条记录"
-                    : "这些记录已经失效过，不用再撤", removed === 0)
+                    ? "已失效 " + removed + " 条记录"
+                    : "这些记录已经失效过，无需重复操作", removed === 0)
                 if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
             } else if (kind === "material") {
                 page.applyMaterial(payload)
@@ -828,7 +839,7 @@ Item {
                 app.toast("已合并到「" + (payload.target_id || "") + "」", false)
                 if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
             } else if (kind === "property_add") {
-                if (payload.status === "accepted") {
+                if ((payload.status === "accepted" || payload.status === "unchanged")) {
                     addPropertyDialog.close()
                     app.toast(page.editToast("补录已生效", payload), payload.outside_window === true)
                     if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
@@ -844,7 +855,7 @@ Item {
                     if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
                 }
             } else if (kind === "node_edit") {
-                app.toast("已提交修订，等待审核", false)
+                app.toast((payload.status === "accepted" || payload.status === "unchanged") ? "修改已保存" : "修改未通过预检", (payload.status !== "accepted" && payload.status !== "unchanged"))
             }
         }
     }
@@ -946,168 +957,15 @@ Item {
 
         // 阅读位置的多级菜单：一列一层——大事件 → 场景 → 事件。
         // 点哪一层就把阅读位置停在那一段（大事件停在它最后一场的最后一步）。
-        Popup {
+        ReadingPositionPicker {
             id: timelinePopup
-            objectName: "browseTimelinePopup"
-            modal: true
-            padding: 0
-            width: Math.min(860, page.width - 80)
-            height: Math.min(420, page.height - 140)
-            x: Math.round((page.width - width) / 2)
-            y: 76
-            // 选中的是三层的**编号**，不是列表下标：下标会被排序和桶搅乱，
-            // 编号不会。桶（未归入大事件 / 未归入场景）只能展开，不能当阅读位置。
-            property string firstId: ""
-            property string secondId: ""
-            property string thirdId: ""
-
-            // 打开时接着**当前阅读位置**展开：用户已经选到哪一步，菜单就停在哪一步。
-            // 每次都回到第一段的话，等于每次都要重新找一遍自己读到哪了。
-            onOpened: {
-                var here = page.momentPath(page.cutId)
-                firstId = here.storyline
-                secondId = here.scene
-                thirdId = here.event
-                if (firstId !== "") return
-                var tops = page.momentRows(page.moments, 0, "")
-                firstId = tops.length > 0 ? tops[0].id : ""
-                var kids = page.momentRows(page.moments, 1, firstId)
-                secondId = kids.length > 0 ? kids[0].id : ""
-                thirdId = ""
-            }
-
-            function choose(level, id, synthetic) {
-                if (level === 0) {
-                    firstId = id
-                    var kids = page.momentRows(page.moments, 1, id)
-                    secondId = kids.length > 0 ? kids[0].id : ""
-                    thirdId = ""
-                } else if (level === 1) {
-                    secondId = id
-                    thirdId = ""
-                } else {
-                    thirdId = id
-                }
-                if (!synthetic) page.pickCutById(id)
-            }
-
-            background: Rectangle {
-                color: t.panel
-                border.color: t.line
-                radius: t.radius
-            }
-
-            ColumnLayout {
-                anchors.fill: parent
-                spacing: 0
-
-                // 表头：一列一层，写清楚这一列是什么。
-                RowLayout {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 30
-                    spacing: 0
-                    Repeater {
-                        model: page.momentLevels(page.moments)
-                        delegate: Label {
-                            required property var modelData
-                            required property int index
-                            text: modelData.label
-                            Layout.preferredWidth: index === 0 ? 300
-                                : (index === 1 ? 280 : -1)
-                            Layout.fillWidth: index === 2
-                            leftPadding: 12
-                            color: t.muted
-                            font.pixelSize: 11
-                            font.weight: Font.DemiBold
-                        }
-                    }
-                }
-                Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: t.line }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    spacing: 0
-
-                    Repeater {
-                        model: page.momentLevels(page.moments)
-                        delegate: Item {
-                            required property var modelData
-                            required property int index
-                            Layout.preferredWidth: index === 0 ? 300 : (index === 1 ? 280 : -1)
-                            Layout.fillWidth: index === 2
-                            Layout.fillHeight: true
-
-                            ListView {
-                                id: columnList
-                                objectName: "browseTimelineLevel" + index
-                                anchors.fill: parent
-                                clip: true
-                                model: index === 0
-                                    ? page.momentRows(page.moments, 0, "")
-                                    : page.momentRows(page.moments, index,
-                                                      index === 1 ? timelinePopup.firstId
-                                                                  : timelinePopup.secondId)
-                                delegate: ItemDelegate {
-                                    id: rowItem
-                                    required property var modelData
-                                    width: ListView.view.width
-                                    readonly property bool picked: index === 0
-                                        ? timelinePopup.firstId === modelData.id
-                                        : (index === 1 ? timelinePopup.secondId === modelData.id
-                                                       : timelinePopup.thirdId === modelData.id)
-                                    highlighted: picked
-                                    onClicked: timelinePopup.choose(index, modelData.id,
-                                                                    modelData.synthetic === true)
-
-                                    // 选中项要有明确底色和字色：默认高亮配深色正文，
-                                    // 一选中反而看不清自己选的是哪一行。
-                                    background: Rectangle {
-                                        radius: 4
-                                        color: rowItem.picked
-                                            ? t.accentSoft
-                                            : (rowItem.hovered ? t.panelAlt : "transparent")
-                                    }
-                                    contentItem: Label {
-                                        leftPadding: 8
-                                        text: (modelData.label_id ? modelData.label_id + "　" : "")
-                                            + modelData.name
-                                            + (modelData.provisional === true ? "（暂称）" : "")
-                                        elide: Text.ElideRight
-                                        font.pixelSize: 12
-                                        font.italic: modelData.synthetic === true
-                                        font.weight: rowItem.picked ? Font.DemiBold : Font.Normal
-                                        color: rowItem.picked
-                                            ? t.accent
-                                            : (modelData.synthetic === true ? t.muted : t.body)
-                                    }
-                                }
-                            }
-
-                            // 空列要说清为什么空，不然看起来像坏了。
-                            Label {
-                                anchors.centerIn: parent
-                                width: parent.width - 16
-                                horizontalAlignment: Text.AlignHCenter
-                                wrapMode: Text.WordWrap
-                                visible: columnList.count === 0
-                                text: index === 0 ? "还没有大事件"
-                                    : (index === 1 ? "先选一个大事件" : "先选一个场景")
-                                color: t.muted
-                                font.pixelSize: 10
-                            }
-
-                            Rectangle {
-                                visible: index < 2
-                                anchors.right: parent.right
-                                width: 1
-                                height: parent.height
-                                color: t.line
-                            }
-                        }
-                    }
-                }
-            }
+            namePrefix: "browseTimeline"
+            tree: page.moments
+            t: page.t
+            currentId: page.cutId
+            viewportWidth: page.width
+            viewportHeight: page.height
+            onPicked: function(id, name) { page.pickCutById(id) }
         }
 
         // 搜索防抖：输入停下 200ms 才查。
@@ -1220,6 +1078,7 @@ Item {
 
                 ListView {
                     id: nodeList
+                    objectName: "browseNodeList"
                     anchors.fill: parent
                     anchors.margins: 8
                     clip: true
@@ -1274,21 +1133,21 @@ Item {
                         Label {
                             anchors.horizontalCenter: parent.horizontalCenter
                             text: page.isEmptyProject
-                                ? "这个工程还没有节点。模型提取的候选要先在「审核」里接受，才会进图。"
+                                ? "这个工程还没有节点。可在协作者对话中提取原文，结果会自动入库。"
                                 : "该分类下没有节点。"
                             color: t.muted
                         }
                         Label {
                             anchors.horizontalCenter: parent.horizontalCenter
                             visible: page.isEmptyProject
-                            objectName: "goReviewLink"
-                            text: "去审核 →"
+                            objectName: "openConversationLink"
+                            text: "打开协作者 →"
                             color: t.accent
                             font.underline: true
                             MouseArea {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: app.currentPage = "review"
+                                onClicked: app.assistantOpen = true
                             }
                         }
                     }
@@ -1310,9 +1169,9 @@ Item {
                     spacing: 8
 
                     Label {
+                        objectName: "browseDetailTitle"
                         text: detail.node
-                            ? (detail.display_name || detail.node.name)
-                              + (detail.name_provisional ? "（暂称）" : "")
+                            ? detail.node.name
                             : "未选择节点"
                         font.pixelSize: 16
                         font.weight: Font.DemiBold
@@ -1321,6 +1180,7 @@ Item {
                         Layout.fillWidth: true
                     }
                     Label {
+                        objectName: "browseDetailIdentity"
                         Layout.fillWidth: true
                         text: detail.node
                             ? "编号 " + (detail.node.label_id || detail.node.id) + " · "
@@ -1338,9 +1198,62 @@ Item {
                         clip: true
 
                         ColumnLayout {
-                            width: detailScroll.availableWidth
+                            width: detailScroll.viewportWidth
                             spacing: 8
 
+                            Rectangle {
+                                objectName: "browseFocusedRecord"
+                                readonly property string recordId: page.focusedIssue.record_id || ""
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: focusedRecordContent.implicitHeight + 20
+                                visible: recordId.length > 0
+                                color: t.accentSoft
+                                border.color: t.accent
+                                radius: 4
+                                ColumnLayout {
+                                    id: focusedRecordContent
+                                    anchors.left: parent.left; anchors.right: parent.right
+                                    anchors.top: parent.top; anchors.margins: 10
+                                    Label { text: "已定位属性记录"; color: t.accent; font.weight: Font.DemiBold }
+                                    Label {
+                                        objectName: "browseFocusedRecordId"
+                                        Layout.fillWidth: true
+                                        text: "记录ID：" + (page.focusedIssue.record_id || "")
+                                        wrapMode: Text.WrapAnywhere; color: t.body
+                                    }
+                                    Label {
+                                        objectName: "browseFocusedRecordValue"
+                                        Layout.fillWidth: true
+                                        text: {
+                                            var record = page.focusedIssue.record || ({})
+                                            return (record.property_id || record.kind || "") + " · "
+                                                + (record.value !== undefined ? JSON.stringify(record.value) : record.reason || "")
+                                        }
+                                        wrapMode: Text.Wrap; color: t.body
+                                    }
+                                    Label {
+                                        Layout.fillWidth: true
+                                        text: "这是该条记录的检查定位视图，可能属于历史或异常数据，不代表当前有效值。"
+                                        wrapMode: Text.Wrap; color: t.muted; font.pixelSize: 10
+                                    }
+                                    TextArea {
+                                        objectName: "browseFocusedRecordDetails"
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: Math.min(220, implicitHeight)
+                                        readOnly: true
+                                        selectByMouse: true
+                                        text: JSON.stringify(page.focusedIssue.record || ({}), null, 2)
+                                        textFormat: TextEdit.PlainText
+                                        wrapMode: TextEdit.Wrap
+                                        font.pixelSize: 11
+                                    }
+                                    Button {
+                                        visible: !!page.focusedIssue.source_id
+                                        text: "回查该记录引文"
+                                        onClicked: app.openSourceSpan(page.focusedIssue.source_id, page.focusedIssue.start, page.focusedIssue.end)
+                                    }
+                                }
+                            }
                             Label {
                                 Layout.fillWidth: true
                                 wrapMode: Text.Wrap
@@ -1454,6 +1367,32 @@ Item {
 
                             // 下一级时间点：大事件下面是场景，场景下面是事件。
                             // 点一行就跳到那个时间点，可以一层层钻下去。
+                            Repeater {
+                                model: [{key:"people",label:"涉及人物"}, {key:"locations",label:"涉及地点"}]
+                                delegate: Column {
+                                    required property var modelData
+                                    readonly property var entries: page.involvement[modelData.key] || []
+                                    objectName: "browseInvolvement" + modelData.key
+                                    Layout.fillWidth: true
+                                    visible: entries.length > 0
+                                    spacing: 2
+                                    Label {
+                                        text: "本节点及下属事件" + modelData.label + " · " + entries.length
+                                        color: t.muted
+                                        font.pixelSize: 11
+                                    }
+                                    Repeater {
+                                        model: entries
+                                        delegate: Button {
+                                            required property var modelData
+                                            objectName: "browseInvolvementLink"
+                                            text: modelData.name + " · " + modelData.id
+                                            flat: true
+                                            onClicked: page.jumpTo(modelData.id)
+                                        }
+                                    }
+                                }
+                            }
                             Column {
                                 Layout.fillWidth: true
                                 Layout.topMargin: 4
@@ -2363,7 +2302,6 @@ Item {
                                         width: parent.width
                                         text: (modelData.label_id ? modelData.label_id + "  " : "")
                                             + modelData.name
-                                            + (modelData.provisional === true ? "（暂称）" : "")
                                         color: page.pickedId === modelData.id
                                             ? t.accent
                                             : (modelData.synthetic === true ? t.muted : t.body)
@@ -2493,7 +2431,7 @@ Item {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
                 text: "选一个保留的名字。其余名字的记录照旧保存，只是按这个名字读；"
-                    + "撤回这次合并就恢复成两个名字。"
+                    + "属性定义与引用将物理合并。"
                 color: t.muted
                 font.pixelSize: 11
             }
