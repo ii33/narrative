@@ -15,6 +15,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -24,11 +25,21 @@ from .browse_view import moment_tree
 from .graph_operations import GraphOperations
 from .harness import HarnessRunner, harness_env
 from .native_models import CanvasState, node_detail, search_result
-from .node_material import MaterialStore, holds_at
+from .node_material import holds_at
 from .order_ids import order_key
 from .provider_store import GLOBAL_SCOPE, ProviderStore
 
 _NODE_TYPES = {"person", "group", "item", "location", "event", "action", "scene", "big_event", "storyline", "other"}
+SCREENPLAY_WRITING_PROMPT_VERSION = "screenplay-writing-ui/5"
+SCREENPLAY_SCENE_TABLE_RULES = (
+    "拆场或修改场表时，同一连续时空默认一场；情绪、招式、胜负或镜头变化不是拆场边界。"
+    "事件和动作是场内情节节拍，不与场次一一对应。只有实际时空或叙事层切换才作为新场的依据。"
+    "拆场阶段只写场级剧情概要、时空、人物和必要的状态连续性，不生成分镜、特效方案或镜头要求。"
+    "只通过read_scene_table_context读取当前有效范围；旧场表编辑编号不是事实来源，不从历史聊天补回屏蔽或范围外剧情。"
+    "依据scene_table_policy的拆场标准自主判断场数和场界；不需要逐场分配事件或填写结构化场界理由。"
+    "已有场表优先按稳定场次ID修改，保留非目标场和已有正文，不为凑场数机械拆分。"
+    "submit_scene_table保留所有已有ID；合为一场时复用一个ID，其余冗余场设enabled=false并提供空plan，不删除正文。"
+)
 
 
 class NativeBridge(QObject):
@@ -59,6 +70,7 @@ class NativeBridge(QObject):
         self._next_request = 0
         self._static_scan_generation = 0
         self._static_target_generation = 0
+        self._screenplay_query_generation = 0
         self._epoch = 0
         self._query_epoch = 0
         self._recent_generation = 0
@@ -461,20 +473,50 @@ class NativeBridge(QObject):
             items = []
             for text in self._recent_paths():
                 path = Path(self.urlToPath(text))
-                name, title, exists = path.stem, path.stem, False
+                name, title, exists, copyable = path.stem, path.stem, False, False
                 if path.is_file() and path.suffix.lower() == project_package.PACKAGE_SUFFIX:
                     try:
                         found = project_package.layout(path)
                         exists = found.db.is_file()
+                        from .operations import Operations
+                        copyable = Operations.inspect_graph_project(path)["status"] == "ready"
                         title = project_package.project(found)["project"]["title"] or name
                     except (OSError, ValueError, KeyError):
                         pass
                 items.append(
-                    {"path": text, "name": name, "title": title, "exists": exists}
+                    {"path": text, "name": name, "title": title, "exists": exists, "copyable": copyable}
                 )
             return {"items": items, "generation": generation}
 
         self._submit("recent_projects", work)
+
+    @Slot(str)
+    def suggestProjectCopy(self, source: str) -> None:
+        from PySide6.QtCore import QUrl
+
+        from .operations import Operations
+
+        def work() -> dict:
+            path = Operations.next_project_copy_path(self.urlToPath(source))
+            return {"source": source, "destination": QUrl.fromLocalFile(str(path)).toString()}
+
+        self._submit("project_copy_destination", work)
+
+    @Slot(str, str)
+    def duplicateProject(self, source: str, destination: str) -> None:
+        from .operations import Operations
+
+        def work() -> dict:
+            target = Path(self.urlToPath(destination))
+            copied = Operations.duplicate_graph_project(self.urlToPath(source), target)
+            self._remember_project(target)
+            return {"path": str(target), "report": getattr(copied, "_copy_report", {})}
+
+        def apply(result: dict) -> dict:
+            self.loadRecentProjects()
+            return result
+
+        self._submit("project_duplicated", work, apply)
 
     @Slot(str, bool)
     def removeProject(self, path: str, delete_files: bool) -> None:
@@ -925,8 +967,153 @@ class NativeBridge(QObject):
 
     # -- 节点资料（一张张带生效/失效时间的资料卡）-----------------------
 
-    def _material(self) -> MaterialStore:
-        return MaterialStore(self._project())
+    @Slot()
+    def loadAdaptation(self) -> None:
+        self._project_task("adaptation", lambda ops: ops.adaptation_snapshot())
+
+    @Slot(str)
+    def loadScreenplayWorkspace(self, screenplay_id: str) -> None:
+        self._screenplay_query_generation += 1
+        generation = self._screenplay_query_generation
+        def work(ops):
+            storage = ops.inspect_screenplay_storage()
+            if storage["status"] == "incomplete":
+                return {"storage": storage, "screenplays": [], "adaptation": ops.adaptation_snapshot(),
+                        "timeline": {"nodes": [], "revision": 0}, "document": {}}
+            items = ops.list_screenplays()
+            selected = screenplay_id if any(item["id"] == screenplay_id for item in items) else (items[0]["id"] if items else "")
+            return {"storage": storage, "screenplays": items, "adaptation": ops.adaptation_snapshot(),
+                    "timeline": ops.read_screenplay_timeline(selected) if selected else {"nodes": [], "revision": 0},
+                    "document": ops.read_screenplay(selected) if selected else {}}
+        self._project_task("screenplay_workspace", work, lambda result: result if
+                           generation == self._screenplay_query_generation else {"superseded": True})
+
+    @Slot(str, "QVariantMap")
+    def screenplayAction(self, operation: str, arguments: dict) -> None:
+        allowed = {
+            "preview_adaptation_span", "create_adaptation_span", "update_adaptation_span", "read_adaptation_span",
+            "create_screenplay", "read_screenplay", "apply_screenplay_structure",
+            "create_script_segment", "update_script_segment", "read_script_segment",
+            "read_scene_table_context", "submit_scene_table", "apply_scene_table_changes", "adopt_scene_table",
+            "read_script_unit_context", "submit_script_unit", "apply_script_block_changes",
+            "mark_writing_basis_current", "check_screenplay", "export_screenplay",
+            "prepare_script_writing_targets",
+            "read_screenplay_timeline", "import_screenplay_timeline_candidates", "import_screenplay_timeline",
+            "append_screenplay_timeline",
+            "inspect_screenplay_storage", "reset_screenplay_storage",
+        }
+        if operation not in allowed:
+            self.errorOccurred.emit("screenplay", "未知剧本操作")
+            return
+        args: dict[str, Any] = json.loads(json.dumps(dict(arguments), ensure_ascii=False))
+        request_token = args.pop("_view_request_token", None)
+        def normalize(value) -> Any:
+            if isinstance(value, dict):
+                return {key: int(item) if key.startswith("expected_") and item is not None
+                        and isinstance(item, (int, float)) and item == int(item) else normalize(item)
+                        for key, item in value.items()}
+            if isinstance(value, list):
+                return [normalize(item) for item in value]
+            return value
+        args = dict(normalize(args))
+        self._project_task("screenplay", lambda ops: {
+            "operation": operation, "request_screenplay_id": args.get("screenplay_id"),
+            "request_selection_ids": args.get("selection_ids"),
+            "request_token": request_token,
+            "result": getattr(ops, operation)(**args)})
+
+    @Slot(str, str, str)
+    def saveScreenplayExport(self, screenplay_id: str, export_format: str, path: str) -> None:
+        def work(ops):
+            from .node_material import _as_path
+            destination = _as_path(path)
+            ops.export_screenplay(screenplay_id, format=export_format, path=str(destination))
+            return {"path": str(destination), "format": export_format}
+        self._project_task("screenplay_export_saved", work)
+
+    @Slot("QVariantMap")
+    def loadAdaptationBrowse(self, spec: dict) -> None:
+        self._project_task("adaptation_browse", lambda ops: ops.adaptation_browse_view(**dict(spec)))
+
+    @Slot(str, str)
+    def loadAdaptationDetail(self, node_id: str, cut: str) -> None:
+        self._project_task("adaptation_detail", lambda ops: ops.adaptation_node_detail(node_id, cut=cut or None))
+
+    @Slot(str, str)
+    def loadAdaptationProperties(self, node_id: str, cut: str) -> None:
+        self._project_task("adaptation_node_properties", lambda ops: ops.adaptation_node_properties(node_id, cut=cut or None))
+
+    @Slot(str, str)
+    def loadAdaptationEditor(self, node_id: str, cut: str) -> None:
+        self._project_task("adaptation_node_editor", lambda ops: ops.adaptation_node_editor(node_id, cut=cut or None))
+
+    @Slot(str, str)
+    def loadAdaptationMaterial(self, node_id: str, cut: str) -> None:
+        self._project_task("adaptation_material", lambda ops: ops.adaptation_node_assets(node_id, cut=cut or None))
+
+    @Slot("QVariantList", str, int, str)
+    def expireAdaptationProperties(self, record_ids: list, event_id: str, revision: int, reason: str) -> None:
+        def work(ops):
+            if len(record_ids) != 1:
+                raise ValueError("请逐条选择改编属性记录失效")
+            snapshot = ops.adaptation_snapshot()
+            result = snapshot
+            for identifier in record_ids:
+                row = next(p for p in snapshot["properties"] if p["id"] == identifier)
+                result = ops.set_adaptation_property(row["node_id"], row["property_id"], record_id=identifier,
+                    event_id=event_id or None, expire=True, expected_revision=revision, reason=reason or "失效改编属性")
+            return result
+        self._project_task("adaptation", work)
+
+    @Slot()
+    def loadAdaptationImportCandidates(self) -> None:
+        self._project_task("adaptation_import_candidates", lambda ops: {"moments": ops.import_adaptation_candidates()})
+
+    @Slot("QVariantList", int)
+    def importAdaptation(self, moment_ids: list, revision: int) -> None:
+        self._project_task("adaptation", lambda ops: ops.import_adaptation(
+            moment_ids, expected_revision=revision, reason="从提取导入"))
+
+    @Slot(str, "QVariantMap")
+    def changeAdaptation(self, action: str, arguments: dict) -> None:
+        methods = {
+            "sync": "sync_adaptation", "edit": "edit_adaptation_node",
+            "copy": "copy_adaptation_node", "move": "move_adaptation_node",
+            "suppress": "suppress_adaptation_node", "property": "set_adaptation_property",
+        }
+        if action not in methods:
+            self.errorOccurred.emit("adaptation", "未知改编操作")
+            return
+        args = dict(arguments)
+        if args.get("expected_revision") is not None:
+            args["expected_revision"] = int(args["expected_revision"])
+        self._project_task("adaptation", lambda ops: getattr(ops, methods[action])(**args))
+
+    @Slot()
+    def checkAdaptation(self) -> None:
+        self._project_task("adaptation_check", lambda ops: ops.check_adaptation())
+
+    @Slot(str, str, str)
+    def loadAssets(self, category: str, moment: str, node_id: str) -> None:
+        def work(ops):
+            result = ops.list_assets(category, moment=moment, node_id=node_id)
+            return result | {"moments": ops.asset_moments(),
+                             "nodes": ops.adaptation_snapshot().get("nodes", [])}
+        self._project_task("assets", work)
+
+    @Slot("QVariantMap", int)
+    def saveAsset(self, payload: dict, revision: int) -> None:
+        self._project_task("asset_saved", lambda ops: {
+            "asset": ops.save_asset(dict(payload), expected_revision=revision)})
+
+    @Slot(str)
+    def loadAsset(self, asset_id: str) -> None:
+        self._project_task("asset_detail", lambda ops: {"asset": ops.get_asset(asset_id)})
+
+    @Slot(str, int)
+    def deleteAsset(self, asset_id: str, revision: int) -> None:
+        self._project_task("asset_saved", lambda ops: ops.delete_asset(
+            asset_id, expected_revision=revision))
 
     def _material_moments(self, ops) -> dict:
         """生效/失效下拉用的分级阅读位置：一列一层（大事件 → 场景 → 事件）。
@@ -942,7 +1129,7 @@ class NativeBridge(QObject):
         )
 
     def _material_payload(self, ops, node_id: str) -> dict:
-        return self._material().view(node_id, cut=self._state_cut, snapshot=ops.graph_snapshot()) | {
+        return ops.material_view(node_id, cut=self._state_cut) | {
             "moments": self._material_moments(ops)
         }
 
@@ -964,8 +1151,7 @@ class NativeBridge(QObject):
         """改一次资料，然后把这一刻的整页发回去：界面只认一种 payload。"""
 
         def work(ops) -> dict:
-            store = self._material()
-            changed = change(store, ops.graph_snapshot())
+            changed = change(ops)
             payload = self._material_payload(ops, node_id)
             # 刚改的那张如果不在当前阅读位置上，界面要说一声——否则像是没保存。
             if isinstance(changed, dict) and changed.get("id"):
@@ -997,8 +1183,8 @@ class NativeBridge(QObject):
         images = self._images_from_json(images_json)
         self._material_task(
             node_id,
-            lambda store, snapshot: store.add_card(
-                node_id, title, detail, valid_from, valid_to, images, snapshot=snapshot
+            lambda ops: ops.material_add_card(
+                node_id, title, detail, valid_from, valid_to, images
             ),
         )
 
@@ -1016,7 +1202,7 @@ class NativeBridge(QObject):
         images = self._images_from_json(images_json)
         self._material_task(
             node_id,
-            lambda store, snapshot: store.update_card(
+            lambda ops: ops.material_update_card(
                 node_id,
                 card_id,
                 title=title,
@@ -1024,18 +1210,17 @@ class NativeBridge(QObject):
                 valid_from=valid_from,
                 valid_to=valid_to,
                 images=images,
-                snapshot=snapshot,
             ),
         )
 
     @Slot(str, str)
     def removeMaterialCard(self, node_id: str, card_id: str) -> None:
-        self._material_task(node_id, lambda store, snapshot: store.remove_card(node_id, card_id))
+        self._material_task(node_id, lambda ops: ops.material_remove_card(node_id, card_id))
 
     @Slot(str, str, str, str)
     def addMaterialImage(self, node_id: str, card_id: str, path: str, caption: str) -> None:
         self._material_task(
-            node_id, lambda store, snapshot: store.add_image(node_id, card_id, Path(path), caption)
+            node_id, lambda ops: ops.material_add_image(node_id, card_id, Path(path), caption)
         )
 
     @Slot(str, str, str, str)
@@ -1044,13 +1229,13 @@ class NativeBridge(QObject):
     ) -> None:
         self._material_task(
             node_id,
-            lambda store, snapshot: store.update_image_caption(node_id, card_id, image_id, caption),
+            lambda ops: ops.material_update_image_caption(node_id, card_id, image_id, caption),
         )
 
     @Slot(str, str, str)
     def removeMaterialImage(self, node_id: str, card_id: str, image_id: str) -> None:
         self._material_task(
-            node_id, lambda store, snapshot: store.remove_image(node_id, card_id, image_id)
+            node_id, lambda ops: ops.material_remove_image(node_id, card_id, image_id)
         )
 
     @Slot(str, "QVariantList")
@@ -1206,7 +1391,22 @@ class NativeBridge(QObject):
     def assistantTurn(self, text: str, image_path: str = "") -> None:
         self._assistant_turn(text, image_path, self._assistant_chat)
 
-    def _assistant_turn(self, text: str, image_path: str, requested_chat: str | None) -> None:
+    @Slot(str, "QVariantMap")
+    def screenplayWritingTurn(self, text: str, target: dict) -> None:
+        requested_chat = self._assistant_chat
+        frozen_target = json.loads(json.dumps(dict(target), ensure_ascii=False))
+
+        def apply(task):
+            self._assistant_turn(text, "", requested_chat, writing_task=task)
+            with self._assistant_lock:
+                task_id = self._assistant_jobs.get(self._next_request, {}).get("task_id", "")
+            return {"target": task.get("target", frozen_target), "started": True, "task_id": task_id}
+
+        self._project_task("screenplay_writing", lambda ops: ops.prepare_script_writing_task(
+            frozen_target, prompt=text), apply)
+
+    def _assistant_turn(self, text: str, image_path: str, requested_chat: str | None,
+                        *, writing_task: dict | None = None) -> None:
         """Run an assistant turn with the tools in assistant.ASSISTANT_TOOLS.
 
         Native tools create source slices, plan exact pattern ranges, and
@@ -1276,6 +1476,12 @@ class NativeBridge(QObject):
                          "config": settings.model_dump(exclude={"key_env"}),
                          "response_idle_timeout_seconds": settings.timeout_seconds,
                          "runtime_restart": runtime.restart_reason}
+                if writing_task is not None:
+                    audit["writing_task"] = writing_task
+                    audit["writing_prompt_version"] = SCREENPLAY_WRITING_PROMPT_VERSION
+                    audit["writing_task_metadata"] = {
+                        "task_id": task_id, "manifest_ref": str(audit_dir / "writing-task.json"),
+                    }
                 native_steps: list[dict] = []
                 self._assistant_steps = native_steps
                 calls = 0
@@ -1320,23 +1526,63 @@ class NativeBridge(QObject):
                     )
 
                 native_call_lock = threading.Lock()
+                submitted_unit_ids: list[str] = []
 
                 def native_call(name, args):
                     with native_call_lock:
                         check_cancelled()
-                        step = _call(entry, name, args)
+                        if writing_task is not None:
+                            from .screenplay_writing import validate_script_writing_tool_call
+                            from .tool_fingerprint_refs import decode_tool_parameters
+                            try:
+                                validate_script_writing_tool_call(writing_task, name, decode_tool_parameters(ops, args), ops=ops)
+                            except ValueError as exc:
+                                native_steps.append({"tool": name, "args": args, "ok": False,
+                                                     "error": str(exc), "diagnostic": "writing_target_scope"})
+                                raise
+                        if writing_task is not None:
+                            from contextlib import nullcontext
+
+                            from .tool_execution_context import (
+                                bind_scene_table_generation,
+                                bind_tool_execution_metadata,
+                            )
+                            with bind_tool_execution_metadata(audit["writing_task_metadata"]):
+                                scope = bind_scene_table_generation() if writing_task["target"]["kind"] == "scene_table" else nullcontext()
+                                with scope:
+                                    step = _call(entry, name, args)
+                        else:
+                            step = _call(entry, name, args)
                         native_steps.append(step)
                         if not step["ok"]:
                             raise ValueError(step["error"])
+                        if writing_task is not None and name in {"submit_script_unit", "apply_script_block_changes"}:
+                            unit_id = str(args.get("unit_id") or "")
+                            if unit_id and unit_id not in submitted_unit_ids:
+                                submitted_unit_ids.append(unit_id)
+                            self._conversation_event(ops, path, {
+                                "event": "screenplay_submission", "chat_id": chat_id, "task_id": job["task_id"],
+                                "writing_target": writing_task.get("target"), "writing_status": "running",
+                                "submitted_unit_ids": list(submitted_unit_ids),
+                            })
                         return step["result"]
 
                 save("task.json", audit)
+                if writing_task is not None:
+                    save("writing-task.json", {"version": SCREENPLAY_WRITING_PROMPT_VERSION,
+                         "task": writing_task, "metadata": audit["writing_task_metadata"]})
 
                 try:
                     check_cancelled()
+                    task_catalog = tool_catalog()
+                    if writing_task is not None and writing_task.get("target", {}).get("kind") == "scene_table":
+                        task_catalog = tool_catalog({
+                            "read_scene_table_context", "check_screenplay", "submit_scene_table",
+                        })
+                    audit["task_tool_names"] = [tool["name"] for tool in task_catalog]
                     session_runner, session = open_conversation_session(
                         ops, settings, api_key, HarnessRunner,
-                        task_tools=tool_catalog(), tool_handler=native_call,
+                        task_tools=task_catalog, tool_handler=native_call,
                         chat_id=chat_id,
                     )
                     audit["session_id"] = session
@@ -1387,7 +1633,12 @@ class NativeBridge(QObject):
                         })
 
                     result = run_turn(
-                        ask, message, project=entry, image=image, steps=native_steps,
+                        ask, message if writing_task is None else message + "\n\n" + str(writing_task.get("instruction") or "")
+                        + "\n固定写作目标及输入清单：" + json.dumps(writing_task, ensure_ascii=False)
+                        + "\n任务与依据档案由程序内部关联；请只提供业务内容、对象ID和并发校验参数。"
+                        + "\n场表编写规则：" + SCREENPLAY_SCENE_TABLE_RULES
+                        + "\n写作提示版本：" + SCREENPLAY_WRITING_PROMPT_VERSION,
+                        project=entry, image=image, steps=native_steps,
                         on_format_error=on_format_error,
                         extraction_granularity=extraction_granularity,
                     )
@@ -1437,6 +1688,20 @@ class NativeBridge(QObject):
                             state += "请勿将本次任务视为全部完成。"
                     else:
                         state = f"本次任务未产生新的入库变更（当前修订 {revision}）。"
+                    from . import screenplay_tools
+                    from .tool_api import TOOLS
+                    committed = []
+                    for step in native_steps:
+                        tool = TOOLS.get(str(step.get("tool") or ""))
+                        if (step.get("ok") and tool is not None and tool.writes
+                                and tool.handler.__module__ == screenplay_tools.__name__):
+                            committed.append(step)
+                    audit["completed_screenplay_actions"] = committed
+                    if committed:
+                        script_state = f"已完成的 {len(committed)} 项剧本写入仍保留；任务未全部完成。"
+                        state = state + script_state if revision != starting_revision else script_state
+                    elif writing_task is not None:
+                        state = "本次任务尚无成功的剧本写入。"
                     audit.update(finish_reason=failure_metadata.get("finish_reason"),
                                  sdk_error_diagnostics=failure_metadata.get("sdk_error_diagnostics") or [],
                                  diagnostic_path=diagnostic_path, starting_revision=starting_revision,
@@ -1458,11 +1723,15 @@ class NativeBridge(QObject):
                         session_runner.close()
                     audit.update(steps=native_steps, public_steps=_public(native_steps),
                                  model_calls=calls, elapsed_seconds=time.monotonic() - started)
+                    if writing_task is not None:
+                        audit["submitted_unit_ids"] = list(submitted_unit_ids)
                     save("task.json", audit)
                     self._conversation_event(ops, path, {
                         "chat_id": chat_id, "event": "task_complete", "task_id": task_id,
                         "revision": ops.graph_project_info()["revision"],
                         "graph_reset_required": ops.graph_project_info()["revision"] != starting_revision,
+                        **({"writing_target": writing_task.get("target"), "writing_status": audit["status"],
+                            "submitted_unit_ids": list(submitted_unit_ids)} if writing_task is not None else {}),
                     }, busy=False)
 
         def apply(result: dict) -> dict:

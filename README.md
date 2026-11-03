@@ -37,11 +37,97 @@ uv sync --extra desktop
 作品_chats/        聊天记录及当前聊天指针
 ```
 
+最近工程列表每项提供“创建副本”。选择新的 `.nproj` 文件名和位置后，程序复制原文、提取、改编、剧本、资料、资产及聊天／任务记录，建立独立工程并加入最近列表；当前工程和聊天不自动切换。副本用新文件名作为工程名，后续编辑互不影响。默认文件名自动避开已有工程；目标已有文件时不会覆盖。运行中的任务需先结束再复制。历史记录中的原始绝对路径按原样保留，包括直接引用工程外图片的链接；当前会话入口和正文依据会重新指向副本。
+
+CLI 使用 `narrative project-copy 原工程.nproj 副本.nproj --json`，MCP 对应工作区工具 `duplicate_project(source,destination)`；均调用 `Operations.duplicate_graph_project`，不要求先打开工程。
+
 原文导入后保持不变。切片只是按完整原文 Unicode 字符坐标保存的浏览索引，`end` 不包含；创建切片不会提取事实或修改正文。
 
 规则章节优先按标题模式批处理：agent 读取少量样例确认模式，`preview_pattern_slices` 在本地扫描整份原文并返回计数及少量首尾样例，`create_pattern_slices` 按同一计划批量创建。切前三章时，第三章结束位置取第四个标题，不误延到书末。没有稳定标题格式时仍可按语义提供明确范围；完整原文始终可查。
 
-图使用 Schema v10 的节点与属性记录表达人物、群体、物品、地点、主要故事、大事件、场景、事件及动作。属性带原文证据、披露位置和作用域；状态变化关闭旧值区间并追加新值；节点只保存当前对象，按阅读位置可删除后续数据回退。工程设置可选标准／精细提取粒度并配置模型；精细档提取更密集的事件，两档均不默认提取动作。事件编辑器提供按需“动作提取”，动作归属选中的事件。语义说明见[数据模型](docs/DATA_MODEL.md)。
+图使用 Schema v10 的节点与属性记录表达人物、群体、物品、地点、主要故事、大事件、场景、事件及动作。属性带原文证据、披露位置和作用域；状态变化关闭旧值区间并追加新值；节点只保存当前对象，按阅读位置可删除后续数据回退。工程设置默认精细，可选标准／精细提取粒度并配置模型；精细档提取更密集的事件，两档均不默认提取动作。事件编辑器提供按需“动作提取”，动作归属选中的事件。语义说明见[数据模型](docs/DATA_MODEL.md)。
+
+## 改编与资产
+
+左侧“改编”默认复用数据浏览的分类、节点列表、详情与节点编辑器，从已提取数据导入独立副本。时间点列表条目可拖动改变改编顺序，节点编辑器可屏蔽时间点及其子树，也可新建任意类型节点。可插入、复制、改名、屏蔽或移动节点，指定父级、出场时点，并在时间点新增、更改或失效属性。改编使用独立 `sort_id` 排序，不按原节点编号排序；写入带修订检查、静态校验及审计，不修改提取节点和属性。
+
+“从提取导入”按主要故事→大事件→场景→事件→动作展示可展开、折叠的多级列表。支持跨分支多选：勾选上级包含其全部下属，单独选择下属时上级显示半选，折叠不清除选择；动作只列出现有节点。只导入所选时间点（选择容器含下属）以及必要归属、参与实体和相关有效状态；补齐引用依赖与状态区间边界。重复导入保留本地改编，源与改编冲突显示诊断。改编数据保存在工程数据库的独立元数据中，使用自己的修订号。
+
+左侧“资产”包含形象、物品、地点、材质。前三项共用改编时间点选择；角色可有多个形象，设定可指定生效和失效时点。材质不关联时间点。设定卡支持说明、设定图、可选参考图和提示词，参考图复制到工程资料目录，原始附件保持不变。资产及审计保存在 `material/assets/`，移动工程时须保留完整数据目录。
+
+以上功能通过同一 `Operations` 提供给界面、CLI 与统一助手。
+
+改编和资产的 CLI、MCP 入口使用同一工具注册表，界面也经相同 Operations。CLI 提供以下命令；全部命令可加 `--project 作品.nproj --json`：
+
+| CLI 命令 | MCP 工具 |
+| --- | --- |
+| `adaptation` | `adaptation_snapshot` |
+| `adaptation-check` | `check_adaptation` |
+| `adaptation-import-candidates` | `import_adaptation_candidates` |
+| `adaptation-import --moment E1 --moment E2` | `import_adaptation` |
+| `adaptation-browse` | `adaptation_browse_view` |
+| `adaptation-properties` / `adaptation-detail` / `adaptation-editor` / `adaptation-assets` | 对应 `adaptation_node_*` |
+| `adaptation-edit` | `edit_adaptation_node` |
+| `adaptation-copy` | `copy_adaptation_node` |
+| `adaptation-move` | `move_adaptation_node` |
+| `adaptation-suppress` | `suppress_adaptation_node` |
+| `adaptation-property` | `set_adaptation_property` |
+| `assets` | `list_assets` |
+| `asset` | `get_asset` |
+| `asset-save` | `save_asset` |
+| `asset-delete` | `delete_asset` |
+| `asset-moments` | `asset_moments` |
+| `extraction-settings` | `get_extraction_settings` |
+| `extraction-granularity fine` | `set_extraction_granularity` |
+
+例如，`node-changes.json` 保存 `{"name":"改编新角色","node_type":"person"}`，`material.json` 保存 `{"category":"material","title":"旧铜","prompt":"暗色铜锈"}`：
+
+```powershell
+narrative adaptation-import-candidates --project 作品.nproj --json
+narrative adaptation-import --moment E1 --moment E2 --project 作品.nproj --json
+narrative adaptation-edit --changes-file node-changes.json --project 作品.nproj --json
+narrative asset-save --payload-file material.json --project 作品.nproj --json
+narrative adaptation-check --project 作品.nproj --json
+narrative-mcp --project 作品.nproj
+```
+
+节点编辑用 `--node 节点ID`；新增省略节点ID。`--changes`、`--payload`、`--value` 接受 JSON，也各自支持 `--changes-file`、`--payload-file`、`--value-file`。属性的 `--value 0`、`--value false` 保留原始类型，文本值须用 JSON 字符串。`adaptation-suppress 节点ID --suppressed false` 恢复节点及子树；属性失效用 `--record 取值ID --event 时点ID --expire true`。放置位置通过 `--after`、`--parent` 指定；省略排序参照时移动/插入放到开头，复制紧随原节点，省略父级则保留归属。
+
+写操作可传 `--expected-revision`：改编使用 `adaptation` 返回的独立 `revision`，资产使用 `assets` 或 `asset` 返回的独立 `revision`；不能混用提取图修订号。错误参数或过期修订不写入。`narrative tool list --json` 与 MCP `tools/list` 提供完整参数结构；通用 CLI `narrative tool call 工具名 '参数JSON' --project 作品.nproj` 仍可使用。MCP 未设默认工程时，项目工具在 arguments 中传 `project`（`.nproj` 入口），全局工程列表无需工程参数。
+
+
+## 工具中的编号
+
+新建业务对象由程序自动分配稳定的可读编号，例如 `adapt-person-1`、`material-1`、`screenplay-1`、`segment-1`、`unit-1`、`block-1`；模型无需计算哈希或为新对象选号。编号只标识对象，顺序仍由原文坐标、`sort_id` 或结构位置决定，改名、移动不改身份，删除不复用已分配编号。
+
+工具中的范围、上下文、场次计划和存储检查指纹以短依据编号传递（如 `span-basis-1@…`），映射和真实指纹校验由程序内部完成。句柄绑定工程与精确快照，旧上下文仍会被拒绝，不能靠重新读取当前指纹覆盖过期依据。CLI、MCP 和对话工具共用这一处理。写作对话的任务号和依据档案由宿主自动关联，模型不再搬运这些内部参数；内部审计与原始导出保留必要的完整校验信息。既有对象身份不因显示方式调整而重写。
+
+## 剧本
+
+左侧“剧本”页分为改编时间表、段落表、场表、正文四栏，每栏可独立折叠／展开并拖动调整宽度，窄窗可横向滚动。先从改编时间线多选导入节点及相关状态到当前剧本的独立副本，再选择连续范围建立段落；场表和对应正文同时显示。源改编后续变化不自动影响副本，本地调整也不修改源改编或其他剧本。场表行与正文共用稳定场次 ID；修改场表不会自动清空正文。“采用场表”只是工作标记，可以继续修改，也不要求先采用才能写作。
+
+已有剧本可继续“追加导入时间点”：新节点按源改编中的顺序放到本地时间线末尾，已导入节点跳过，保留已有顺序、本地修改、段落、场表和正文；已导入容器仍可选择，以追加后来新增的子项。选区、当前场次和四栏折叠状态也保留。未编辑旧状态因源新增后续状态而需要合法结束时，可补齐结束边界并在导入摘要中明确列出；本地修改过的状态或真正区间冲突不会被静默覆盖。重新同步既有来源字段仍是独立的显式导入操作，不借追加执行。
+
+“写当前场”“批量写空场”和“对话修改”均进入当前聊天的同一常驻模型会话。发送时固定修改目标；批量默认只选择启用、尚无正文的普通场景，逐场原子提交。已有正文须明确授权修改；块级任务只可改指定块。失败或停止不撤销已提交场次。任务状态、正文是否存在和输入依据是否变化分别显示。
+
+拆场以连续时空为单位，同一时空的事件、情绪、招式或胜负变化作为场内节拍处理。`read_scene_table_context` 提供有效事件、逐点状态、逐事件已知／未记录地点及拆场标准；不发送原始引文、屏蔽叙事或旧场表概要、结果、制作备注。旧场表只提供稳定编号、修订和正文存在状态。场数和场界交由模型依据标准判断，程序不强制分配事件、计算场界或限制场数；可选来源引用只校验其是否属于有效范围。`production_notes` 不在拆场生成阶段填写；场次来源失效会静态提示，正文保留。
+
+拆场对话只开放当前段落上下文、完整场表提交和当前剧本检查，不能绕回全量时间线或原文取出屏蔽内容。手工编辑与正文写作仍使用各自入口。合为一场时复用一个已有场次编号，冗余场可停用，原正文不被隐式删除。
+
+独立“结构”页用集和幕组织同一批段落，支持调序及明确的单片／剧集重组。主表与结构页使用同一权威顺序。段落来源随当前剧本副本的锚点动态解析；范围失效或输入改变会提示复查并保留旧正文。导出支持 UTF-8 剧本文本与包含身份、关联和状态的 JSON。
+
+所有业务经 Operations，CLI／MCP 与界面共用合同。常用命令包括 `screenplay-timeline-candidates`、`screenplay-timeline-import`、`screenplay-timeline-append`、`screenplay-timeline`、`span-preview`、`span-create`、`screenplay-create`、`screenplay`、`script-segment-create`、`scene-table-context`、`scene-table-submit`、`scene-table-edit`、`scene-table-adopt`、`script-unit-context`、`script-unit-submit`、`script-block-edit`、`script-writing-targets`、`screenplay-structure`、`screenplay-check`、`screenplay-export`；与工具名的对应及完整参数见 `narrative tool list --json` 和各命令 `--help`。
+
+```powershell
+narrative screenplay-create --title "雨夜交接" --format single --reason "创建剧本方案" --project 作品.nproj --json
+narrative screenplay-timeline-candidates --screenplay-id 剧本ID --project 作品.nproj --json
+narrative screenplay-timeline-import --screenplay-id 剧本ID --moment-ids-file selection.json --expected-timeline-revision 0 --expected-adaptation-revision 源改编修订号 --reason "导入剧本独立副本" --project 作品.nproj --json
+narrative span-preview --screenplay-id 剧本ID --selection-ids-file selection.json --project 作品.nproj --json
+narrative screenplay --screenplay-id 剧本ID --project 作品.nproj --json
+narrative screenplay-export --screenplay-id 剧本ID --format text --path 剧本.txt --project 作品.nproj --json
+```
+
+`selection.json` 为改编节点 ID 的 JSON 数组。对象、动作数组和正文块等复杂参数均支持 `--参数名-file` 读取 UTF-8 JSON。生成前读取相应 context，提交必须带该次读取返回的对象修订号与输入指纹；不拿全局图 revision 代替单场并发检查。写入要求说明 `reason`。剧本数据使用工程数据库内独立十一表（含每剧本独占时间线），正常只读不初始化；当前结构不提供旧格式迁移。旧剧本表不完整时，界面提供丢弃剧本域并重建的入口；原文、改编和资产不受影响。空的旧表只在明确新建时初始化。CLI／MCP 对应 `screenplay-storage`／`inspect_screenplay_storage` 与 `screenplay-storage-reset`／`reset_screenplay_storage`，重建要求先检查取得指纹，并明确丢弃范围和原因。
 
 ## 统一对话
 

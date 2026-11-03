@@ -77,6 +77,7 @@ ApplicationWindow {
     property string notice: ""
     property string mode: "launcher"
     property string currentPage: "browse"
+    property string screenplayId: ""
     // 常驻协作者：面板跨页面保留，收起后状态还在（消息不丢）。
     property bool assistantOpen: false
 
@@ -84,6 +85,10 @@ ApplicationWindow {
         {key: "browse", label: "数据浏览", hint: "按分类看节点"},
         {key: "relations", label: "关系图", hint: "人物与关系"},
         {key: "source", label: "原文", hint: "导入与回查"},
+        {key: "adaptation", label: "改编", hint: "独立编辑叙事"},
+        {key: "assets", label: "资产", hint: "形象、物品与视觉设定"},
+        {key: "screenplay", label: "剧本", hint: "选段、场表与正文"},
+        {key: "screenplay_structure", label: "结构", hint: "集、幕与段落"},
         {key: "static_check", label: "静态检查", hint: "约束与问题定位"},
         {key: "project_settings", label: "工程设置", hint: "提取粒度与模型"}
     ]
@@ -129,6 +134,7 @@ ApplicationWindow {
         function onResultReady(kind, payload) {
             resultKinds = resultKinds.concat([kind])
             if (kind === "project") {
+                screenplayId = ""
                 errorText = ""
                 project = payload.project || ({})
                 notice = "已打开 " + (project.title || project.name || "工程")
@@ -138,8 +144,8 @@ ApplicationWindow {
                 notice = "工程名称已更新为 " + (project.title || "")
                 bridge.loadRecentProjects()
             } else if (kind === "project_closed") {
-                project = ({})
                 mode = "launcher"
+                project = ({})
                 assistantOpen = false
             } else if (kind === "static_check_target" && !payload.superseded) {
                 if (payload.kind === "source") app.openSourceSpan(payload.source_id, payload.start, payload.end)
@@ -392,6 +398,10 @@ ApplicationWindow {
                         BrowsePage { id: browsePage; app: app }
                         RelationPage { app: app }
                         SourcePage { id: sourcePage; app: app }
+                        AdaptationPage { app: app }
+                        AssetsPage { app: app }
+                        ScreenplayPage { app: app }
+                        ScreenplayStructurePage { app: app }
                         StaticCheckPage { app: app }
                         ProjectSettingsPage { app: app }
                     }

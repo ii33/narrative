@@ -6,7 +6,7 @@ The same agent reads, extracts, validates and submits facts through Operations.
 from __future__ import annotations
 
 import base64
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from . import tool_api
@@ -24,8 +24,9 @@ ASSISTANT_TOOLS = tuple(name for name, tool in tool_api.TOOLS.items() if tool.sc
 READ_TOOLS = tuple(name for name in ASSISTANT_TOOLS if not tool_api.TOOLS[name].writes)
 
 
-def tool_catalog() -> list[dict]:
+def tool_catalog(names: Iterable[str] | None = None) -> list[dict]:
     """协作者能用的工具：从工具表取，不另写一份。"""
+    selected = set(names) if names is not None else None
     return [
         {
             "name": name,
@@ -33,7 +34,7 @@ def tool_catalog() -> list[dict]:
             "parameters": tool_api.TOOLS[name].schema(),
         }
         for name in ASSISTANT_TOOLS
-        if name in tool_api.TOOLS
+        if name in tool_api.TOOLS and (selected is None or name in selected)
     ]
 
 
@@ -126,7 +127,7 @@ def _public(steps: list[dict]) -> list[dict]:
     ]
 
 
-def _first_prompt(message: str, image: str = "", *, extraction_granularity: str = "standard") -> str:
+def _first_prompt(message: str, image: str = "", *, extraction_granularity: str = "fine") -> str:
     if extraction_granularity not in {"standard", "fine"}:
         raise ValueError("提取粒度须为standard或fine")
     granularity_note = (

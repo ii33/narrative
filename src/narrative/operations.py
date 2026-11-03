@@ -11,13 +11,19 @@ from pathlib import Path
 from .graph_operations import GraphOperations
 from .project_catalog import (
     create_graph_project,
+    duplicate_graph_project,
+    inspect_graph_project,
     list_projects,
+    next_project_copy_path,
     open_graph_project,
 )
 
 
 class Operations:
     create_graph_project = staticmethod(create_graph_project)
+    duplicate_graph_project = staticmethod(duplicate_graph_project)
+    inspect_graph_project = staticmethod(inspect_graph_project)
+    next_project_copy_path = staticmethod(next_project_copy_path)
     open_graph_project = staticmethod(open_graph_project)
     list_projects = staticmethod(list_projects)
 

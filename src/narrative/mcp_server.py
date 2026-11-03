@@ -7,7 +7,7 @@ client's parser.
 
 Start it with ``--project`` and the tools need no project argument:
 
-    narrative-mcp --project data/graph-projects/example.sqlite3
+    narrative-mcp --project 作品.nproj
 """
 
 from __future__ import annotations
@@ -31,10 +31,12 @@ def _tool_list(default_project: str | None) -> list[dict]:
     if default_project:
         return tools
     for tool in tools:
+        if tool_api.TOOLS[tool["name"]].scope != "project":
+            continue
         schema = tool["inputSchema"]
         schema["properties"][PROJECT_ARG] = {
             "type": "string",
-            "description": "工程 .sqlite3 文件（服务端没有默认工程时必须给）",
+            "description": "工程 .nproj 入口文件（服务端没有默认工程时必须给）",
         }
         schema["required"] = [*schema.get("required", []), PROJECT_ARG]
     return tools
@@ -57,7 +59,9 @@ def handle(request: dict, *, default_project: str | None) -> dict | None:
     def fail(code: int, message: str) -> dict:
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
-    if request_id is None and method and method.startswith("notifications/"):
+    if not isinstance(params, dict):
+        return fail(-32602, "params 须为 JSON 对象")
+    if request_id is None and isinstance(method, str) and method.startswith("notifications/"):
         return None
     if method == "initialize":
         requested = params.get("protocolVersion") or DEFAULT_PROTOCOL
@@ -67,7 +71,9 @@ def handle(request: dict, *, default_project: str | None) -> dict | None:
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             "instructions": (
                 "叙事图工作台：读节点、场景、事件的状态与统计，也能补录、更正、失效、"
-                "修订节点、审核候选、跑提取。cut 是阅读位置（事件编号），省略为最新。"
+                "修订节点、自动提交提取；改编与资产使用独立数据和修订。"
+                "改编排序用sort_id，写入经Operations校验与审计；cut为提取阅读位置，"
+                "改编event_id/moment为改编时点，省略为最新。工程入口是.nproj。"
             ),
         })
     if method == "ping":
@@ -76,7 +82,10 @@ def handle(request: dict, *, default_project: str | None) -> dict | None:
         return ok({"tools": _tool_list(default_project)})
     if method == "tools/call":
         name = params.get("name")
-        arguments = dict(params.get("arguments") or {})
+        arguments = params.get("arguments", {})
+        if not isinstance(arguments, dict):
+            return fail(-32602, "arguments 须为 JSON 对象")
+        arguments = dict(arguments)
         if not isinstance(name, str):
             return fail(-32602, "tools/call 需要 name")
         project = arguments.pop(PROJECT_ARG, None) or default_project
@@ -119,7 +128,7 @@ def serve(*, default_project: str | None, stdin=None, stdout=None) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="叙事图 MCP 服务（stdio）")
     parser.add_argument(
-        "--project", help="默认工程 .sqlite3；给了之后工具不必再传 project"
+        "--project", help="默认工程 .nproj 入口；给了之后工具不必再传 project"
     )
     args = parser.parse_args(argv)
     project = str(Path(args.project).resolve()) if args.project else None

@@ -21,6 +21,7 @@ from typing import Any
 
 from .extraction_draft import RESULT_SCHEMA
 from .project_catalog import list_projects, open_graph_project
+from .screenplay_tools import register as _register_screenplay_tools
 
 
 class ToolError(ValueError):
@@ -110,6 +111,20 @@ def _properties(ops, node_id: str, cut: str | None) -> list[dict]:
 def _list_projects(_ops, params: dict) -> dict:
     directory = params.get("dir") or "data/graph-projects"
     return {"directory": str(Path(directory).resolve()), "projects": list_projects(directory)}
+
+
+def _duplicate_project(_ops, params: dict) -> dict:
+    from .operations import Operations
+    _need(params, "source", "destination")
+    for key in ("source", "destination"):
+        _validate_adaptation_argument(params[key], {"type": "string"}, key)
+    try:
+        copied = Operations.duplicate_graph_project(params["source"], params["destination"])
+    except (ValueError, OSError) as exc:
+        raise ToolError(str(exc)) from exc
+    info = copied.graph_project_info()
+    return {"status": "copied", "path": str(Path(params["destination"]).resolve()),
+            "title": info["title"], "revision": info["revision"]}
 
 
 def _project_info(ops, _params: dict) -> dict:
@@ -216,57 +231,45 @@ def _list_moments(ops, _params: dict) -> dict:
     return moment_tree(ops.graph_snapshot())
 
 
-def _material(ops):
-    from .node_material import MaterialStore
-
-    return MaterialStore(ops.path)
-
-
 def _material_view(ops, params: dict) -> dict:
     _need(params, "node_id")
-    return _material(ops).view(str(params["node_id"]), cut=_cut(params) or "", snapshot=ops.graph_snapshot())
+    return ops.material_view(str(params["node_id"]), cut=_cut(params) or "")
 
 
 def _add_material_card(ops, params: dict) -> dict:
     _need(params, "node_id", "title")
-    store = _material(ops)
-    card = store.add_card(
+    card = ops.material_add_card(
         str(params["node_id"]),
         str(params["title"]),
         str(params.get("detail") or ""),
         str(params.get("valid_from") or ""),
         str(params.get("valid_to") or ""),
-        snapshot=ops.graph_snapshot(),
     )
     return {"status": "accepted", "card": card} | _material_view(ops, params)
 
 
 def _update_material_card(ops, params: dict) -> dict:
     _need(params, "node_id", "card_id")
-    store = _material(ops)
-    card = store.update_card(
+    card = ops.material_update_card(
         str(params["node_id"]),
         str(params["card_id"]),
         title=None if params.get("title") is None else str(params["title"]),
         detail=None if params.get("detail") is None else str(params["detail"]),
         valid_from=None if params.get("valid_from") is None else str(params["valid_from"]),
         valid_to=None if params.get("valid_to") is None else str(params["valid_to"]),
-        snapshot=ops.graph_snapshot(),
     )
     return {"status": "accepted", "card": card} | _material_view(ops, params)
 
 
 def _delete_material_card(ops, params: dict) -> dict:
     _need(params, "node_id", "card_id")
-    store = _material(ops)
-    result = store.remove_card(str(params["node_id"]), str(params["card_id"]))
+    result = ops.material_remove_card(str(params["node_id"]), str(params["card_id"]))
     return {"status": "accepted", **result} | _material_view(ops, params)
 
 
 def _add_material_image(ops, params: dict) -> dict:
     _need(params, "node_id", "card_id", "path")
-    store = _material(ops)
-    record = store.add_image(
+    record = ops.material_add_image(
         str(params["node_id"]),
         str(params["card_id"]),
         Path(str(params["path"])),
@@ -277,8 +280,7 @@ def _add_material_image(ops, params: dict) -> dict:
 
 def _delete_material_image(ops, params: dict) -> dict:
     _need(params, "node_id", "card_id", "image_id")
-    store = _material(ops)
-    result = store.remove_image(
+    result = ops.material_remove_image(
         str(params["node_id"]), str(params["card_id"]), str(params["image_id"])
     )
     return {"status": "accepted", **result} | _material_view(ops, params)
@@ -799,6 +801,13 @@ _register(Tool(
     scope="workspace",
 ))
 _register(Tool(
+    "duplicate_project",
+    "创建完整、独立的工程副本；目标为新的.nproj入口，不覆盖已有工程，源工程不变",
+    {"source": {"type": "string", "required": True, "description": "源.nproj入口路径"},
+     "destination": {"type": "string", "required": True, "description": "新副本.nproj入口路径"}},
+    _duplicate_project, writes=True, scope="workspace",
+))
+_register(Tool(
     "check_project",
     "只读静态检查当前有效图与属性，返回固定修订号和可定位诊断；不创建候选或写入",
     {},
@@ -1267,6 +1276,115 @@ def _read_project_state(ops, _params: dict) -> dict:
     return state | {"graph": graph}
 
 
+# Adaptation and visual assets share the same public Operations boundary.
+def _validate_adaptation_argument(value, spec, path):
+    """Enforce the published transport schema before invoking Operations."""
+    kind = spec.get("type")
+    types = kind if isinstance(kind, list) else [kind]
+    valid = {"string": isinstance(value, str), "integer": type(value) is int,
+             "boolean": type(value) is bool, "object": isinstance(value, dict),
+             "array": isinstance(value, list), "null": value is None,
+             "number": type(value) in (int, float)}
+    if kind and not any(valid.get(item, False) for item in types):
+        raise ToolError(f"{path} 类型须为 {kind}")
+    if "enum" in spec and value not in spec["enum"]:
+        raise ToolError(f"{path} 须为 {spec['enum']}")
+    if isinstance(value, dict) and "properties" in spec:
+        fields = spec["properties"]
+        if spec.get("additionalProperties") is False and set(value) - set(fields):
+            raise ToolError(f"{path} 有不认识的字段：{sorted(set(value) - set(fields))}")
+        for key, child in value.items():
+            if key in fields:
+                _validate_adaptation_argument(child, fields[key], f"{path}.{key}")
+    if isinstance(value, list) and "items" in spec:
+        for index, child in enumerate(value):
+            _validate_adaptation_argument(child, spec["items"], f"{path}[{index}]")
+
+
+def _adaptation_tool(name, summary, params, *, writes=False):
+    def invoke(ops, args):
+        for key, value in args.items():
+            _validate_adaptation_argument(value, params[key], key)
+        try:
+            result = getattr(ops, name)(**args)
+            return {"moments": result} if name in {"asset_moments", "import_adaptation_candidates"} else result
+        except (ValueError, OSError) as exc:
+            raise ToolError(str(exc)) from exc
+    _register(Tool(name, summary, params, invoke, writes=writes))
+
+
+_ADAPT_REV = {"expected_revision": {"type": "integer", "description": "改编独立修订号，来自adaptation_snapshot；不是提取revision"},
+              "reason": {"type": "string", "description": "操作原因，记入审计"}}
+_ADAPT_NODE = {"node_id": {"type": "string", "required": True}}
+_ADAPT_MOVE = {"after_id": {"type": ["string", "null"], "description": "改编节点ID；省略或null放到开头（复制默认紧随原节点）"},
+               "parent_id": {"type": ["string", "null"], "description": "新父节点ID；省略或null保留原归属"}}
+_ASSET_DOMAIN = {"type": "string", "enum": ["adaptation", "extraction"], "description": "默认adaptation；两数据域不互相写入"}
+_ASSET_IMAGE = {"type": "object", "properties": {"id": {"type": "string"}, "path": {"type": "string"},
+                "file": {"type": "string"}, "caption": {"type": "string"}}, "additionalProperties": False}
+_ASSET_PAYLOAD = {"type": "object", "required": True, "description": "无id新建，有id编辑；图片传本地path或已有image id，省略图片字段保留原图",
+    "properties": {"id": {"type": "string"}, "category": {"type": "string", "enum": ["appearance", "item", "location", "material"]},
+                   "node_id": {"type": "string"}, "title": {"type": "string"}, "detail": {"type": "string"},
+                   "domain": _ASSET_DOMAIN, "valid_from": {"type": "string"}, "valid_to": {"type": "string"},
+                   "prompt": {"type": "string"}, "images": {"type": "array", "items": _ASSET_IMAGE},
+                   "reference_images": {"type": "array", "items": _ASSET_IMAGE}, "revision": {"type": "integer"}}, "additionalProperties": False}
+_adaptation_tool("adaptation_snapshot", "读取独立改编节点、排序、属性及同步冲突", {})
+_adaptation_tool("check_adaptation", "静态检查改编结构、引用和属性有效区间", {})
+_adaptation_tool("import_adaptation_candidates", "列出可多选导入的提取时间点及层级；不写入", {})
+_adaptation_tool("import_adaptation", "从提取导入指定多个时间点、必要结构与相关有效状态，保留本地改编", _ADAPT_REV | {
+    "moment_ids": {"type": "array", "items": {"type": "string"}, "required": True,
+                   "description": "从import_adaptation_candidates选择的非空时间点ID列表；容器包含下属，依赖与区间边界由程序补齐"}}, writes=True)
+_adaptation_tool("adaptation_browse_view", "读取与数据浏览同结构的改编视图，排序与状态按改编sort_id计算", {
+    "granularity": {"type": "string", "enum": ["scene", "event", "action"]},
+    "cut_id": {"type": ["string", "null"]}, "node_type": {"type": "string"}, "query": {"type": "string"},
+    "related_only": {"type": "boolean"}, "time_filter": {"type": "boolean"}, "include_suppressed": {"type": "boolean"}})
+for _view_name in ("adaptation_node_properties", "adaptation_node_editor", "adaptation_node_detail", "adaptation_node_assets"):
+    _adaptation_tool(_view_name, "读取改编节点详情、时点状态或关联资产；不读取提取资料卡", _ADAPT_NODE | {
+        "cut": {"type": ["string", "null"], "description": "改编阅读切点ID，省略为当前"}})
+_adaptation_tool("sync_adaptation", "增量同步提取到改编；保留改编编辑，记录冲突", _ADAPT_REV, writes=True)
+_adaptation_tool("edit_adaptation_node", "新增或编辑改编节点；使用独立sort_id排序，不修改提取", _ADAPT_REV | _ADAPT_MOVE | {
+    "node_id": {"type": ["string", "null"], "description": "省略或null为新增；已有节点传改编ID"}, "changes": {"type": "object", "required": True, "description": "节点当前字段，如name/node_type/events/participants；point_id指定出场时点；新物品initial_holder须明确节点ID、无或未知；id/sort_id由程序分配"}}, writes=True)
+for _operation in ("copy_adaptation_node", "move_adaptation_node"):
+    _adaptation_tool(_operation, "复制或移动独立改编节点，重排改编顺序", _ADAPT_REV | _ADAPT_NODE | _ADAPT_MOVE, writes=True)
+_adaptation_tool("delete_adaptation_node", "显式物理删除改编节点及包含子树并清理引用；保留剧本正文，返回失效时间段诊断", _ADAPT_NODE | {
+    "expected_revision": {"type": "integer", "required": True}, "reason": {"type": "string", "required": True}}, writes=True)
+_adaptation_tool("suppress_adaptation_node", "屏蔽或恢复改编节点及整个包含子树，不影响提取", _ADAPT_REV | _ADAPT_NODE | {
+    "suppressed": {"type": "boolean"}}, writes=True)
+_adaptation_tool("set_adaptation_property", "在改编时间点新增、更改或失效属性", _ADAPT_REV | _ADAPT_NODE | {
+    "property_id": {"type": "string", "required": True}, "value": {},
+    "event_id": {"type": ["string", "null"], "description": "改编生效时点；失效操作指定结束时点"}, "record_id": {"type": ["string", "null"], "description": "更改或失效的已有属性取值ID；省略新增"},
+    "expire": {"type": "boolean"}}, writes=True)
+_adaptation_tool("list_assets", "按类别、角色与改编时间点读取视觉设定卡", {
+    "category": {"type": "string", "enum": ["appearance", "item", "location", "material"], "required": True},
+    "moment": {"type": "string"}, "node_id": {"type": "string"}, "domain": _ASSET_DOMAIN})
+_adaptation_tool("get_asset", "读取视觉设定、图片、参考图和提示词", {
+    "asset_id": {"type": "string", "required": True}})
+_adaptation_tool("save_asset", "新增或编辑独立视觉资产；参考图复制保存，原件保留", {
+    "payload": _ASSET_PAYLOAD, "expected_revision": {"type": "integer", "description": "资产独立修订号，来自list_assets/get_asset"}}, writes=True)
+_adaptation_tool("delete_asset", "删除独立视觉设定卡，保留原始附件", {
+    "asset_id": {"type": "string", "required": True}, "expected_revision": {"type": "integer"}}, writes=True)
+_adaptation_tool("asset_moments", "读取按改编顺序排列的资产时间点", {"domain": _ASSET_DOMAIN})
+
+
+def _extraction_settings(ops, params, *, write=False):
+    settings = ops.load_project_settings()
+    if write:
+        granularity = params["granularity"]
+        if not isinstance(granularity, str) or granularity not in {"standard", "fine"}:
+            raise ToolError("提取粒度须为standard或fine")
+        settings = ops.save_project_settings(settings | {"extraction_granularity": granularity})
+    return {"extraction_granularity": settings["extraction_granularity"]}
+
+
+_register(Tool("get_extraction_settings", "读取工程提取粒度，默认fine精细；不返回供应商密钥", {},
+               lambda ops, args: _extraction_settings(ops, args)))
+_register(Tool("set_extraction_granularity", "设置工程提取粒度，保留当前模型配置和已提取数据", {
+    "granularity": {"type": "string", "enum": ["standard", "fine"], "required": True}},
+    lambda ops, args: _extraction_settings(ops, args, write=True), writes=True))
+
+
+_register_screenplay_tools(Tool, _register, _validate_adaptation_argument)
+
+
 def describe() -> list[dict]:
     """The tool list in the shape MCP asks for."""
     return [
@@ -1280,6 +1398,8 @@ def call(name: str, params: dict | None = None, *, project: str | Path | None = 
     tool = TOOLS.get(name)
     if tool is None:
         raise ToolError(f"没有这个工具：{name}")
+    if params is not None and not isinstance(params, dict):
+        raise ToolError("参数须为 JSON 对象")
     args = dict(params or {})
     unknown = set(args) - set(tool.params)
     if unknown:
@@ -1287,7 +1407,7 @@ def call(name: str, params: dict | None = None, *, project: str | Path | None = 
     for key, spec in tool.params.items():
         if spec.get("required") and args.get(key) in (None, ""):
             raise ToolError(f"缺少参数：{key}")
-    if name == "list_projects":
+    if tool.scope == "workspace":
         return tool.handler(None, args)
     if project in (None, ""):
         raise ToolError("请提供 --project（.nproj 工程入口文件）")
@@ -1297,7 +1417,23 @@ def call(name: str, params: dict | None = None, *, project: str | Path | None = 
     # Public tools accept the private entry file; database paths remain internal.
     ops = open_graph_project(path)
     try:
-        return tool.handler(ops, args)
+        from .tool_fingerprint_refs import decode_tool_parameters, encode_tool_result
+        try:
+            resolved = decode_tool_parameters(ops, args)
+            from .tool_execution_context import current_tool_execution_metadata
+            for key, value in current_tool_execution_metadata().items():
+                if key in tool.params:
+                    resolved[key] = value
+            result = tool.handler(ops, resolved)
+            from .tool_execution_context import is_scene_table_generation
+            if is_scene_table_generation() and isinstance(result, dict) and "units" in result:
+                # Write acknowledgements must not smuggle old scene prose back
+                # into a generation task after its read tools have been scoped.
+                segment_id = resolved.get("segment_id") or result.get("id")
+                result = ops.read_scene_table_context(segment_id) | {"status": result.get("status", "accepted")}
+            return encode_tool_result(ops, result)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
     finally:
         close = getattr(ops, "close", None)
         if callable(close):

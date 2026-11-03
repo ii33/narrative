@@ -22,6 +22,10 @@ from .errors import OperationError
 
 # name → (tool, [(flag, param, type, help)])
 ALIASES: dict[str, tuple[str, list[tuple[str, str, type | str, str]]]] = {
+    "project-copy": ("duplicate_project", [
+        ("source", "source", str, "源工程.nproj入口"),
+        ("destination", "destination", str, "副本.nproj入口（不能覆盖已有文件）"),
+    ]),
     "projects": ("list_projects", [
         ("--dir", "dir", str, "工程目录，默认 data/graph-projects"),
     ]),
@@ -170,6 +174,115 @@ ALIASES: dict[str, tuple[str, list[tuple[str, str, type | str, str]]]] = {
     "categories": ("property_categories", []),
 }
 
+_REVISION: list[tuple[str, str, type | str, str]] = [("--expected-revision", "expected_revision", int, "当前修订号")]
+_REASON: list[tuple[str, str, type | str, str]] = [("--reason", "reason", str, "操作原因")]
+_PLACEMENT: list[tuple[str, str, type | str, str]] = [("--after", "after_id", str, "放在此节点后；省略或空字符串使用默认位置（移动为开头，复制在原节点后）"),
+              ("--parent", "parent_id", str, "归属节点；省略或空字符串保留原归属")]
+_NODE: list[tuple[str, str, type | str, str]] = [("node_id", "node_id", str, "改编节点编号")]
+ALIASES.update({
+    "adaptation-import-candidates": ("import_adaptation_candidates", []),
+    "adaptation-import": ("import_adaptation", [
+        ("--moment", "moment_ids", "list", "选择提取时间点ID，可重复；含必要结构及相关状态"),
+    ] + _REVISION + _REASON),
+    "adaptation-browse": ("adaptation_browse_view", [
+        ("--granularity", "granularity", str, "scene / event / action"),
+        ("--cut", "cut_id", str, "改编阅读时点"), ("--type", "node_type", str, "节点类型"),
+        ("--query", "query", str, "名称检索"), ("--related-only", "related_only", "bool", "只看时点相关节点"),
+        ("--time-filter", "time_filter", "bool", "按改编时点过滤"),
+        ("--include-suppressed", "include_suppressed", "bool", "包含已屏蔽节点以便管理"),
+    ]),
+    "adaptation-properties": ("adaptation_node_properties", _NODE + [("--cut", "cut", str, "改编时点")]),
+    "adaptation-editor": ("adaptation_node_editor", _NODE + [("--cut", "cut", str, "改编时点")]),
+    "adaptation-detail": ("adaptation_node_detail", _NODE + [("--cut", "cut", str, "改编时点")]),
+    "adaptation-assets": ("adaptation_node_assets", _NODE + [("--cut", "cut", str, "改编时点")]),
+    "extraction-settings": ("get_extraction_settings", []),
+    "extraction-granularity": ("set_extraction_granularity", [
+        ("granularity", "granularity", str, "standard / fine（默认精细）"),
+    ]),
+    "adaptation": ("adaptation_snapshot", []),
+    "adaptation-check": ("check_adaptation", []),
+    "adaptation-delete": ("delete_adaptation_node", _NODE + _REVISION + _REASON),
+    "adaptation-sync": ("sync_adaptation", _REVISION + _REASON),
+    "adaptation-edit": ("edit_adaptation_node", [
+        ("--node", "node_id", str, "已有改编节点；省略则新增"),
+        ("--changes", "changes", "json", "节点字段 JSON 对象；也可用 --changes-file"),
+    ] + _PLACEMENT + _REVISION + _REASON),
+    "adaptation-copy": ("copy_adaptation_node", _NODE + _PLACEMENT + _REVISION + _REASON),
+    "adaptation-move": ("move_adaptation_node", _NODE + _PLACEMENT + _REVISION + _REASON),
+    "adaptation-suppress": ("suppress_adaptation_node", _NODE + [
+        ("--suppressed", "suppressed", "bool", "true 屏蔽节点及子树，false 恢复"),
+    ] + _REVISION + _REASON),
+    "adaptation-property": ("set_adaptation_property", _NODE + [
+        ("property_id", "property_id", str, "属性名称"),
+        ("--value", "value", "json", "属性值 JSON；字符串需加 JSON 引号；也可 --value-file"),
+        ("--event", "event_id", str, "改编生效或失效时点"),
+        ("--record", "record_id", str, "更改或失效的属性记录"),
+        ("--expire", "expire", "bool", "true 失效，false 新增或更改"),
+    ] + _REVISION + _REASON),
+    "assets": ("list_assets", [
+        ("category", "category", str, "appearance / item / location / material"),
+        ("--moment", "moment", str, "改编时点；省略查看当前有效设定"),
+        ("--node", "node_id", str, "角色、物品或地点编号"),
+        ("--domain", "domain", str, "adaptation / extraction"),
+    ]),
+    "asset": ("get_asset", [("asset_id", "asset_id", str, "资产编号")]),
+    "asset-save": ("save_asset", [
+        ("--payload", "payload", "json", "资产设定 JSON 对象；也可 --payload-file"),
+    ] + _REVISION),
+    "asset-delete": ("delete_asset", [("asset_id", "asset_id", str, "资产编号")] + _REVISION),
+    "asset-moments": ("asset_moments", [("--domain", "domain", str, "adaptation / extraction")]),
+})
+
+
+# All screenplay flags derive from the shared tool schema, including JSON/file
+# inputs, so CLI, MCP and the resident model cannot gain divergent parameters.
+_SCREENPLAY_ALIASES = {
+    "screenplay-storage": "inspect_screenplay_storage", "screenplay-storage-reset": "reset_screenplay_storage",
+    "screenplay-timeline-candidates": "import_screenplay_timeline_candidates",
+    "screenplay-timeline": "read_screenplay_timeline", "screenplay-timeline-import": "import_screenplay_timeline",
+    "screenplay-timeline-append": "append_screenplay_timeline",
+    "screenplay-timeline-edit": "edit_screenplay_timeline_node",
+    "screenplay-timeline-copy": "copy_screenplay_timeline_node", "screenplay-timeline-delete": "delete_screenplay_timeline_node", "screenplay-timeline-move": "move_screenplay_timeline_node",
+    "screenplay-timeline-suppress": "suppress_screenplay_timeline_node", "screenplay-timeline-property": "set_screenplay_timeline_property",
+    "span-preview": "preview_adaptation_span", "span-create": "create_adaptation_span",
+    "span-update": "update_adaptation_span", "span": "read_adaptation_span",
+    "screenplay-create": "create_screenplay", "screenplay": "read_screenplay",
+    "screenplay-structure": "apply_screenplay_structure", "script-segment-create": "create_script_segment",
+    "script-segment-update": "update_script_segment", "script-segment": "read_script_segment",
+    "scene-table-context": "read_scene_table_context", "scene-table-submit": "submit_scene_table",
+    "scene-table-edit": "apply_scene_table_changes", "scene-table-adopt": "adopt_scene_table",
+    "script-unit-context": "read_script_unit_context", "script-unit-submit": "submit_script_unit",
+    "script-block-edit": "apply_script_block_changes", "writing-basis-current": "mark_writing_basis_current",
+    "script-writing-targets": "prepare_script_writing_targets", "script-writing-targets-check": "read_script_writing_targets",
+    "script-writing-task": "prepare_script_writing_task", "screenplay-check": "check_screenplay",
+    "screenplay-export": "export_screenplay",
+}
+for _alias, _tool in _SCREENPLAY_ALIASES.items():
+    _spec: list[tuple[str, str, type | str, str]] = []
+    for _key, _field in tool_api.TOOLS[_tool].params.items():
+        _kind = _field.get("type")
+        if isinstance(_kind, list):
+            _kind = next((k for k in _kind if k != "null"), None)
+        _parser_types: dict[str, type | str] = {"string": str, "integer": int, "number": float, "boolean": "bool"}
+        _parser_kind = _parser_types.get(str(_kind), "json")
+        _spec.append(("--" + _key.replace("_", "-"), _key, _parser_kind, _field.get("description", _key)))
+    ALIASES[_alias] = (_tool, _spec)
+
+
+def _boolean(text: str) -> bool:
+    if text.lower() in {"true", "1", "yes"}:
+        return True
+    if text.lower() in {"false", "0", "no"}:
+        return False
+    raise argparse.ArgumentTypeError("须为 true 或 false")
+
+
+def _json_value(text: str, label: str):
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise OperationError(f"{label} 不是合法 JSON：{exc.msg}") from None
+
 
 def add_commands(subparsers) -> None:
     tool = subparsers.add_parser("tool", help="工具面：列出、直接调用（与 MCP 同一套）")
@@ -182,6 +295,12 @@ def add_commands(subparsers) -> None:
     for name, (tool_name, spec) in ALIASES.items():
         parser = subparsers.add_parser(name, help=tool_api.TOOLS[tool_name].summary)
         for flag, param, kind, help_text in spec:
+            if kind == "json":
+                group = parser.add_mutually_exclusive_group()
+                group.add_argument(flag, dest=param, help=help_text)
+                group.add_argument(flag + "-file", dest=param + "_json_file", type=Path,
+                                   help="UTF-8 JSON 文件")
+                continue
             kwargs: dict = {"help": help_text}
             if kind == "flag":
                 kwargs["action"] = "store_true"
@@ -189,6 +308,8 @@ def add_commands(subparsers) -> None:
                 kwargs["action"] = "append"
             elif kind == "file":
                 kwargs["type"] = str
+            elif kind == "bool":
+                kwargs.update(type=_boolean, nargs="?", const=True)
             else:
                 assert not isinstance(kind, str), kind
                 kwargs["type"] = kind
@@ -204,7 +325,21 @@ def _bind(args, spec) -> dict:
     params: dict = {}
     for _flag, param, kind, _help in spec:
         value = getattr(args, param, None)
-        if value in (None, [], False):
+        if kind == "json":
+            path = getattr(args, param + "_json_file", None)
+            if path is not None:
+                try:
+                    value = path.read_text(encoding="utf-8-sig")
+                except (OSError, UnicodeError) as exc:
+                    raise OperationError(f"无法读取 {param} JSON 文件：{exc}") from None
+            if value is not None:
+                params[param] = _json_value(value, param)
+            continue
+        if value is None or value == [] or (kind == "flag" and value is False):
+            continue
+        if param in {"after_id", "parent_id"} and value == "":
+            # These Operations use None as their default placement. Omit the
+            # transport field so the published string schema stays accurate.
             continue
         if kind == "list" and not isinstance(value, list):
             value = [value]
@@ -227,7 +362,7 @@ def run(args) -> int:
             return 0
         if not args.name:
             raise OperationError("tool call 需要工具名")
-        params = json.loads(args.params) if args.params else {}
+        params = _json_value(args.params, "参数") if args.params else {}
         if not isinstance(params, dict):
             raise OperationError("参数须为 JSON 对象")
         payload = tool_api.call(args.name, params, project=args.project)

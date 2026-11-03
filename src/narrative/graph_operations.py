@@ -10,6 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .adaptation_operations import AdaptationOperationsMixin
+from .adaptation_views import AdaptationViewsMixin
+from .asset_operations import AssetOperationsMixin
 from .graph_facades import (
     GraphProfileFacade,
     GraphProjectFacade,
@@ -23,9 +26,13 @@ from .graph_service import GraphService
 from .graph_store import GraphStore
 from .graph_timeline_ops import TimelineService
 from .graphrag_ops import GraphRagService
+from .node_material import MaterialOperationsMixin
 from .order_ids import order_key
 from .property_store import PropertyStore
 from .provider_store import ProviderStore
+from .screenplay_operations import ScreenplayOperationsMixin
+from .screenplay_timeline import ScreenplayTimelineOperationsMixin
+from .screenplay_writing import WritingOperationsMixin
 
 
 @dataclass(frozen=True)
@@ -33,7 +40,11 @@ class _ProjectPath:
     path: str
 
 
-class GraphOperations:
+class GraphOperations(AdaptationOperationsMixin, AssetOperationsMixin, AdaptationViewsMixin,
+                      ScreenplayOperationsMixin, ScreenplayTimelineOperationsMixin, WritingOperationsMixin,
+                      MaterialOperationsMixin):
+    _copy_report: dict
+
     def __init__(self, path: str | Path, *, create: bool = False):
         self._store = GraphStore(path, create=create)
         self._service = GraphService(self._store)

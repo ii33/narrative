@@ -17,7 +17,10 @@ def test_removed_workbenches_and_business_entrypoints_are_absent(tmp_path, monke
         assert not hasattr(ops, name)
     for name in ('startSliceExtraction', 'reviewSliceExtraction', 'commitSliceExtraction'):
         assert not hasattr(NativeBridge, name)
-    assert {name for name in tool_api.TOOLS if 'extract' in name} == {'preview_extraction', 'submit_extraction'}
+    assert {name for name in tool_api.TOOLS if 'extract' in name} == {
+        'preview_extraction', 'submit_extraction',
+        'get_extraction_settings', 'set_extraction_granularity',
+    }
     main = (qml / 'Main.qml').read_text(encoding='utf-8')
     assert 'ExtractPage' not in main and 'PropertyPage' not in main and 'ReviewPage' not in main
     assert all(name in tool_api.TOOLS for name in ('read_source', 'node_properties', 'submit_extraction'))

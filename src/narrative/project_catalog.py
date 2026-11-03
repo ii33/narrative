@@ -151,3 +151,39 @@ def open_graph_project(path: str | Path) -> GraphOperations:
     if ops.graph_project_info()["project_id"] != description["project"]["id"]:
         raise ValueError("工程入口标识与数据库不一致，拒绝打开")
     return ops
+
+
+def inspect_graph_project(path: str | Path) -> dict:
+    """Describe one explicit entry through the same read-only catalog boundary."""
+    from .project_package import layout, read_entry
+    entry = Path(path).resolve()
+    base = {"name": entry.stem, "path": str(entry), "db": "", "package": True,
+            "title": entry.stem, "version": None, "revision": None, "last_opened": None, "modified_at": 0.0}
+    if not entry.is_file():
+        return base | {"status": "missing"}
+    try:
+        read_entry(entry)
+        found = layout(entry)
+        return _describe(found.db, name=entry.stem, path=entry, package=True)
+    except (ValueError, OSError):
+        return base | {"status": "unreadable"}
+
+
+def next_project_copy_path(source: str | Path) -> Path:
+    """Suggest a free entry and all its derived directories without creating it."""
+    from .project_package import layout, read_entry
+    entry = Path(source).resolve()
+    read_entry(entry)
+    number = 1
+    while True:
+        suffix = "-副本" if number == 1 else f"-副本-{number}"
+        candidate = entry.with_name(entry.stem + suffix + ".nproj")
+        target = layout(candidate)
+        if not any(path.exists() for path in (candidate, target.root, target.extraction, target.chats)):
+            return candidate
+        number += 1
+
+
+def duplicate_graph_project(source: str | Path, destination: str | Path) -> GraphOperations:
+    from .project_copy import duplicate_graph_project as duplicate
+    return duplicate(source, destination)

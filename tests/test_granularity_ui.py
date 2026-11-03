@@ -39,7 +39,7 @@ def test_actual_settings_save_persists_project_model_and_granularity_without_mod
     with transcript_shell(tmp_path, monkeypatch) as ui:
         ops = Operations.open(ui.bridge._project_path)
         original = ops.load_project_settings()
-        assert original["extraction_granularity"] == "standard"
+        assert original["extraction_granularity"] == "fine"
         other = Operations.create_graph_project(tmp_path / "other-settings.nproj")
         other_before = other.load_project_settings()
         ui.window.setProperty("assistantOpen", False)

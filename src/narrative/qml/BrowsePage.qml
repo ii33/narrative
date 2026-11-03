@@ -7,8 +7,13 @@ import QtQuick.Window
 // 数据浏览：左侧分类，中间节点列表（按阅读顺序排，编号按类型各成一套），右侧详情 + 属性。
 Item {
     id: page
-    objectName: "browsePage"
+    objectName: adaptationMode ? "adaptationBrowsePage" : "browsePage"
+    property bool adaptationMode: false
+    property bool showSuppressed: false
+    property var allAdaptationNodes: []
     property var app
+    readonly property var io: adaptationMode ? adaptationAdapter : bridge
+    AdaptationAdapter { id: adaptationAdapter; host: page }
     readonly property var t: app.theme
 
     property var nodes: []
@@ -40,6 +45,88 @@ Item {
     property var detail: ({})
     property var counts: ({})
     property int revision: 0
+    property var importCandidates: []
+    property var importSelected: []
+    property var importCollapsed: ({})
+    // Build each index once per input change; delegates never scan the full list.
+    readonly property var importById: {
+        var index = Object.create(null)
+        for (var i = 0; i < importCandidates.length; ++i)
+            index[importCandidates[i].id] = importCandidates[i]
+        return index
+    }
+    readonly property var importSelectedIds: {
+        var index = Object.create(null)
+        for (var i = 0; i < importSelected.length; ++i) index[importSelected[i]] = true
+        return index
+    }
+    readonly property var importPartialIds: {
+        var index = Object.create(null)
+        for (var i = 0; i < importSelected.length; ++i) {
+            var row = importById[importSelected[i]]
+            var parent = row ? row.parent_id : null
+            for (var guard = 0; parent && guard < importCandidates.length; ++guard) {
+                index[parent] = true
+                var next = importById[parent]
+                parent = next ? next.parent_id : null
+            }
+        }
+        return index
+    }
+    function importAncestorSelected(row) {
+        var parent = row.parent_id
+        for (var guard = 0; parent && guard < importCandidates.length; ++guard) {
+            if (importSelectedIds[parent]) return true
+            var next = importById[parent]
+            parent = next ? next.parent_id : null
+        }
+        return false
+    }
+    function importDescendant(row, ancestorId) {
+        var parent = row.parent_id
+        for (var guard = 0; parent && guard < importCandidates.length; ++guard) {
+            if (parent === ancestorId) return true
+            var next = importById[parent]
+            parent = next ? next.parent_id : null
+        }
+        return false
+    }
+    function importHasChildren(row) {
+        return (row.children || []).length > 0
+    }
+    function importCheckState(row) {
+        if (importSelectedIds[row.id] || importAncestorSelected(row)) return Qt.Checked
+        return importPartialIds[row.id] ? Qt.PartiallyChecked : Qt.Unchecked
+    }
+    function toggleImport(row) {
+        if (importAncestorSelected(row)) return
+        if (importSelectedIds[row.id])
+            importSelected = importSelected.filter(function(id) { return id !== row.id })
+        else {
+            var selected = importSelected.filter(function(id) {
+                var item = importById[id]
+                return !item || !importDescendant(item, row.id)
+            })
+            selected.push(row.id)
+            importSelected = selected
+        }
+    }
+    readonly property var visibleImportCandidates: importCandidates.filter(function(row) {
+        var parent = row.parent_id
+        for (var guard = 0; parent && guard < importCandidates.length; ++guard) {
+            if (importCollapsed[parent]) return false
+            var next = importById[parent]
+            parent = next ? next.parent_id : null
+        }
+        return true
+    })
+    readonly property int includedImportCount: importCandidates.filter(function(row) {
+        return importSelectedIds[row.id] || importAncestorSelected(row)
+    }).length
+    property string adaptationNotice: ""
+    function moveTimePoint(nodeId, afterId) {
+        bridge.changeAdaptation("move", {node_id: nodeId, after_id: afterId || null, expected_revision: revision})
+    }
     property int total: 0
 
     readonly property var typeLabels: ({
@@ -131,14 +218,17 @@ Item {
 
     // 查询、过滤、计数、切点解析都在后端：界面只提交条件并渲染结果。
     function load() {
-        bridge.loadBrowse({
+        if (adaptationMode && !visible) return
+        var spec = {
             granularity: page.granularity,
             cut_id: page.cutId,
             node_type: page.selectedType,
             query: page.query,
             related_only: page.relatedOnly,
             time_filter: page.timeFilter
-        })
+        }
+        if (adaptationMode) spec.include_suppressed = showSuppressed
+        page.io.loadBrowse(spec)
     }
 
     function nameOf(id) {
@@ -156,6 +246,7 @@ Item {
         projectTotal = payload.project_total === undefined ? 0 : payload.project_total
         total = payload.total || 0
         nodes = payload.nodes || []
+        if (adaptationMode) allAdaptationNodes = payload.all_nodes || nodes
         var cut = payload.cut || null
         cutEventId = cut ? cut.event_id : ""
         cutName = cut ? cut.step_name : ""
@@ -175,6 +266,7 @@ Item {
                 labelId: node.label_id || node.id || "",
                 name: node.name || "未命名",
                 kindLabel: page.typeLabels[node.node_type] || node.node_type || "节点",
+                narrative: ["storyline", "big_event", "scene", "event", "action"].indexOf(node.node_type) >= 0,
                 note: node.identity_note || ""
             })
         }
@@ -198,9 +290,9 @@ Item {
         // Browse刷新会作废旧查询；在最终列表/切点确定后重取同一选择的整份详情。
         if (page.selectedId.length > 0) {
             page.appliedCut = page.cutEventId
-            bridge.nodeDetail(page.selectedId)
-            bridge.loadNodeProperties(page.selectedId)
-            bridge.loadMaterial(page.selectedId)
+            page.io.nodeDetail(page.selectedId)
+            page.io.loadNodeProperties(page.selectedId)
+            page.io.loadMaterial(page.selectedId)
         }
 
     }
@@ -338,9 +430,9 @@ Item {
             moments: { levels: [], nodes: [] } })
         expandedCards = ({})
         materialNodeId = ""
-        bridge.nodeDetail(id)
-        bridge.loadNodeProperties(id)
-        bridge.loadMaterial(id)
+        page.io.nodeDetail(id)
+        page.io.loadNodeProperties(id)
+        page.io.loadMaterial(id)
     }
 
     // -- 分级时间点：一列一层，粗的在前 ---------------------------------
@@ -506,11 +598,11 @@ Item {
     function submitCard() {
         if (page.selectedId.length === 0) return
         if (page.cardEditId.length > 0)
-            bridge.updateMaterialCard(page.selectedId, page.cardEditId,
+            page.io.updateMaterialCard(page.selectedId, page.cardEditId,
                 cardTitle.text, cardDetail.text, page.cardFromId, page.cardToId,
                 page.draftImagesJson())
         else
-            bridge.addMaterialCard(page.selectedId, cardTitle.text,
+            page.io.addMaterialCard(page.selectedId, cardTitle.text,
                 cardDetail.text, page.cardFromId, page.cardToId,
                 page.draftImagesJson())
         page.cardEditId = ""
@@ -650,7 +742,7 @@ Item {
 
     function applyCategory(category) {
         if (pickerTargets.length === 0) return
-        bridge.categorizeProperties(JSON.stringify(pickerTargets), category)
+        page.io.categorizeProperties(JSON.stringify(pickerTargets), category)
     }
 
     // 属性归并：一行里出现多个名字时，选一个保留，其余按它读。
@@ -663,7 +755,7 @@ Item {
 
     function applyMerge(target) {
         for (var i = 0; i < mergeNames.length; ++i)
-            if (mergeNames[i] !== target) bridge.mergeProperties(mergeNames[i], target)
+            if (mergeNames[i] !== target) page.io.mergeProperties(mergeNames[i], target)
         mergeDialog.close()
     }
 
@@ -697,6 +789,7 @@ Item {
     function openAddProperty() {
         addPropertyField.text = ""
         addValueField.text = ""
+        addValueType.currentIndex = 0
         addQuoteField.text = ""
         addCategoryField.currentIndex = Math.max(0, page.vocabulary.indexOf("其他"))
         // 停在某个阅读位置时，补的就是「此刻」：默认披露在这个事件，而不是第一个事件。
@@ -706,14 +799,19 @@ Item {
     }
 
     function submitAddProperty() {
+        var inputValue = addValueField.text
+        if (adaptationMode && addValueType.currentIndex === 1) {
+            try { inputValue = JSON.parse(inputValue) }
+            catch (error) { app.toast("JSON 格式错误：" + error.message, true); return }
+        }
         var event = page.events[addEventField.currentIndex] || ({})
         var node = page.detail.node || ({})
         var sourceId = node.evidence ? node.evidence.source_id
             : (node.disclosure ? node.disclosure.source_id : "")
-        bridge.addPropertyRecord({
+        page.io.addPropertyRecord({
             node_id: page.selectedId,
             property_id: addPropertyField.text,
-            value: addValueField.text,
+            value: inputValue,
             event_id: event.id || "",
             category: addCategoryField.currentText,
             source: addSourceField.currentText,
@@ -736,7 +834,7 @@ Item {
         }
         var config = {}
         config[detail.node ? detail.node.node_type : "other"] = names
-        bridge.savePropertyCategories(JSON.stringify(config))
+        page.io.savePropertyCategories(JSON.stringify(config))
         categoryDialog.close()
     }
 
@@ -768,6 +866,7 @@ Item {
 
     // Loads only once a project is open; the launcher has no project yet.
     Component.onCompleted: if (app.mode === "workspace") page.load()
+    onVisibleChanged: if (visible && app.mode === "workspace") page.load()
 
     Connections {
         target: app
@@ -804,9 +903,32 @@ Item {
     Connections {
         target: bridge
         function onResultReady(kind, payload) {
+            if (page.adaptationMode && kind === "adaptation_import_candidates") {
+                page.importCandidates = payload.moments || payload.candidates || []
+                page.importSelected = []; page.importCollapsed = ({}); importDialog.open(); return
+            }
+            if (page.adaptationMode) {
+                if (kind === "adaptation_check") { page.adaptationNotice = payload.ok ? "改编静态检查通过" : JSON.stringify(payload.issues || []); return }
+                if (kind === "adaptation") {
+                    var currentNodes = payload.nodes || []
+                    var cutIds = [page.cutId, page.cutEventId].filter(function(id) { return !!id })
+                    var invalidCut = cutIds.some(function(id) {
+                        return !currentNodes.some(function(node) { return node.id === id && !node.suppressed && !node.retracted })
+                    })
+                    if (invalidCut) {
+                        page.cutId = ""; page.cutEventId = ""; page.cutName = ""
+                        page.timeFilter = false; page.appliedCut = ""
+                    }
+                    page.adaptationNotice = (payload.conflicts || []).length || (payload.sync_diagnostics || []).length
+                        ? JSON.stringify({conflicts: payload.conflicts || [], diagnostics: payload.sync_diagnostics || []}) : ""
+                    page.load(); if (nodeEditor.visible) nodeEditor.reload(); return
+                }
+                if (kind.indexOf("adaptation_") !== 0) return
+                kind = kind.slice(11)
+            } else if (kind.indexOf("adaptation") === 0) return
             if (payload.graph_reset_required === true) {
                 page.load()
-                if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
+                if (page.selectedId.length > 0) page.io.loadNodeProperties(page.selectedId)
             }
 
             if (kind === "browse") {
@@ -816,7 +938,7 @@ Item {
             } else if (kind === "property_correct") {
                 if ((payload.status === "accepted" || payload.status === "unchanged")) {
                     app.toast(page.editToast("更正已生效", payload), payload.outside_window === true)
-                    if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
+                    if (page.selectedId.length > 0) page.io.loadNodeProperties(page.selectedId)
                 } else {
                     var problem = (payload.diagnostics || [])[0] || ({})
                     app.toast("更正未通过预检：" + (problem.message || "未知原因"), true)
@@ -827,22 +949,22 @@ Item {
                 app.toast(removed > 0
                     ? "已失效 " + removed + " 条记录"
                     : "这些记录已经失效过，无需重复操作", removed === 0)
-                if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
+                if (page.selectedId.length > 0) page.io.loadNodeProperties(page.selectedId)
             } else if (kind === "material") {
                 page.applyMaterial(payload)
             } else if (kind === "node_properties") {
                 page.applyProperties(payload)
             } else if (kind === "property_categorize") {
                 app.toast("已移到「" + (payload.category || "") + "」", false)
-                if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
+                if (page.selectedId.length > 0) page.io.loadNodeProperties(page.selectedId)
             } else if (kind === "property_merge") {
                 app.toast("已合并到「" + (payload.target_id || "") + "」", false)
-                if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
+                if (page.selectedId.length > 0) page.io.loadNodeProperties(page.selectedId)
             } else if (kind === "property_add") {
                 if ((payload.status === "accepted" || payload.status === "unchanged")) {
                     addPropertyDialog.close()
                     app.toast(page.editToast("补录已生效", payload), payload.outside_window === true)
-                    if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
+                    if (page.selectedId.length > 0) page.io.loadNodeProperties(page.selectedId)
                 } else {
                     var first = (payload.diagnostics || [])[0] || ({})
                     app.toast("补录未通过预检：" + (first.message || "未知原因"), true)
@@ -852,7 +974,7 @@ Item {
                 page.vocabulary = (payload.vocabulary || ({}) )[nodeType] || page.vocabulary
                 if (payload.saved) {
                     app.toast("分类表已保存", false)
-                    if (page.selectedId.length > 0) bridge.loadNodeProperties(page.selectedId)
+                    if (page.selectedId.length > 0) page.io.loadNodeProperties(page.selectedId)
                 }
             } else if (kind === "node_edit") {
                 app.toast((payload.status === "accepted" || payload.status === "unchanged") ? "修改已保存" : "修改未通过预检", (payload.status !== "accepted" && payload.status !== "unchanged"))
@@ -864,6 +986,7 @@ Item {
         anchors.fill: parent
         anchors.margins: 20
         spacing: 12
+        Label { visible: page.adaptationMode && !!page.adaptationNotice; text: page.adaptationNotice; color: t.warn; wrapMode: Text.Wrap; Layout.fillWidth: true }
 
         RowLayout {
             Layout.fillWidth: true
@@ -884,6 +1007,10 @@ Item {
                 font.pixelSize: 12
             }
             Item { Layout.fillWidth: true }
+            Button { visible: page.adaptationMode; objectName: "adaptationImport"; text: "从提取导入"; onClicked: bridge.loadAdaptationImportCandidates() }
+            Button { visible: page.adaptationMode; objectName: "adaptationNewNode"; text: "新建节点"; onClicked: nodeEditor.openNew() }
+            CheckBox { visible: page.adaptationMode; text: "显示已屏蔽"; checked: page.showSuppressed; onToggled: { page.showSuppressed = checked; page.load() } }
+            Button { visible: page.adaptationMode; text: "静态检查"; onClicked: bridge.checkAdaptation() }
             Button {
                 text: "刷新"
                 flat: true
@@ -1085,10 +1212,14 @@ Item {
                     model: rows
                     spacing: 2
                     delegate: Rectangle {
+                        id: nodeRow
+                        objectName: "browseNodeRow"
                         required property string id
                         required property string labelId
                         required property string name
                         required property string kindLabel
+                        required property int index
+                        required property bool narrative
 
                         width: ListView.view.width
                         height: 42
@@ -1121,7 +1252,23 @@ Item {
                             }
                         }
                         MouseArea {
+                            id: nodeMouse
+                            preventStealing: page.adaptationMode
                             anchors.fill: parent
+                            property real pressedY: 0
+                            property bool moved: false
+                            onPressed: function(mouse) { pressedY = mouse.y; moved = false }
+                            onPositionChanged: function(mouse) { if (pressed && Math.abs(mouse.y - pressedY) > 8) moved = true }
+                            onReleased: function(mouse) {
+                                if (!page.adaptationMode || !nodeRow.narrative || !moved) return
+                                var targetY = nodeRow.y + mouse.y
+                                var targetIndex = nodeList.indexAt(nodeList.width / 2, targetY)
+                                if (targetIndex < 0 || targetIndex === index) return
+                                if (!rows.get(targetIndex).narrative) return
+                                var afterIndex = targetIndex < index ? targetIndex - 1 : targetIndex
+                                var target = afterIndex >= 0 ? rows.get(afterIndex).id : ""
+                                page.moveTimePoint(nodeRow.id, target)
+                            }
                             onClicked: page.select(id)
                         }
                     }
@@ -1133,13 +1280,13 @@ Item {
                         Label {
                             anchors.horizontalCenter: parent.horizontalCenter
                             text: page.isEmptyProject
-                                ? "这个工程还没有节点。可在协作者对话中提取原文，结果会自动入库。"
+                                ? (page.adaptationMode ? "改编尚无节点。请从提取导入，或新建节点。" : "这个工程还没有节点。可在协作者对话中提取原文，结果会自动入库。")
                                 : "该分类下没有节点。"
                             color: t.muted
                         }
                         Label {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            visible: page.isEmptyProject
+                            visible: page.isEmptyProject && !page.adaptationMode
                             objectName: "openConversationLink"
                             text: "打开协作者 →"
                             color: t.accent
@@ -1746,12 +1893,14 @@ Item {
                                     Item { Layout.fillWidth: true }
                                     Button {
                                         objectName: "materialAddCard"
+                                        visible: !page.adaptationMode
                                         text: "新增资料"
                                         flat: true
                                         font.pixelSize: 10
                                         enabled: page.selectedId.length > 0
                                         onClicked: page.openCardDialog(null)
                                     }
+                                    Button { visible: page.adaptationMode; text: "管理资产设定"; flat: true; onClicked: app.goTo("assets") }
                                 }
                                 Label {
                                     Layout.fillWidth: true
@@ -1808,6 +1957,7 @@ Item {
                                                 }
                                                 Label {
                                                     text: "编辑"
+                                                    visible: !page.adaptationMode
                                                     color: t.accent
                                                     font.pixelSize: 10
                                                     font.underline: true
@@ -1819,13 +1969,14 @@ Item {
                                                 }
                                                 Label {
                                                     text: "删除"
+                                                    visible: !page.adaptationMode
                                                     color: t.bad
                                                     font.pixelSize: 10
                                                     font.underline: true
                                                     MouseArea {
                                                         anchors.fill: parent
                                                         cursorShape: Qt.PointingHandCursor
-                                                        onClicked: bridge.removeMaterialCard(
+                                                        onClicked: page.io.removeMaterialCard(
                                                             page.selectedId, card.id)
                                                     }
                                                 }
@@ -1877,7 +2028,7 @@ Item {
                                                             placeholderText: "写一句说明"
                                                             text: modelData.caption || ""
                                                             onEditingFinished: if (text !== (modelData.caption || ""))
-                                                                bridge.updateMaterialImageCaption(
+                                                                page.io.updateMaterialImageCaption(
                                                                     page.selectedId, card.id,
                                                                     modelData.id, text)
                                                         }
@@ -1889,7 +2040,7 @@ Item {
                                                             MouseArea {
                                                                 anchors.fill: parent
                                                                 cursorShape: Qt.PointingHandCursor
-                                                                onClicked: bridge.removeMaterialImage(
+                                                                onClicked: page.io.removeMaterialImage(
                                                                     page.selectedId, card.id,
                                                                     modelData.id)
                                                             }
@@ -1901,6 +2052,7 @@ Item {
                                                 Layout.fillWidth: true
                                                 Button {
                                                     text: "+ 图片"
+                                                    visible: !page.adaptationMode
                                                     flat: true
                                                     font.pixelSize: 10
                                                     onClicked: page.askMaterialImage(card.id)
@@ -1959,7 +2111,7 @@ Item {
         nameFilters: ["图片 (*.png *.jpg *.jpeg *.webp *.gif)"]
         onAccepted: {
             if (page.pendingCardId.length > 0 && page.selectedId.length > 0)
-                bridge.addMaterialImage(page.selectedId, page.pendingCardId,
+                page.io.addMaterialImage(page.selectedId, page.pendingCardId,
                     materialImagePicker.selectedFile.toString(), "")
         }
     }
@@ -2374,6 +2526,79 @@ Item {
         host: page
     }
 
+    Dialog {
+        id: importDialog
+        objectName: "adaptationImportDialog"
+        title: "从提取导入 · 选择时间点"
+        modal: true
+        anchors.centerIn: parent
+        width: Math.min(680, page.width - 40)
+        height: Math.min(560, page.height - 40)
+        onAccepted: if (page.importSelected.length) bridge.importAdaptation(page.importSelected, page.revision)
+        contentItem: ColumnLayout {
+            spacing: 8
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: "选择主要故事、大事件或场景会包含其全部下属时间点；半选表示仅选了部分下属，折叠不影响选择。"
+                color: t.muted
+            }
+            Label {
+                objectName: "adaptationImportCount"
+                text: "已选 " + page.importSelected.length + " 项，包含 " + page.includedImportCount + " 个时间点"
+                color: t.ink
+            }
+            ListView {
+                objectName: "adaptationImportTree"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                model: page.visibleImportCandidates
+                ScrollBar.vertical: ScrollBar {}
+                delegate: RowLayout {
+                    required property var modelData
+                    objectName: "adaptationImportRow"
+                    property string nodeId: modelData.id
+                    width: ListView.view.width
+                    height: 44
+                    spacing: 2
+                    Item { Layout.preferredWidth: Math.max(0, modelData.depth || 0) * 20 }
+                    ToolButton {
+                        objectName: "adaptationImportExpand"
+                        Layout.preferredWidth: 28
+                        text: page.importHasChildren(modelData) ? (page.importCollapsed[modelData.id] ? "+" : "−") : ""
+                        enabled: page.importHasChildren(modelData)
+                        onClicked: {
+                            var collapsed = Object.assign({}, page.importCollapsed)
+                            collapsed[modelData.id] = !collapsed[modelData.id]
+                            page.importCollapsed = collapsed
+                        }
+                    }
+                    CheckBox {
+                        objectName: "adaptationImportCheck"
+                        Layout.fillWidth: true
+                        checkState: page.importCheckState(modelData)
+                        enabled: !page.importAncestorSelected(modelData)
+                        text: (page.typeLabels[modelData.node_type] || "时间点") + " · " + (modelData.name || modelData.id)
+                              + (page.importAncestorSelected(modelData) ? "（随上级导入）" : "")
+                              + (modelData.imported ? "（已导入）" : "")
+                        onClicked: page.toggleImport(modelData)
+                    }
+                }
+            }
+        }
+        footer: DialogButtonBox {
+            Button { objectName: "adaptationImportCancel"; text: "取消"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+            Button {
+                objectName: "adaptationImportConfirm"
+                text: "导入所选"
+                enabled: page.importSelected.length > 0
+                highlighted: true
+                DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+            }
+        }
+    }
+
     // 移动分类：只改整理位置。取值、披露顺序、原文引文都不动。
     Dialog {
         id: categoryPicker
@@ -2543,6 +2768,8 @@ Item {
                     placeholderText: "照原文写"
                     onAccepted: page.submitAddProperty()
                 }
+                Label { visible: page.adaptationMode; text: "值类型"; color: t.muted }
+                ComboBox { id: addValueType; visible: page.adaptationMode; objectName: "addValueType"; model: ["文本", "JSON"] }
                 Label { text: "披露事件"; color: t.muted; font.pixelSize: 11 }
                 ColumnLayout {
                     Layout.fillWidth: true

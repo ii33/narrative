@@ -11,7 +11,7 @@ Item {
     property var draft: ({})
     property var catalog: []
     property bool loaded: false
-    property string granularity: "standard"
+    property string granularity: "fine"
     property string message: ""
     property string projectNameDraft: ""
     property string boundProjectPath: ""

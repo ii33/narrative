@@ -92,14 +92,6 @@ Rectangle {
         restoringScroll = false
     }
 
-    function transcriptWheelPoint(event) {
-        if (event.point && event.point.scenePosition)
-            return transcript.mapFromItem(null, event.point.scenePosition.x, event.point.scenePosition.y)
-        if (event.position !== undefined && event.position !== null) return event.position
-        if (event.x !== undefined) return Qt.point(event.x, event.y)
-        return null
-    }
-
     function contentLayoutChanged() {
         // Lazy delegate height estimates during a wheel gesture belong to the
         // user's scroll, not a message update that should restore an old anchor.
@@ -505,23 +497,33 @@ Rectangle {
             }
             WheelHandler {
                 id: transcriptWheel
+                parent: transcript
                 target: null
-                blocking: false
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                blocking: true
                 onWheel: function(event) {
-                    var point = panel.transcriptWheelPoint(event)
-                    if (!point || !transcript.contains(point)) {
-                        event.accepted = false
-                        return
-                    }
-                    panel.userScrolled()
-                    var delta = event.pixelDelta.y || event.angleDelta.y
-                    event.accepted = (delta > 0 && transcript.atYBeginning)
-                        || (delta < 0 && transcript.atYEnd)
+                    // Wheel coordinates on a Flickable may be content coordinates;
+                    // delivery already hit-tests its clipped viewport.
+                    var delta = event.pixelDelta.y || event.angleDelta.y / 120 * 60
+                    if (!delta) { event.accepted = false; return }
+                    // Own movement and capture its anchor before a stream update
+                    // can restore the previous reading position.
+                    ++panel.scrollGeneration
+                    panel.scrollScheduled = false
+                    panel.restoreAfterMovement = false
+                    transcript.cancelFlick()
+                    transcript.forceLayout()
+                    var minimum = transcript.originY
+                    var maximum = Math.max(minimum, minimum + transcript.contentHeight - transcript.height)
+                    transcript.contentY = Math.max(minimum, Math.min(maximum, transcript.contentY - delta))
+                    panel.captureScroll(true)
+                    event.accepted = true
                     Qt.callLater(panel.captureScroll, true)
                 }
             }
             ScrollBar.vertical: ScrollBar {
                 id: transcriptScrollBar
+                objectName: "assistantTranscriptScrollBar"
                 onPositionChanged: if (pressed) panel.userScrolled()
             }
 

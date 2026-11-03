@@ -7,8 +7,11 @@ import QtQuick.Layouts
 Dialog {
     id: editor
     objectName: "nodeEditor"
+    readonly property var io: host.io
     property var host            // BrowsePage：主题、刷新、类型表
     property string nodeId: ""
+    property bool creating: false
+    property var adaptationNodes: []
     property var node: ({})
     property var properties: []
     property var events: []
@@ -29,12 +32,14 @@ Dialog {
     property string editPropertyId: ""
     property string editSourceId: ""
     property string editValue: ""
+    property bool editJson: false
     property int editEventIndex: 0
     property string editQuote: ""
     property var expireTargets: []
     property string expireKey: ""
     property string expireLabel: ""
     property string expireReason: ""
+    property int expireEventIndex: 0
     // 正在改名哪一行：一个方面可能有两个名字，改的是整行。
     property string renameKey: ""
     property var renameNames: []
@@ -51,13 +56,20 @@ Dialog {
     title: "节点编辑器 · " + (node.name || nodeId)
 
     function openFor(id) {
+        creating = false
         nodeId = id
         node = ({})
         properties = []
         events = []
         resetForms()
-        bridge.loadNodeEditor(id)
+        editor.io.loadNodeEditor(id)
         open()
+    }
+
+    function openNew() {
+        creating = true; nodeId = ""; node = ({}); properties = []; resetForms()
+        nameField.text = ""; aliasField.text = ""; noteField.text = ""; typeBox.currentIndex = 0
+        adaptationNodes = host.allAdaptationNodes.filter(function(n) { return !n.suppressed }); parentChoice.currentIndex = 0; holderChoice.currentIndex = 0; open()
     }
 
     function resetForms() {
@@ -68,6 +80,7 @@ Dialog {
         expireKey = ""
         expireLabel = ""
         expireReason = ""
+        expireEventIndex = eventIndex(host.cutEventId)
         renameKey = ""
         renameNames = []
         renameName = ""
@@ -90,6 +103,7 @@ Dialog {
         expireKey = ""
         expireLabel = ""
         expireReason = ""
+        expireEventIndex = eventIndex(host.cutEventId)
     }
 
     function startRename(item) {
@@ -107,7 +121,7 @@ Dialog {
             host.app.toast("请填写新的属性名", true)
             return
         }
-        bridge.renameProperty(renameNames[0], name)
+        editor.io.renameProperty(renameNames[0], name)
         renameKey = ""
     }
 
@@ -127,7 +141,7 @@ Dialog {
     }
 
     function reload() {
-        if (nodeId.length > 0) bridge.loadNodeEditor(nodeId)
+        if (nodeId.length > 0) editor.io.loadNodeEditor(nodeId)
     }
 
     function eventIndex(eventId) {
@@ -142,6 +156,8 @@ Dialog {
         editPropertyId = item.property_id
         editSourceId = record.disclosure ? (record.disclosure.source_id || "") : ""
         editValue = String(record.value === null || record.value === undefined ? "" : record.value)
+        editJson = host.adaptationMode && typeof record.value !== "string"
+        if (editJson) editValue = JSON.stringify(record.value)
         // 停在某个阅读位置时，改的就是「此刻」：默认披露在这个事件；
         // 没有切点时沿用原记录的事件，改的是它自己那一处说法。
         var here = atCut ? eventIndex(cutEventId) : -1
@@ -161,13 +177,18 @@ Dialog {
 
     function submitEdit() {
         if (editRecordId.length === 0) return
+        var inputValue = editValue
+        if (host.adaptationMode && editJson) {
+            try { inputValue = JSON.parse(editValue) }
+            catch (error) { host.app.toast("JSON 格式错误：" + error.message, true); return }
+        }
         var event = events[editEventIndex] || ({})
         editPendingId = editRecordId
         editPendingKey = editKey
-        bridge.correctPropertyRecord(editRecordId, {
+        editor.io.correctPropertyRecord(editRecordId, {
             node_id: nodeId,
             property_id: editPropertyId,
-            value: editValue,
+            value: inputValue,
             event_id: event.id || "",
             quote: editQuote,
             source_id: editSourceId
@@ -198,6 +219,7 @@ Dialog {
             return
         }
         expireTargets = ids
+        expireEventIndex = eventIndex(host.cutEventId)
         expireKey = rowKey(item)
         expireLabel = item.label || item.property_id
         expireReason = ""
@@ -208,6 +230,7 @@ Dialog {
     // 只结束这一条的有效期；整行操作会处理该行全部记录。
     function startExpireRecord(item, record) {
         expireTargets = [record.id]
+        expireEventIndex = eventIndex(host.cutEventId)
         expireKey = rowKey(item)
         expireLabel = (item.label || item.property_id)
             + (record.event_name ? " · " + record.event_name : "")
@@ -219,7 +242,7 @@ Dialog {
     // 删除：这条从来不算。和「失效」不是一句话——失效锚在读者站的位置。
     function deleteRecords(ids) {
         if (!ids || ids.length === 0) return
-        bridge.deletePropertyRecords(JSON.stringify(ids))
+        editor.io.deletePropertyRecords(JSON.stringify(ids))
     }
 
     function deleteRow(item) {
@@ -235,7 +258,9 @@ Dialog {
 
     function submitExpire() {
         if (expireTargets.length === 0) return
-        bridge.expirePropertyRecords(JSON.stringify(expireTargets), expireReason)
+        if (host.adaptationMode) bridge.expireAdaptationProperties(expireTargets,
+            (events[expireEventIndex] || {}).id || "", host.revision, expireReason)
+        else editor.io.expirePropertyRecords(JSON.stringify(expireTargets), expireReason)
         expireTargets = []
         // 同上：收起表单，别让人对着「0 条记录」再点一次。
         expireKey = ""
@@ -243,7 +268,19 @@ Dialog {
     }
 
     function submitNode() {
-        bridge.reviseNode(nodeId, {
+        if (host.adaptationMode) {
+            var fields = {name: nameField.text, node_type: typeKeys[typeBox.currentIndex],
+                aliases: aliasField.text.split(/[、,，]/).filter(function(x) { return x.trim().length > 0 }), identity_note: noteField.text}
+            var args = {node_id: creating ? null : nodeId, changes: fields, expected_revision: host.revision}
+            if (creating) {
+                args.parent_id = parentChoice.model[parentChoice.currentIndex].id || null
+                fields.point_id = host.cutEventId || null
+                if (fields.node_type === "item") fields.initial_holder = holderChoice.model[holderChoice.currentIndex].id
+            }
+            bridge.changeAdaptation("edit", args)
+            return
+        }
+        editor.io.reviseNode(nodeId, {
             name: nameField.text,
             node_type: typeKeys[typeBox.currentIndex],
             aliases: aliasField.text.split(/[、,，]/).map(function (part) {
@@ -256,6 +293,11 @@ Dialog {
     Connections {
         target: bridge
         function onResultReady(kind, payload) {
+            if (editor.host.adaptationMode) {
+                if (kind === "adaptation") { if (editor.creating) editor.close(); else if (editor.visible) editor.reload(); return }
+                if (kind.indexOf("adaptation_") !== 0) return
+                kind = kind.slice(11)
+            } else if (kind.indexOf("adaptation") === 0) return
             if (kind === "node_editor") {
                 editor.apply(payload)
             } else if (kind === "browse") {
@@ -280,7 +322,7 @@ Dialog {
                 editor.reload()
                 editor.host.load()
                 if (editor.nodeId === editor.host.selectedId)
-                    bridge.loadNodeProperties(editor.nodeId)
+                    editor.io.loadNodeProperties(editor.nodeId)
             } else if (kind === "property_delete") {
                 var removed = (payload.record_ids || []).length
                 editor.host.app.toast("已删除 " + removed + " 条记录（错误记录已移除）",
@@ -288,18 +330,18 @@ Dialog {
                 editor.reload()
                 editor.host.load()
                 if (editor.nodeId === editor.host.selectedId)
-                    bridge.loadNodeProperties(editor.nodeId)
+                    editor.io.loadNodeProperties(editor.nodeId)
             } else if (kind === "property_expire") {
                 editor.reload()
                 editor.host.load()
                 if (editor.nodeId === editor.host.selectedId)
-                    bridge.loadNodeProperties(editor.nodeId)
+                    editor.io.loadNodeProperties(editor.nodeId)
             } else if (kind === "property_rename") {
                 editor.host.app.toast("已改名为「" + (payload.to_id || "") + "」", false)
                 editor.reload()
                 editor.host.load()
                 if (editor.nodeId === editor.host.selectedId)
-                    bridge.loadNodeProperties(editor.nodeId)
+                    editor.io.loadNodeProperties(editor.nodeId)
             }
         }
     }
@@ -346,6 +388,15 @@ Dialog {
         }
 
         RowLayout {
+            visible: editor.host.adaptationMode && editor.creating
+            Layout.fillWidth: true
+            Label { text: "归属"; color: t.muted }
+            ComboBox { id: parentChoice; objectName: "editorParent"; Layout.fillWidth: true; model: [{id:"",name:"无归属"}].concat(editor.adaptationNodes); textRole: "name" }
+            Label { text: "物品持有者"; color: t.muted }
+            ComboBox { id: holderChoice; Layout.fillWidth: true; model: [{id:"未知",name:"未知"},{id:"无",name:"无"}].concat(editor.adaptationNodes); textRole: "name" }
+        }
+
+        RowLayout {
             Layout.fillWidth: true
             Label {
                 Layout.fillWidth: true
@@ -356,9 +407,21 @@ Dialog {
             Button {
                 objectName: "editorExtractActions"
                 text: "动作提取"
-                visible: editor.node.node_type === "event"
+                visible: !editor.host.adaptationMode && editor.node.node_type === "event"
                 enabled: !editor.host.app.busy
-                onClicked: { editor.close(); editor.host.app.assistantOpen = true; bridge.extractEventActions(editor.nodeId) }
+                onClicked: { editor.close(); editor.host.app.assistantOpen = true; editor.io.extractEventActions(editor.nodeId) }
+            }
+            Button {
+                objectName: "editorSuppressNode"
+                visible: editor.host.adaptationMode && !editor.creating
+                text: editor.node.suppressed ? "恢复节点及子树" : "屏蔽节点及子树"
+                onClicked: { bridge.changeAdaptation("suppress", {node_id: editor.nodeId, suppressed: !editor.node.suppressed, expected_revision: editor.host.revision}); editor.close() }
+            }
+            Button {
+                objectName: "editorCopyNode"
+                visible: editor.host.adaptationMode && !editor.creating
+                text: "复制节点及子树"
+                onClicked: bridge.changeAdaptation("copy", {node_id: editor.nodeId, expected_revision: editor.host.revision})
             }
             Button {
                 objectName: "editorSubmitNode"
@@ -584,6 +647,7 @@ Dialog {
                                 Layout.fillWidth: true
                                 spacing: 6
                                 Label { text: "新值"; color: t.muted; font.pixelSize: 10 }
+                                ComboBox { visible: editor.host.adaptationMode; model: ["文本", "JSON"]; currentIndex: editor.editJson ? 1 : 0; onActivated: editor.editJson = currentIndex === 1 }
                                 TextField {
                                     objectName: "editorEditValue"
                                     Layout.fillWidth: true
@@ -717,6 +781,14 @@ Dialog {
                             spacing: 4
                             visible: editor.expireKey.length > 0
                                 && editor.expireKey === editor.rowKey(modelData)
+                            ComboBox {
+                                visible: editor.host.adaptationMode
+                                objectName: "editorExpireEvent"
+                                Layout.fillWidth: true
+                                model: editor.events.map(function(event) { return event.id + "  " + event.name })
+                                currentIndex: editor.expireEventIndex
+                                onActivated: editor.expireEventIndex = currentIndex
+                            }
 
                             RowLayout {
                                 Layout.fillWidth: true

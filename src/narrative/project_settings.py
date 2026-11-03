@@ -9,7 +9,7 @@ GRANULARITIES = {"standard", "fine"}
 def load(ops) -> dict:
     with ops.project.store.connect() as db:
         row = db.execute("SELECT value FROM meta WHERE key='extraction_granularity'").fetchone()
-    granularity = row[0] if row else "standard"
+    granularity = row[0] if row else "fine"
     if granularity not in GRANULARITIES:
         raise ValueError("工程提取粒度无效，只能是standard或fine")
     return {"extraction_granularity": granularity, "profile": ops.provider_profile()}
