@@ -58,7 +58,11 @@ class TaskUsageObserver:
                 usage = request.get("usage")
                 if not request.get("complete") or not isinstance(usage, dict):
                     continue
-                raw = request.get("raw") or json.dumps(request, sort_keys=True, ensure_ascii=False)
+                call_ids = [call.get("id") for call in request.get("tool_calls", []) if call.get("id")]
+                # Live snapshots and final archives enrich raw/fragments after
+                # usage arrives. Provider tool-call IDs identify the same turn.
+                raw = ("tool-calls:" + json.dumps(call_ids)) if call_ids else (
+                    request.get("raw") or json.dumps(request, sort_keys=True, ensure_ascii=False))
                 key = digest(raw.encode("utf-8"))
                 self.observed[key] = max(self.observed.get(key, 0), usage.get("total_tokens", 0))
         return sum(self.observed.values())
@@ -136,7 +140,8 @@ def seed(ops):
 
 
 def main(validate=None, required_tools=None, target_factory=None, use_writing_target=True,
-         prompt_factory=None, fixture_resolver=None, ops_resolver=None, allow_adaptation_change=False):
+         prompt_factory=None, fixture_resolver=None, ops_resolver=None, allow_adaptation_change=False,
+         allow_extraction_change=False):
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seconds", type=int, default=600)
@@ -163,16 +168,26 @@ def main(validate=None, required_tools=None, target_factory=None, use_writing_ta
         "product_task_deadline": None, "user_projects_modified": False,
         "fixture_origin": FIXTURE_ORIGIN,
         "expected_adaptation_mutation": allow_adaptation_change,
+        "expected_extraction_mutation": allow_extraction_change,
         "input_sha256": digest(TEXT.encode()), "task_sha256": digest(TASK.encode()),
         "system_prompt_sha256": digest(CONVERSATION_SYSTEM_PROMPT.encode()),
         "implementation_sha256": {str(p): digest(p.read_bytes()) for p in sorted({
             *Path("src/narrative").glob("screenplay*.py"),
+            *Path("src/narrative").glob("tool*.py"),
+            *Path("src/narrative").glob("*prompt*.py"),
+            *Path("src/narrative").glob("conversation*.py"),
+            Path("src/narrative/harness.py"),
+            Path("src/narrative/project_style.py"), Path("src/narrative/graph_operations.py"),
+            *Path("src/narrative/qml").glob("*.qml"),
             *(Path("src/narrative") / name for name in (
                 "readable_ids.py", "tool_fingerprint_refs.py", "tool_execution_context.py", "adaptation_operations.py",
-                "asset_operations.py", "node_material.py", "tool_api.py", "native_bridge.py", "assistant.py", "adaptation_import.py")),
+                "asset_operations.py", "node_material.py", "tool_api.py", "native_bridge.py", "assistant.py", "model_gateway.py", "adaptation_import.py",
+                "adaptation_views.py", "state_anchors.py")),
             *(Path("src/narrative") / name for name in ("project_copy.py", "project_package.py", "project_catalog.py", "operations.py", "provider_store.py")),
-            *(Path("src/narrative/qml") / name for name in ("ScreenplayPage.qml", "ScriptPlanEditor.qml", "BrowsePage.qml")),
+            *(Path("src/narrative/qml") / name for name in ("ScreenplayPage.qml", "ScriptPlanEditor.qml", "BrowsePage.qml",
+                "ScriptTimelineEditor.qml", "ScriptRangePicker.qml")),
             Path("src/narrative/qml/LauncherPage.qml"),
+            Path("src/narrative/qml/TimelineImportColumns.qml"),
             Path(__file__), Path(sys.argv[0]),
         }) if p.is_file()}}
     for name, value in [("input.txt", TEXT), ("user-task.txt", TASK), ("system-prompt.txt", CONVERSATION_SYSTEM_PROMPT)]:
@@ -311,7 +326,9 @@ def main(validate=None, required_tools=None, target_factory=None, use_writing_ta
                         "extraction_unchanged": ops.graph_snapshot() == before_graph,
                         "adaptation_unchanged": ops.adaptation_snapshot() == before_adaptation, "no_errors": not errors}
                     if validate is not None:
-                        preserved = ("task_completed", "extraction_unchanged", "no_errors")
+                        preserved = ("task_completed", "no_errors")
+                        if not allow_extraction_change:
+                            preserved += ("extraction_unchanged",)
                         if not allow_adaptation_change:
                             preserved += ("adaptation_unchanged",)
                         checks = {key: checks[key] for key in preserved} | validate(ops, fixture, screenplay, calls, report)

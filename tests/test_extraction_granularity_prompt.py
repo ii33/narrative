@@ -9,16 +9,15 @@ from narrative.extraction_draft import DRAFT_VERSION, RESULT_SCHEMA
 def test_standard_and_fine_are_distinct_but_both_leave_actions_opt_in():
     standard = _first_prompt("提取", extraction_granularity="standard")
     fine = _first_prompt("提取", extraction_granularity="fine")
-    assert "当前工程提取粒度为标准" in standard
-    assert "当前工程提取粒度为精细" in fine
-    assert "更多事件" in fine
+    assert "当前工程提取粒度：standard" in standard
+    assert "当前工程提取粒度：fine" in fine
+    assert "更细事件" in fine
     assert "次要、无名人物和具体地点" in fine
-    assert "无法区分的泛称或重复提及不拆成多个节点" in fine
-    assert "不臆造姓名、身份" in fine
-    assert "property=地点" in standard and "value_type=node" in standard
-    assert "场景等上层容器经成员派生" in standard
-    assert "无需逐事件调用工具" in standard
-    assert all("标准和精细均默认不提取动作" in text for text in (standard, fine))
+    assert "无法区分的泛称或重复提及不拆成新实体" in fine
+    assert "不臆造身份" in fine
+    assert "地点以事件world节点引用属性记录" in standard
+    assert "上层容器由成员派生人物与地点，不重复写回" in standard
+    assert all("标准与精细粒度都默认不提取动作" in text for text in (standard, fine))
     assert DRAFT_VERSION == "conversation-draft/13"
     property_fields = RESULT_SCHEMA["properties"]["properties"]["items"]["properties"]
     node_fields = RESULT_SCHEMA["properties"]["nodes"]["items"]["properties"]

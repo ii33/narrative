@@ -115,8 +115,12 @@ def test_old_prose_is_not_generation_input_and_hidden_source_does_not_erase_body
     assert HIDDEN not in encoded and "旧地图已销毁" not in encoded and "特写和体积烟方案" not in encoded
     assert "plan" not in current["segment"]["units"][0]
     before = snapshot(ops)
-    with pytest.raises(ValueError, match="旧场表或正文"):
-        ops.read_scene_table_context(segment_id, dependency_refs=[{"kind": "unit_body", "id": unit["id"]}])
+    explicit = ops.read_scene_table_context(segment_id, dependency_refs=[
+        {"kind": "unit_body", "id": unit["id"]}, {"kind": "unit_plan", "id": unit["id"]}])
+    assert "旧稿正文必须保留。" in json.dumps(explicit, ensure_ascii=False)
+    assert HIDDEN in json.dumps(explicit, ensure_ascii=False)
+    assert "参考" in explicit["reference_policy"]["guidance"]
+    assert explicit["span"]["effective_node_ids"] == current["span"]["effective_node_ids"]
     assert snapshot(ops) == before
     after = ops.read_script_segment(segment_id)
     assert after["units"][0]["blocks"] == written["blocks"]

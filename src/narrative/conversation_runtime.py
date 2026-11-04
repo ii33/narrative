@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import copy
 import hashlib
 import os
 import secrets
@@ -11,8 +12,9 @@ from contextlib import contextmanager
 from contextvars import copy_context
 from pathlib import Path
 
-from .harness import CONVERSATION_SYSTEM_PROMPT, HarnessRunner
+from .harness import HarnessRunner
 from .leases import ProjectLease
+from .prompt_settings import prompt_snapshot
 from .task_tool_host import TaskToolHost
 
 _RUNTIMES: dict[str, ProjectConversation] = {}
@@ -41,7 +43,7 @@ def _catalog() -> list[dict]:
 
 class ProjectConversation:
     def __init__(self, ops, settings, api_key: str, runner_factory,
-                 *, restart_reason: str = "initial"):
+                 *, restart_reason: str = "initial", prompt_config=None):
         from .chat_store import ChatStore
 
         self.sdk_directory = ChatStore(_project_path(ops)).sdk_directory()
@@ -50,6 +52,7 @@ class ProjectConversation:
         self.restart_reason = restart_reason
         self._restart_announced = False
         self._config = settings.model_dump()
+        self._prompt_config = copy.deepcopy(prompt_config) if prompt_config is not None else prompt_snapshot(ops)
         self._key_digest = hashlib.sha256(api_key.encode()).digest()
         self._factory = runner_factory
         self._binding = None
@@ -70,18 +73,19 @@ class ProjectConversation:
             )
             self.runner = runner_factory(
                 settings, api_key, self.sdk_directory, task_tools=self.host.config,
-                system_prompt=CONVERSATION_SYSTEM_PROMPT,
+                system_prompt=self._prompt_config["texts"]["system"],
             )
             self.runner.interrupt_barrier = self._interrupt_done
         except Exception:
             self.close("startup_failed")
             raise
 
-    def compatible(self, settings, api_key: str, runner_factory) -> bool:
+    def compatible(self, settings, api_key: str, runner_factory, prompt_config=None) -> bool:
         return (
             not self.closed and settings.model_dump() == self._config
             and hashlib.sha256(api_key.encode()).digest() == self._key_digest
             and runner_factory is self._factory
+            and (prompt_config is None or prompt_config == self._prompt_config)
         )
 
     def activate(self, chat_id: str, catalog: list[dict], dispatch, *, session_id=None) -> None:
@@ -198,17 +202,18 @@ class ProjectConversation:
                 self._owner.close()
 
 
-def get_runtime(ops, settings, api_key: str, runner_factory=HarnessRunner) -> ProjectConversation:
+def get_runtime(ops, settings, api_key: str, runner_factory=HarnessRunner, *, prompt_config=None) -> ProjectConversation:
     key = _project_key(ops)
+    captured = prompt_snapshot(ops) if prompt_config is None else prompt_config
     with _RUNTIMES_LOCK:
         existing = _RUNTIMES.get(key)
-        if existing is not None and existing.compatible(settings, api_key, runner_factory):
+        if existing is not None and existing.compatible(settings, api_key, runner_factory, captured):
             return existing
         reason = "initial"
         if existing is not None:
             reason = existing.restart_reason if existing.closed else "configuration_changed"
             existing.close(reason)
-        runtime = ProjectConversation(ops, settings, api_key, runner_factory, restart_reason=reason)
+        runtime = ProjectConversation(ops, settings, api_key, runner_factory, restart_reason=reason, prompt_config=captured)
         _RUNTIMES[key] = runtime
         return runtime
 

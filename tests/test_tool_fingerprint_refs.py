@@ -244,7 +244,8 @@ def test_resident_writing_guard_receives_decoded_copy_while_audit_keeps_model_re
         assert seen_by_guard[0]["span_fingerprint"] == ops.read_script_unit_context(unit_id)["span_fingerprint"]
         metadata = audit["writing_task_metadata"]
         assert audit["writing_prompt_version"] == native_bridge.SCREENPLAY_WRITING_PROMPT_VERSION
-        assert native_bridge.SCREENPLAY_SCENE_TABLE_RULES in instructions[0]
+        assert audit["prompt_config"]["texts"]["writing"] in instructions[0]
+        assert native_bridge.SCREENPLAY_SCENE_TABLE_RULES not in instructions[0]
         assert metadata["task_id"] not in instructions[0]
         assert metadata["manifest_ref"] not in instructions[0]
         assert "task_id" not in step["args"] and "manifest_ref" not in step["args"]

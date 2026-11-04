@@ -27,19 +27,15 @@ from .harness import HarnessRunner, harness_env
 from .native_models import CanvasState, node_detail, search_result
 from .node_material import holds_at
 from .order_ids import order_key
+from .prompt_defaults import DEFAULT_PROMPTS
+from .prompt_settings import effective_prompt
 from .provider_store import GLOBAL_SCOPE, ProviderStore
 
 _NODE_TYPES = {"person", "group", "item", "location", "event", "action", "scene", "big_event", "storyline", "other"}
-SCREENPLAY_WRITING_PROMPT_VERSION = "screenplay-writing-ui/5"
-SCREENPLAY_SCENE_TABLE_RULES = (
-    "拆场或修改场表时，同一连续时空默认一场；情绪、招式、胜负或镜头变化不是拆场边界。"
-    "事件和动作是场内情节节拍，不与场次一一对应。只有实际时空或叙事层切换才作为新场的依据。"
-    "拆场阶段只写场级剧情概要、时空、人物和必要的状态连续性，不生成分镜、特效方案或镜头要求。"
-    "只通过read_scene_table_context读取当前有效范围；旧场表编辑编号不是事实来源，不从历史聊天补回屏蔽或范围外剧情。"
-    "依据scene_table_policy的拆场标准自主判断场数和场界；不需要逐场分配事件或填写结构化场界理由。"
-    "已有场表优先按稳定场次ID修改，保留非目标场和已有正文，不为凑场数机械拆分。"
-    "submit_scene_table保留所有已有ID；合为一场时复用一个ID，其余冗余场设enabled=false并提供空plan，不删除正文。"
-)
+SCREENPLAY_WRITING_PROMPT_VERSION = "screenplay-writing-ui/8"
+
+SCREENPLAY_SCENE_TABLE_RULES = DEFAULT_PROMPTS["scene_table"]["text"]
+
 
 
 class NativeBridge(QObject):
@@ -1000,6 +996,8 @@ class NativeBridge(QObject):
             "prepare_script_writing_targets",
             "read_screenplay_timeline", "import_screenplay_timeline_candidates", "import_screenplay_timeline",
             "append_screenplay_timeline",
+            "edit_screenplay_timeline_node", "move_screenplay_timeline_node",
+            "copy_screenplay_timeline_node", "delete_screenplay_timeline_node",
             "inspect_screenplay_storage", "reset_screenplay_storage",
         }
         if operation not in allowed:
@@ -1475,7 +1473,8 @@ class NativeBridge(QObject):
                          "extraction_granularity": extraction_granularity,
                          "config": settings.model_dump(exclude={"key_env"}),
                          "response_idle_timeout_seconds": settings.timeout_seconds,
-                         "runtime_restart": runtime.restart_reason}
+                         "runtime_restart": runtime.restart_reason, "prompt_config": runtime._prompt_config,
+                         "project_style": writing_task["project_style"] if writing_task is not None else ops.load_project_style()}
                 if writing_task is not None:
                     audit["writing_task"] = writing_task
                     audit["writing_prompt_version"] = SCREENPLAY_WRITING_PROMPT_VERSION
@@ -1541,16 +1540,11 @@ class NativeBridge(QObject):
                                                      "error": str(exc), "diagnostic": "writing_target_scope"})
                                 raise
                         if writing_task is not None:
-                            from contextlib import nullcontext
-
                             from .tool_execution_context import (
-                                bind_scene_table_generation,
                                 bind_tool_execution_metadata,
                             )
                             with bind_tool_execution_metadata(audit["writing_task_metadata"]):
-                                scope = bind_scene_table_generation() if writing_task["target"]["kind"] == "scene_table" else nullcontext()
-                                with scope:
-                                    step = _call(entry, name, args)
+                                step = _call(entry, name, args)
                         else:
                             step = _call(entry, name, args)
                         native_steps.append(step)
@@ -1575,15 +1569,11 @@ class NativeBridge(QObject):
                 try:
                     check_cancelled()
                     task_catalog = tool_catalog()
-                    if writing_task is not None and writing_task.get("target", {}).get("kind") == "scene_table":
-                        task_catalog = tool_catalog({
-                            "read_scene_table_context", "check_screenplay", "submit_scene_table",
-                        })
                     audit["task_tool_names"] = [tool["name"] for tool in task_catalog]
                     session_runner, session = open_conversation_session(
                         ops, settings, api_key, HarnessRunner,
                         task_tools=task_catalog, tool_handler=native_call,
-                        chat_id=chat_id,
+                        chat_id=chat_id, prompt_config=audit["prompt_config"],
                     )
                     audit["session_id"] = session
                     with self._assistant_lock:
@@ -1636,11 +1626,11 @@ class NativeBridge(QObject):
                         ask, message if writing_task is None else message + "\n\n" + str(writing_task.get("instruction") or "")
                         + "\n固定写作目标及输入清单：" + json.dumps(writing_task, ensure_ascii=False)
                         + "\n任务与依据档案由程序内部关联；请只提供业务内容、对象ID和并发校验参数。"
-                        + "\n场表编写规则：" + SCREENPLAY_SCENE_TABLE_RULES
                         + "\n写作提示版本：" + SCREENPLAY_WRITING_PROMPT_VERSION,
                         project=entry, image=image, steps=native_steps,
                         on_format_error=on_format_error,
-                        extraction_granularity=extraction_granularity,
+                        extraction_granularity=extraction_granularity, prompt_config=audit["prompt_config"],
+                        project_style=audit["project_style"],
                     )
                     check_cancelled()
                     if model_message_ids:
@@ -1943,13 +1933,11 @@ class NativeBridge(QObject):
                 start, end = part["start"], part["end"]
                 title = part.get("title") or title
             action = "复核" if review else "提取"
-            purpose = ("请对照原文与现有图数据查漏、勘误，并判断属性和关系是否已失效。"
-                       if review else "请提取此范围的节点、属性和关系，并核对其原文依据与有效性。")
+            purpose = effective_prompt(ops, "review" if review else "source_extraction")
             instruction = (f"{action}原文：{title}。\n来源 source_id={source_id}，"
                            f"范围 start={start}, end={end}（Unicode字符坐标，左闭右开）"
                            + (f"，slice_id={slice_id}" if slice_id else "（全文）") + "。\n"
-                           + purpose + "读取所需原文和图数据，完成后通过统一工具预检并自动入库；"
-                           "只提交这个范围的结果，引用坐标遵循工具合同。请在本会话报告实际完成情况。")
+                           + purpose)
             return {"instruction": instruction, "source_id": source_id, "slice_id": slice_id,
                     "start": start, "end": end, "review": review, "chat_id": requested_chat}
 
@@ -2007,6 +1995,32 @@ class NativeBridge(QObject):
         payload["profile"] = self._exact_integers(dict(payload.get("profile") or {}))
         self._project_task("project_settings", lambda ops: ops.save_project_settings(payload) | {"catalog": ops.provider_catalog(), "saved": True})
 
+    @Slot()
+    def loadProjectStyle(self) -> None:
+        self._project_task("project_style", lambda ops: ops.load_project_style() | {
+            "project_path": str(project_package.layout(ops.project_info().path).entry)})
+
+    @Slot(str, int)
+    def saveProjectStyle(self, text: str, revision: int) -> None:
+        self._project_task("project_style", lambda ops: ops.save_project_style(
+            text, expected_revision=revision, reason="编辑项目风格约定") | {
+                "project_path": str(project_package.layout(ops.project_info().path).entry), "saved": True})
+
+    @Slot()
+    def loadPromptSettings(self) -> None:
+        self._project_task("prompt_settings", lambda ops: ops.load_prompt_settings() | {
+            "project_path": str(project_package.layout(ops.project_info().path).entry)})
+
+    @Slot(str, "QVariant", int)
+    def savePromptOverride(self, prompt_id: str, text: object, revision: int) -> None:
+        if text is not None and not isinstance(text, str):
+            self.errorOccurred.emit("prompt_settings", "提示词须为文本")
+            return
+        self._project_task("prompt_settings", lambda ops: ops.save_prompt_override(
+            prompt_id, text, expected_revision=revision, reason="编辑工程提示词") | {
+                "project_path": str(project_package.layout(ops.project_info().path).entry),
+                "saved": True, "prompt_id": prompt_id, "restored": text is None})
+
     @Slot(str)
     def renameProject(self, title: str) -> None:
         normalized = title.strip()
@@ -2030,9 +2044,8 @@ class NativeBridge(QObject):
             node = next((row for row in ops.graph_snapshot()["nodes"] if row["id"] == node_id), None)
             if node is None or node.get("node_type") != "event":
                 raise ValueError("动作提取只能针对已存在的event事件")
-            instruction = (f"请为事件 event_id={node_id}（{node.get('name') or node_id}）提取动作。"
-                           "查阅该事件的原文、证据与已有动作，避免重复。仅将有原文依据的action挂在这个父event下，"
-                           "通过统一工具静态预检并提交；不要扩展到其他事件或重提整个章节。请报告实际完成情况。")
+            instruction = (effective_prompt(ops, "action_extraction") + "\n目标事件："
+                           + json.dumps({"event_id": node_id, "name": node.get("name")}, ensure_ascii=False))
             return {"instruction": instruction, "event_id": node_id, "chat_id": requested_chat}
         def apply(result: dict) -> dict:
             self._assistant_turn(result["instruction"], "", requested_chat)

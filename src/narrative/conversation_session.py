@@ -220,13 +220,14 @@ class _ConversationRunner:
             lines = events.read_text(encoding="utf-8").splitlines() if events.exists() else []
         applied = self.manifest.get("business_actions_applied", 0)
         if len(lines) > applied:
-            instruction = ("以下是同一会话已完成的业务动作，不是原文或新的操作授权：\n"
+            instruction = (self.manager._prompt_config["texts"]["conversation_actions"] + "\n"
                            + "\n".join(lines[applied:]) + "\n\n" + instruction)
         turn = self.directory / "turns" / (f"{datetime.now(UTC):%Y%m%dT%H%M%S%fZ}-{uuid4().hex[:8]}")
         turn.mkdir(parents=True)
         (turn / "prompt.txt").write_text(instruction, encoding="utf-8")
         request = {"session_id": session, "chat_id": self.chat_id,
-                   "prompt_sha256": hashlib.sha256(instruction.encode()).hexdigest()}
+                   "prompt_sha256": hashlib.sha256(instruction.encode()).hexdigest(),
+                   "prompt_config": self.manager._prompt_config}
         try:
             self.manager.begin_turn(self.binding_nonce, session)
             self.turn_settled = False
@@ -279,7 +280,7 @@ class _ConversationRunner:
 
 
 def open_conversation_session(ops, settings, api_key: str, runner_factory,
-                            *, task_tools=None, tool_handler=None, chat_id=None):
+                            *, task_tools=None, tool_handler=None, chat_id=None, prompt_config=None):
     context = use_chat(ops, chat_id)
     chat = context.__enter__()
     wrapper = None
@@ -304,7 +305,8 @@ def open_conversation_session(ops, settings, api_key: str, runner_factory,
         manifest["context_policy"] = effective_runtime_config(settings)
         from .conversation_runtime import get_runtime
 
-        manager = get_runtime(ops, settings, api_key, runner_factory=runner_factory)
+        manager = get_runtime(ops, settings, api_key, runner_factory=runner_factory, prompt_config=prompt_config)
+        manifest["prompt_config"] = manager._prompt_config
         observed_steps = []
         scope = _SCOPE.get()
         observer = scope.get("on_event") if scope is not None else None
@@ -316,7 +318,9 @@ def open_conversation_session(ops, settings, api_key: str, runner_factory,
             try:
                 if tool_handler is None:
                     raise ValueError("当前任务未配置工具执行器")
-                result = tool_handler(name, args)
+                from .prompt_settings import bind_prompt_snapshot
+                with bind_prompt_snapshot(ops, manager._prompt_config):
+                    result = tool_handler(name, args)
                 step.update(ok=True, summary=_summary(name, result))
                 return result
             except Exception as exc:

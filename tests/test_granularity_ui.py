@@ -178,8 +178,8 @@ def test_event_editor_action_button_dispatches_into_click_time_chat_and_opens_sa
         assert (
             chat == ui.a["id"]
             and image == ""
-            and "event_id=E9" in instruction
-            and "action" in instruction
+            and '"event_id": "E9"' in instruction
+            and "动作" in instruction
         )
         assert ops.graph_snapshot() == before
 

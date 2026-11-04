@@ -181,24 +181,30 @@ def _dependencies(state, adaptation, refs, screenplay_id, effective_node_ids=Non
         if not isinstance(raw, dict) or set(raw) != {"kind", "id"} or not isinstance(raw["kind"], str) or not isinstance(raw["id"], str):
             raise ValueError("dependency_refs须为明确的kind/id对象数组")
         kind, identifier = raw["kind"], raw["id"]
+        owner = None
         if (kind, identifier) in seen:
             continue
         seen.add((kind, identifier))
         normalized_refs.append(dict(raw))
         if kind == "adaptation_entity":
             from .screenplay_spans import generation_node
-            value = generation_node(adaptation, _entity(adaptation, identifier), effective_node_ids)
-            if value is None or value.get("reference_only"):
-                raise ValueError("生成依赖只允许当前有效范围的事件和活动实体，不读取屏蔽或范围外叙事")
+            node = _entity(adaptation, identifier)
+            projected = generation_node(adaptation, node, effective_node_ids)
+            # An explicit reference expands reading, never the creation span.
+            value = copy.deepcopy(node)
+            value["reference_only"] = projected is None or bool(projected.get("reference_only"))
+            value["current_creation_excluded"] = value["reference_only"]
+            if value["reference_only"]:
+                value["reference_note"] = "屏蔽、范围外或上级参考资料；知悉不代表纳入本次创作，以当前改编与用户要求为准"
         else:
             if kind not in REF_TABLES:
                 raise ValueError("未知写作依赖类型")
             obj = _get(state, REF_TABLES[kind], identifier)
             owner = obj.get("screenplay_id") or (state["script_segments"][obj["segment_id"]]["screenplay_id"] if "segment_id" in obj else obj["id"])
-            if owner != screenplay_id:
-                raise ValueError("写作上下文不能跨剧本引用")
+            # References may belong to another screenplay in this project;
+            # their identity is recorded below, without granting write scope.
             if kind == "previous_unit":
-                ordered = _ordered_units(state, screenplay_id)
+                ordered = _ordered_units(state, owner)
                 index = next((index for index, unit in enumerate(ordered) if unit["id"] == identifier), -1)
                 previous = ordered[index - 1] if index > 0 else None
                 value = {"previous_unit_id": previous["id"], "plan": _plan_input(previous),
@@ -211,20 +217,22 @@ def _dependencies(state, adaptation, refs, screenplay_id, effective_node_ids=Non
                 value = {key: obj.get(key) for key in ("creative_brief", "language", "target_duration_seconds")}
             else:
                 value = {key: obj.get(key) for key in ("brief", "role", "target_duration_seconds", "enabled")}
-        result.append({"kind": kind, "id": identifier, "input": value})
+        result.append({"kind": kind, "id": identifier, "input": value}
+                      | ({"source_screenplay_id": owner} if kind != "adaptation_entity" and owner != screenplay_id else {}))
     return normalized_refs, result
 
 
 def _context(state, adaptation, segment_id, unit_id=None, dependency_refs=None, *, allow_unusable=False):
     from .screenplay_spans import resolve_span
     segment = _get(state, "script_segments", segment_id)
+    from .prompt_defaults import DEFAULT_PROMPTS
+    project_style = copy.deepcopy(adaptation.get("_project_style", {"revision": 0, "text": ""}))
+    prompt_texts = adaptation.get("_prompt_config", {}).get("texts") or {key: row["text"] for key, row in DEFAULT_PROMPTS.items()}
     adaptation = _segment_timeline(state, adaptation, segment_id)
     resolved = resolve_span(adaptation, _get(state, "adaptation_spans", segment["span_id"]))
     unit = _get(state, "script_units", unit_id) if unit_id else None
     refs = _default_dependencies(state, segment, unit) if dependency_refs is None else (
         _default_dependencies(state, segment) + dependency_refs)
-    if unit is None and any(ref.get("kind") in {"unit_plan", "unit_body", "previous_unit"} for ref in refs):
-        raise ValueError("拆场不能以旧场表或正文为剧情来源，请使用当前有效时间段")
     refs, inputs = _dependencies(state, adaptation, refs, segment["screenplay_id"], resolved["effective_node_ids"])
     entity_ids = []
     if unit:
@@ -242,14 +250,31 @@ def _context(state, adaptation, segment_id, unit_id=None, dependency_refs=None, 
             if not allow_unusable:
                 raise
             entities.append({"id": identifier, "invalid": True})
-    context_input = {"fingerprint_version": 2, "timeline_id": adaptation["timeline_id"],
-                     "dependencies": inputs, "plan_entities": entities}
     plan_input = _plan_input(unit) if unit else None
+    effective_events = list((resolved.get("input") or {}).get("source_event_ids", []))
+    bound_events = list(unit["plan"].get("source_event_ids", [])) if unit else []
+    invalid_events = [identifier for identifier in bound_events if identifier not in effective_events]
+    if invalid_events and not allow_unusable:
+        raise ValueError("本场场表引用的剧本事件已删除、屏蔽或不在指定范围，请先修正本场场表；旧正文已保留")
+    creation_scope = {"screenplay_id": segment["screenplay_id"], "timeline_id": adaptation["timeline_id"],
+        "segment_id": segment_id, "unit_id": unit_id,
+        "effective_event_ids": [identifier for identifier in (bound_events or effective_events) if identifier in effective_events],
+        "plan_event_binding": "explicit" if bound_events else "plan_and_range", "current_scene_plan": plan_input,
+        "plot_authority": ["specified_screenplay_timeline_and_bound_range", "consistent_current_scene_plan"],
+        "expression_authority": ["current_user_request", "project_style", "screenplay_creative_brief", "segment_and_scene_creative_requirements"],
+        "invalid_event_ids": invalid_events,
+        "reference_only": ["original", "extraction", "source_adaptation", "other_screenplay_timelines", "previous_chat", "old_drafts"]}
+    context_input = {"fingerprint_version": 3, "timeline_id": adaptation["timeline_id"],
+                     "dependencies": inputs, "plan_entities": entities, "project_style": project_style,
+                     "creation_scope": creation_scope}
     return {"segment_id": segment_id, "unit_id": unit_id, "timeline_id": adaptation["timeline_id"], "span": resolved,
             "span_fingerprint": resolved["span_fingerprint"], "context_fingerprint": _fingerprint(context_input),
             "plan_fingerprint": _fingerprint(plan_input) if unit else None, "dependency_refs": refs,
             "reference_context": context_input, "plan_input": plan_input,
-            "generation_allowed": resolved["status"] == "valid" and (not unit or bool(unit["plan"]["summary"].strip()))}
+            "project_style": project_style, "creation_scope": creation_scope,
+            "generation_allowed": resolved["status"] == "valid" and not invalid_events and (not unit or bool(unit["plan"]["summary"].strip())),
+            "reference_policy": {"guidance": prompt_texts["reference_policy"]}}
+
 
 
 def _basis_state(state, adaptation, target_kind, target_id, basis_id):
@@ -261,7 +286,7 @@ def _basis_state(state, adaptation, target_kind, target_id, basis_id):
                            basis.get("dependency_refs") if basis else None, allow_unusable=True)
     except ValueError:
         return "changed" if basis else "unbased"
-    if context["span"]["status"] == "invalid":
+    if context["span"]["status"] == "invalid" or context["creation_scope"]["invalid_event_ids"]:
         return "invalid"
     if context["span"]["status"] == "empty":
         return "empty_source"
@@ -324,7 +349,8 @@ def _save_basis(state, target_kind, target_id, context, reason, manifest_ref=Non
         stage="body" if target_kind == "unit" else "scene_table", span_fingerprint=context["span_fingerprint"],
         context_fingerprint=context["context_fingerprint"], plan_fingerprint=context["plan_fingerprint"],
         fingerprint_version=context["reference_context"]["fingerprint_version"],
-        dependency_refs=context["dependency_refs"], manifest_ref=manifest_ref, task_id=task_id, reason=reason).model_dump(mode="json")
+        dependency_refs=context["dependency_refs"], project_style=context["project_style"], creation_scope=context["creation_scope"],
+        manifest_ref=manifest_ref, task_id=task_id, reason=reason).model_dump(mode="json")
     target = state["script_units" if target_kind == "unit" else "script_segments"][target_id]
     target["body_basis_id" if target_kind == "unit" else "outline_basis_id"] = identifier
     return identifier
@@ -432,15 +458,17 @@ class WritingOperationsMixin:
         from .screenplay_store import read_context
         state, adaptation = read_context(self)
         segment = copy.deepcopy(_get(state, "script_segments", segment_id))
-        # Existing prose is editable output, never authoritative source input.
+        # Keep default output metadata concise; callers can explicitly request
+        # unit_plan/unit_body dependencies or read the complete segment.
         segment["units"] = [{key: copy.deepcopy(unit[key]) for key in (
             "id", "kind", "enabled", "scene_number", "plan_revision", "body_revision", "revision")}
             | {"body_presence": "present" if _blocks(state, unit["id"]) else "empty",
                "source_event_ids": list(unit["plan"].get("source_event_ids", []))}
             for unit in _units(state, segment_id)]
+        from .prompt_settings import prompt_snapshot
         context = _context(state, adaptation, segment_id, dependency_refs=dependency_refs, allow_unusable=True)
         return context | {"segment": segment, "expected_outline_revision": segment["outline_revision"],
-                          "scene_table_policy": scene_table_policy(context["span"])}
+                          "scene_table_policy": scene_table_policy(context["span"], prompt_snapshot(self))}
 
     def submit_scene_table(self, segment_id, units, expected_outline_revision, span_fingerprint,
                            context_fingerprint, *, dependency_refs=None, manifest_ref=None, task_id=None, reason):
@@ -719,7 +747,7 @@ class WritingOperationsMixin:
         if manifest is not None and manifest.get("timeline_id", screenplay["timeline_id"]) != screenplay["timeline_id"]:
             raise ValueError("批量清单不属于目标剧本时间线")
         result = {"target": copy.deepcopy(target), "screenplay_id": screenplays[0], "segment_ids": segment_ids,
-                  "timeline_id": screenplay["timeline_id"],
+                  "timeline_id": screenplay["timeline_id"], "project_style": copy.deepcopy(_adaptation["_project_style"]),
                   "unit_ids": unit_ids, "block_ids": block_ids, "prompt": str(prompt),
                   "include_existing": manifest["include_existing"] if manifest else bool(target.get("include_existing", False))}
         if manifest is not None:
@@ -727,9 +755,9 @@ class WritingOperationsMixin:
         if kind not in {"blocks", "unit", "scene_table"}:
             result["target_manifest"] = self.prepare_script_writing_targets(screenplays[0], unit_ids,
                 include_existing=bool(target.get("include_existing", False)), include_screen_segments=bool(target.get("include_screen_segments", False)))
-        result["instruction"] = ("在当前聊天同一任务内操作。只修改显式目标ID；先读取对应上下文和修订号，逐场原子提交。"
-            "批量清单保持固定，后场写作前重读上下文取得已提交前场；失败或取消保留已成功场，不自动重开请求。"
-            "正文块局部任务不得覆盖其他块。模型输出、usage及终止原因保存在现有任务档案。")
+        from .prompt_settings import effective_prompt
+        key = "scene_table" if kind == "scene_table" else "writing" if kind in {"unit", "blocks"} else "batch_writing"
+        result["instruction"] = effective_prompt(self, key)
         return result
 
 
@@ -750,32 +778,18 @@ def validate_script_writing_tool_call(task, name, args, ops=None):
     """Host guard over an immutable captured target, never mutable UI state."""
     from .tool_api import TOOLS
     tool = TOOLS.get(name)
-    if task.get("target", {}).get("kind") == "scene_table" and tool is not None and tool.writes and name != "submit_scene_table":
-        raise ValueError("拆场生成只提交完整场表；采用标记、手工调整与正文写作另行操作，不能借旧稿生成依据")
-    if task.get("target", {}).get("kind") == "scene_table" and (tool is None or not tool.writes):
-        if name == "read_scene_table_context":
-            if args.get("segment_id") not in task.get("segment_ids", []):
-                raise ValueError("场表任务无权读取非目标段落")
-            if args.get("dependency_refs") is not None:
-                raise ValueError("场表任务只读取程序提供的默认上下文，不得自行扩大依赖")
-        elif name == "check_screenplay":
-            if args.get("screenplay_id") != task.get("screenplay_id"):
-                raise ValueError("场表任务无权检查其他剧本")
-        else:
-            raise ValueError("场表任务只允许读取目标段落场表上下文和当前剧本检查结果")
-        return
     if tool is None or not tool.writes:
         return
+    if "project_style" in task:
+        if ops is None:
+            raise ValueError("写作提交须核对工程风格约定修订")
+        if ops.load_project_style() != task["project_style"]:
+            raise ValueError("项目风格约定已变化，本次写作依据已过期；请按新约定重新开始任务，旧正文未改动")
     segments, units, blocks = set(task["segment_ids"]), set(task["unit_ids"]), set(task["block_ids"])
     kind = task["target"]["kind"]
     if name in {"submit_scene_table", "apply_scene_table_changes", "adopt_scene_table"}:
         if kind in {"blocks", "unit"} or args.get("segment_id") not in segments:
             raise ValueError("写作任务无权修改非目标场表")
-        if kind == "scene_table" and args.get("dependency_refs"):
-            defaults = ops.read_scene_table_context(args["segment_id"])["dependency_refs"] if ops is not None else []
-            refs = args["dependency_refs"]
-            if not isinstance(refs, list) or any(ref not in defaults for ref in refs):
-                raise ValueError("拆场生成只允许程序提供的默认依赖，不能读取旧稿或额外叙事内容")
         return
     if name in {"submit_script_unit", "apply_script_block_changes"}:
         identifier = args.get("unit_id")

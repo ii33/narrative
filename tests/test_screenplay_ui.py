@@ -102,8 +102,8 @@ def test_screenplay_manual_workflow_repeated_body_edit_and_export(tmp_path, monk
                    if b.objectName() == "scriptTimelineImportChoice"]
         click(ui, next(b for b in choices if b.property("nodeId") == scene_id))
         event_choice = next(b for b in choices if b.property("nodeId") != scene_id)
-        click(ui, event_choice)
-        assert len(plain(page.property("timelineImportSelection"))) == 2
+        assert not event_choice.property("enabled")  # included by selected scene
+        assert len(plain(page.property("timelineImportSelection"))) == 1
         click(ui, page.findChild(object, "scriptTimelineImportConfirm"))
         ui.wait(lambda: len(plain(page.property("workspace"))["timeline"]["nodes"]) == 3)
         ui.wait(lambda: not page.findChild(object, "scriptTimelineImportDialog").property("visible"))
@@ -183,7 +183,7 @@ def test_screenplay_manual_workflow_repeated_body_edit_and_export(tmp_path, monk
         assert "已导入" in old_choice.property("text")
         assert old_choice.property("enabled")
         click(ui, old_choice)
-        click(ui, next(item for item in choices if item.property("nodeId") == new_event_id))
+        assert not next(item for item in choices if item.property("nodeId") == new_event_id).property("enabled")
         save_qa(ui, tmp_path, "screenplay-append-import.png")
         click(ui, page.findChild(object, "scriptTimelineImportConfirm"))
         ui.wait(lambda: any(node["id"] == new_event_id for node in plain(page.property("workspace"))["timeline"]["nodes"]))
@@ -497,12 +497,12 @@ def test_import_picker_has_five_levels_and_keeps_an_independent_copy(tmp_path, m
         dialog = page.findChild(object, "scriptTimelineImportDialog")
         ui.wait(lambda: dialog.property("visible"))
         assert {row["node_type"] for row in plain(page.property("timelineImportCandidates"))} == set(ids)
-        assert [row["node_type"] for row in plain(page.property("timelineImportRows"))] == ["storyline", "big_event", "scene", "event", "action"]
+        assert plain(page.property("timelineImportRows")) == plain(page.property("timelineImportCandidates"))
         ui.settle()
         choices = [item for item in visuals(dialog.property("contentItem")) if item.objectName() == "scriptTimelineImportChoice"]
         click(ui, next(item for item in choices if item.property("nodeId") == ids["storyline"]))
-        click(ui, next(item for item in choices if item.property("nodeId") == ids["action"]))
-        assert len(plain(page.property("timelineImportSelection"))) == 2
+        assert not next(item for item in choices if item.property("nodeId") == ids["action"]).property("enabled")
+        assert len(plain(page.property("timelineImportSelection"))) == 1
         save_qa(ui, tmp_path, "screenplay-timeline-import.png")
         click(ui, page.findChild(object, "scriptTimelineImportConfirm"))
         ui.wait(lambda: len(plain(page.property("workspace"))["timeline"]["nodes"]) == 5)
@@ -603,13 +603,15 @@ def test_switching_independent_timelines_discards_old_ranges_and_import_replies(
         assert not ui.errors
 
 
-def test_scene_table_ui_uses_continuous_space_time_and_preserves_optional_plan_fields(tmp_path, monkeypatch):
+def test_scene_table_ui_uses_effective_project_prompt_and_preserves_optional_plan_fields(tmp_path, monkeypatch):
     from PySide6.QtCore import Q_ARG, QMetaObject
 
     from narrative.operations import Operations
 
     with transcript_shell(tmp_path, monkeypatch) as ui:
         ops = Operations.open(ui.bridge._project_path)
+        settings = ops.load_prompt_settings()
+        ops.save_prompt_override("scene_table_shortcut", "按本工程散文创作要求整理片段提纲。", settings["revision"], reason="验证快捷提示覆盖")
         screenplay_id = create_fixture(ops)
         segment = ops.read_screenplay(screenplay_id)["segments"][0]
         plan = {"title": "原有场次", "summary": "甲停步回头，仍然穿着湿雨衣。", "production_notes": "保留已有场级备注",
@@ -625,9 +627,8 @@ def test_scene_table_ui_uses_continuous_space_time_and_preserves_optional_plan_f
         writing_dialog = page.findChild(object, "scriptWritingDialog")
         ui.wait(lambda: writing_dialog.property("opened"))
         prompt = page.findChild(object, "scriptWritingPrompt").property("text")
-        assert "同一连续时空默认一场" in prompt
-        assert "情绪、招式、胜负、镜头变化不能单独拆场" in prompt
-        assert "不生成分镜、特效方案或镜头要求" in prompt
+        effective = {row["id"]: row["effective"] for row in ops.load_prompt_settings()["prompts"]}
+        assert prompt == effective["scene_table_shortcut"]
         assert plain(page.property("writingTarget"))["kind"] == "scene_table"
         assert plain(page.property("writingTarget"))["ids"] == [segment["id"]]
         writing_dialog.close()
@@ -635,7 +636,7 @@ def test_scene_table_ui_uses_continuous_space_time_and_preserves_optional_plan_f
         editor = page.findChild(object, "scriptPlanEditor")
         assert QMetaObject.invokeMethod(editor, "openFor", Q_ARG("QVariant", unit))
         ui.wait(lambda: editor.property("opened"))
-        assert "同一连续时空默认一场" in page.findChild(object, "scriptSceneTableGuide").property("text")
+        assert "工程设置中的提示词" in page.findChild(object, "scriptSceneTableGuide").property("text")
         assert page.findChild(object, "scriptPlanProductionNotes").property("text") == plan["production_notes"]
         editor.setProperty("showAdvanced", False)
         page.findChild(object, "scriptPlanTitle").setProperty("text", "只修改场标题")

@@ -1,4 +1,4 @@
-"""The real resident host cannot bypass a scene-table task's narrow source scope."""
+"""Resident tasks read all project materials and retain explicit write scope."""
 from __future__ import annotations
 
 import copy
@@ -45,25 +45,13 @@ def setup(ops):
 
 def forbidden_calls(fixture):
     return [
-        ("read_source", {"source_id": fixture["source_id"]}),
-        ("read_screenplay", {"screenplay_id": fixture["screenplay_id"]}),
-        ("read_screenplay_timeline", {"screenplay_id": fixture["screenplay_id"]}),
-        ("adaptation_snapshot", {}),
-        ("read_script_unit_context", {"unit_id": fixture["unit_id"]}),
-        ("read_scene_table_context", {"segment_id": fixture["other_segment_id"]}),
-        ("read_scene_table_context", {"segment_id": fixture["segment_id"], "dependency_refs": []}),
-        ("read_scene_table_context", {"segment_id": fixture["segment_id"], "dependency_refs": [{"kind": "unit_body", "id": fixture["unit_id"]}]}),
-        ("check_screenplay", {"screenplay_id": fixture["other_screenplay_id"]}),
         ("submit_scene_table", {"segment_id": fixture["other_segment_id"], "units": []}),
-        ("submit_scene_table", {"segment_id": fixture["segment_id"], "dependency_refs": [{"kind": "unit_body", "id": fixture["unit_id"]}]}),
-        ("submit_scene_table", {"segment_id": fixture["segment_id"], "dependency_refs": [{"kind": "segment", "id": fixture["other_segment_id"]}]}),
-        ("submit_scene_table", {"segment_id": fixture["segment_id"], "dependency_refs": [{"kind": "adaptation_entity", "id": fixture["event_id"]}]}),
-        ("adopt_scene_table", {"segment_id": fixture["segment_id"], "expected_outline_revision": 1, "reason": "不得借用采用"}),
-        ("mark_writing_basis_current", {"target_kind": "segment", "target_id": fixture["segment_id"], "expected_revision": 1, "reason": "不得借用新依据"}),
+        ("submit_script_unit", {"unit_id": fixture["unit_id"]}),
+        ("edit_adaptation_node", {"node_id": fixture["event_id"], "changes": {"name": "越界"}}),
     ]
 
 
-def test_direct_guard_rejects_read_and_write_bypasses_without_business_mutation(tmp_path, monkeypatch):
+def test_direct_guard_rejects_other_target_writes_without_business_mutation(tmp_path, monkeypatch):
     monkeypatch.setenv("NARRATIVE_PROVIDER_DB", str(tmp_path / "providers.sqlite3"))
     ops = Operations.create_graph_project(tmp_path / "scene-scope.nproj")
     fixture = setup(ops)
@@ -77,12 +65,12 @@ def test_direct_guard_rejects_read_and_write_bypasses_without_business_mutation(
     defaults = ops.read_scene_table_context(fixture["segment_id"])["dependency_refs"]
     for deps in (None, [], defaults[:1], defaults):
         validate_script_writing_tool_call(fixture["task"], "submit_scene_table", {"segment_id": fixture["segment_id"], "dependency_refs": deps}, ops=ops)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="风格约定修订"):
         validate_script_writing_tool_call(fixture["task"], "submit_scene_table", {"segment_id": fixture["segment_id"], "dependency_refs": defaults}, ops=None)
     assert read_context(ops) == before
 
 
-def test_resident_scene_table_host_is_scoped_and_write_ack_never_returns_old_prose(tmp_path, monkeypatch):
+def test_resident_scene_table_host_has_full_catalog_and_preserves_normal_write_ack(tmp_path, monkeypatch):
     from test_chat_scroll import transcript_shell
 
     from narrative import assistant
@@ -90,13 +78,11 @@ def test_resident_scene_table_host_is_scoped_and_write_ack_never_returns_old_pro
     from narrative.harness import HarnessSettings
     from narrative.tool_execution_context import (
         current_tool_execution_metadata,
-        is_scene_table_generation,
     )
 
     invoked, replies, catalogs = [], [], []
     original_call = assistant._call
     def observed_call(project, name, args):
-        assert is_scene_table_generation()
         invoked.append(name)
         return original_call(project, name, args)
 
@@ -129,8 +115,6 @@ def test_resident_scene_table_host_is_scoped_and_write_ack_never_returns_old_pro
                 status, payload = post("read_scene_table_context", {"segment_id": fixture["segment_id"]})
                 assert status == 200
                 context = payload["result"]
-                assert all(marker not in json.dumps(context, ensure_ascii=False) for marker in (OLD_PLAN, OLD_BODY, RAW_SOURCE))
-                assert "plan" not in context["segment"]["units"][0]
                 status, payload = post("check_screenplay", {"screenplay_id": fixture["screenplay_id"]})
                 assert status == 200
                 assert all(marker not in json.dumps(payload, ensure_ascii=False) for marker in (OLD_PLAN, OLD_BODY, RAW_SOURCE))
@@ -140,8 +124,8 @@ def test_resident_scene_table_host_is_scoped_and_write_ack_never_returns_old_pro
                 status, payload = post("submit_scene_table", submit)
                 assert status == 200, payload
                 ack = payload["result"]
-                assert all(marker not in json.dumps(ack, ensure_ascii=False) for marker in (OLD_PLAN, OLD_BODY, RAW_SOURCE))
-                assert "plan" not in ack["segment"]["units"][0] and "blocks" not in ack["segment"]["units"][0]
+                assert "units" in ack
+                assert OLD_BODY in json.dumps(ack, ensure_ascii=False)
                 return SimpleNamespace(raw="目标场表已更新，旧正文保留。", metadata={"finish_reason": "completed"})
             finally:
                 self.active_session = None
@@ -159,14 +143,14 @@ def test_resident_scene_table_host_is_scoped_and_write_ack_never_returns_old_pro
         ui.bridge.screenplayWritingTurn("只根据有效来源重新拆场。", fixture["target"])
         ui.wait(lambda: any(kind == "assistant" for kind, _ in ui.results))
         assert not ui.errors
-        assert catalogs == [ALLOWED]
+        assert catalogs == [{row["name"] for row in tool_catalog()}]
         assert invoked == ["read_scene_table_context", "check_screenplay", "submit_scene_table"]
         assert sum(status == 400 for _, status, _ in replies) == len(forbidden_calls(fixture))
         result = next(payload for kind, payload in ui.results if kind == "assistant")
         audit = json.loads((Path(result["audit_directory"]) / "task.json").read_text(encoding="utf-8"))
-        assert set(audit["task_tool_names"]) == ALLOWED
+        assert set(audit["task_tool_names"]) == {row["name"] for row in tool_catalog()}
         stored = ops.read_script_segment(fixture["segment_id"])["units"][0]
         assert stored["plan"]["summary"] == "甲渡桥后停步。"
         assert stored["plan"]["source_event_ids"] == [fixture["event_id"]]
         assert stored["blocks"] == original_body
-        assert current_tool_execution_metadata() == {} and not is_scene_table_generation()
+        assert current_tool_execution_metadata() == {}

@@ -28,6 +28,8 @@ from .graph_timeline_ops import TimelineService
 from .graphrag_ops import GraphRagService
 from .node_material import MaterialOperationsMixin
 from .order_ids import order_key
+from .project_style import ProjectStyleOperationsMixin
+from .prompt_settings import PromptSettingsOperationsMixin
 from .property_store import PropertyStore
 from .provider_store import ProviderStore
 from .screenplay_operations import ScreenplayOperationsMixin
@@ -40,7 +42,7 @@ class _ProjectPath:
     path: str
 
 
-class GraphOperations(AdaptationOperationsMixin, AssetOperationsMixin, AdaptationViewsMixin,
+class GraphOperations(ProjectStyleOperationsMixin, PromptSettingsOperationsMixin, AdaptationOperationsMixin, AssetOperationsMixin, AdaptationViewsMixin,
                       ScreenplayOperationsMixin, ScreenplayTimelineOperationsMixin, WritingOperationsMixin,
                       MaterialOperationsMixin):
     _copy_report: dict

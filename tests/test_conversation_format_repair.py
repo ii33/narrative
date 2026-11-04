@@ -8,6 +8,13 @@ from narrative import assistant
 from narrative.conversation_session import IncompleteConversation
 
 
+@pytest.fixture(autouse=True)
+def prompt_project(tmp_path, monkeypatch):
+    from narrative.operations import Operations
+    monkeypatch.setenv("NARRATIVE_PROVIDER_DB", str(tmp_path / "providers.sqlite3"))
+    Operations.create_graph_project(tmp_path / "test.nproj")
+
+
 def malformed(**overrides):
     data = {"finish_reason": "error", "sdk_error_diagnostics": [{"code": "MALFORMED_RESPONSE",
             "message": "DeepSeek Messages stream: tool input is invalid JSON"}],

@@ -35,26 +35,20 @@ Item {
     property string writingStatus:""
     property var submittedUnitIds:[]
     property var structureEdit:({})
+    property bool timelineBusy:false
+    readonly property string timelineSelectedId:range.selectedId
+    property var timelineMutationScope:({})
+    property string pendingTimelineSelection:""
+    property var timelineDeleteScope:({})
     property bool structureBusy:false
     property bool storageResetBusy:false
     property string storageResetFingerprint:""
     property string storageResetSummary:""
     property var timelineImportCandidates:[]
     property var timelineImportSelection:[]
-    property var timelineImportCollapsed:({})
     property var timelineImportScope:({})
     readonly property bool screenplaySwitching:!!app.screenplayId&&app.screenplayId!==screenplay.id
-    readonly property var timelineImportRows:{
-        var rows=[],known={},seen={}
-        timelineImportCandidates.forEach(function(row){known[row.id]=row})
-        function walk(row,depth){
-            if(seen[row.id])return
-            seen[row.id]=true;rows.push(Object.assign({},row,{depth:depth}))
-            if(!page.timelineImportCollapsed[row.id])page.timelineImportCandidates.filter(function(child){return child.parent_id===row.id}).sort(function(a,b){return a.sort_id-b.sort_id}).forEach(function(child){walk(child,depth+1)})
-        }
-        timelineImportCandidates.filter(function(row){return !row.parent_id||!known[row.parent_id]}).sort(function(a,b){return a.sort_id-b.sort_id}).forEach(function(row){walk(row,0)})
-        return rows
-    }
+    readonly property var timelineImportRows: timelineImportCandidates
     readonly property var outlineLabels:({planning:"规划中",adopted:"已采用",changed:"有修改"})
     readonly property var basisLabels:({unbased:"依据未记录",current:"依据一致",changed:"依据需复查",invalid:"来源失效",empty_source:"来源为空"})
     readonly property var bodyLabels:({empty:"正文为空",present:"已有正文"})
@@ -62,7 +56,20 @@ Item {
     readonly property var blockLabels:({action:"动作",dialogue:"对白",screen_text:"字幕",sound:"声音",transition:"转场"})
     readonly property var targetLabels:({screenplay:"整部剧本",episode:"集",act:"幕",segment:"段落",scene_table:"场表",unit:"场次",blocks:"正文块"})
     readonly property var taskLabels:({running:"进行中",cancelled:"已停止",failed:"未完成",completed:"已完成"})
-    readonly property string sceneTablePrompt:"请根据本段绑定范围编写或按我的意见修改场级场表。同一连续时空默认一场；情绪、招式、胜负、镜头变化不能单独拆场，事件和节拍不是场。只写场级剧情概要、时空、人物及必要状态连续性，不生成分镜、特效方案或镜头要求。多场须基于实际时空或叙事层切换；已有场次优先复用ID并保留正文。"
+    property var projectStyle: ({revision:0,text:""})
+    property bool styleLoaded:false
+    property bool styleSaving:false
+    property string styleMessage:""
+    function openProjectStyle() {
+        styleDialog.projectPath=app.project.path || ""
+        styleDialog.revision=projectStyle.revision
+        styleDialog.originalText=projectStyle.text || ""
+        styleText.text=styleDialog.originalText
+        styleMessage=""
+        styleDialog.open()
+    }
+    property var effectivePrompts: ({})
+    readonly property string sceneTablePrompt: effectivePrompts.scene_table_shortcut || ""
     function diagnosticsText(values){return (values||[]).map(function(value){return value.message || value.code || String(value)}).join("\n")}
     function storageCountsText(){
         var counts=storage.row_counts||{}
@@ -101,6 +108,11 @@ Item {
     }
     function load() { if(visible && app.mode==="workspace") bridge.loadScreenplayWorkspace(app.screenplayId || "") }
     function act(operation,args) { bridge.screenplayAction(operation,args) }
+    function timelineAction(operation,id,expectedRevision) {
+        timelineMutationScope={screenplay_id:screenplay.id,timeline_id:screenplay.timeline_id,revision:expectedRevision===undefined?workspace.timeline.revision:expectedRevision}
+        timelineBusy=true
+        act(operation,{screenplay_id:screenplay.id,node_id:id,expected_timeline_revision:timelineMutationScope.revision,reason:operation==="delete_screenplay_timeline_node"?"物理删除剧本时间点及子树":"复制剧本时间点及子树"})
+    }
     function structure(actions,format) { if(structureBusy)return;structureBusy=true;var args={screenplay_id:screenplay.id,actions:actions,expected_structure_revision:screenplay.structure_revision,reason:"编辑剧本结构"}; if(format)args.format=format; act("apply_screenplay_structure",args) }
     function changeSceneTable(change) { act("apply_scene_table_changes",{segment_id:segment.id,changes:[change],expected_outline_revision:segment.outline_revision,reason:"手工编辑场表"}) }
     function changeBlock(change) { act("apply_script_block_changes",{unit_id:unit.id,changes:[change],target_block_ids:change.block_id?[change.block_id]:[],expected_body_revision:unit.body_revision,reason:"手工编辑正文"}) }
@@ -109,8 +121,8 @@ Item {
     function selectSegment(id) { selectedSegmentId=id;selectedUnitId="" }
     function resetRangeScope(){
         range.startId="";range.endId="";rangePreview=({});rangePreviewRequest++;pendingRangeRefresh=false
-        timelineImportScope=({});timelineImportCandidates=[];timelineImportSelection=[];timelineImportCollapsed=({})
-        timelineImportDialog.close()
+        timelineImportScope=({});timelineImportCandidates=[];timelineImportSelection=[]
+        timelineImportDialog.close();timelineEditor.close();timelineDeleteDialog.close();timelineBusy=false;timelineMutationScope=({});pendingTimelineSelection=""
     }
     function selectScreenplay(id){resetRangeScope();app.screenplayId=id;selectedSegmentId="";selectedUnitId="";load()}
     function openBody(id) {
@@ -192,20 +204,33 @@ Item {
         }
         structure(actions,isSeries?"single":"series")
     }
-    onVisibleChanged:if(visible)load()
+    onVisibleChanged:if(visible){load();bridge.loadPromptSettings();bridge.loadProjectStyle()}
     Connections {
         target:app
+        function onProjectChanged(){page.effectivePrompts=({});page.projectStyle=({revision:0,text:""});page.styleLoaded=false;page.styleSaving=false;page.styleMessage="";styleDialog.close();if(app.mode==="workspace"){bridge.loadPromptSettings();bridge.loadProjectStyle()}}
         function onModeChanged(){ if(app.mode==="workspace")page.load();else{page.workspace=({});page.selectedSegmentId="";page.selectedUnitId="";page.writingStatus="";page.writingTaskId="";page.submittedUnitIds=[];page.structureBusy=false} }
     }
     Connections {
         target:bridge
         function onResultReady(kind,payload) {
+            if(kind==="project_style"){
+                if(payload.project_path!==(app.project.path||""))return
+                page.projectStyle=payload;page.styleLoaded=true;page.styleSaving=false
+                if(payload.saved){page.styleMessage="项目风格约定已保存。";styleDialog.close();if(page.visible)app.toast(page.styleMessage,false)}
+                return
+            }
+            if(kind==="prompt_settings"){
+                if(payload.project_path!==(app.project.path||""))return
+                var effective={};(payload.prompts||[]).forEach(function(row){effective[row.id]=row.effective});page.effectivePrompts=effective;return
+            }
             if(kind==="screenplay"&&payload.operation==="apply_screenplay_structure"&&!page.visible){page.structureBusy=false;return}
             if(kind==="screenplay_workspace"&&page.visible) {
                 if(payload.superseded)return
                 var nextScreenplay=(payload.document||{}).screenplay||({})
                 if(screenplay.id!==nextScreenplay.id||screenplay.timeline_id!==nextScreenplay.timeline_id)resetRangeScope()
                 workspace=payload
+                timelineBusy=false
+                if(pendingTimelineSelection&&((workspace.timeline||{}).nodes||[]).some(function(node){return node.id===pendingTimelineSelection})){range.reveal(pendingTimelineSelection);pendingTimelineSelection=""}
                 if(storageNeedsReset)app.screenplayId=""
                 if(screenplay.id)app.screenplayId=screenplay.id
                 if(!segments.some(function(s){return s.id===selectedSegmentId}))selectedSegmentId=segments.length?segments[0].id:""
@@ -228,13 +253,32 @@ Item {
                 if(op==="import_screenplay_timeline_candidates"){
                     timelineImportScope={screenplay_id:payload.request_screenplay_id,timeline_id:screenplay.timeline_id,timeline_revision:workspace.timeline.revision,adaptation_revision:result.length?result[0].source_revision:workspace.adaptation.revision,appending:hasTimelineNodes}
                     var localIds=((workspace.timeline||{}).nodes||[]).map(function(node){return node.id})
-                    timelineImportCandidates=result.map(function(row){return Object.assign({},row,{imported:row.imported===true||localIds.indexOf(row.id)>=0})});timelineImportSelection=[];timelineImportCollapsed=({});timelineImportDialog.open();return
+                    timelineImportCandidates=result.map(function(row){return Object.assign({},row,{imported:row.imported===true||localIds.indexOf(row.id)>=0})});timelineImportSelection=[];timelineImportDialog.open();return
                 }
                 if(op==="append_screenplay_timeline"||op==="import_screenplay_timeline"){
                     timelineImportDialog.close();rangePreviewRequest++;rangePreview=({});pendingRangeRefresh=true
                     var added=((result.import_summary||{}).added_node_ids||[]).length
                     var addedProperties=((result.import_summary||{}).added_property_ids||[]).length
                     notice=timelineImportScope.appending?(added||addedProperties?"已追加 "+added+" 个节点"+(addedProperties?"、"+addedProperties+" 条属性记录":"")+"；已有段落、场表和正文保留。":"所选节点均已导入，现有内容保持。"):"已导入剧本独立副本，可继续追加时间点。"
+                    var importDiagnostics=(result.import_summary||{}).diagnostics||[]
+                    if(importDiagnostics.length)notice+="\n"+importDiagnostics.map(function(row){return (row.code==="source_interval_conflict"?"来源已有属性区间冲突，请核对：":"")+(row.message||row.code||"")}).join("\n")
+                    page.load();return
+                }
+                if(["edit_screenplay_timeline_node","move_screenplay_timeline_node","copy_screenplay_timeline_node","delete_screenplay_timeline_node"].indexOf(op)>=0){
+                    var scope=timelineMutationScope
+                    if(payload.request_screenplay_id!==screenplay.id||scope.screenplay_id!==screenplay.id||scope.timeline_id!==screenplay.timeline_id)return
+                    timelineEditor.close();timelineDeleteDialog.close()
+                    pendingTimelineSelection=result.created_node_id||result.copied_node_id||range.selectedId
+                    rangePreviewRequest++;rangePreview=({});pendingRangeRefresh=true
+                    if(op==="delete_screenplay_timeline_node"){
+                        var removed=result.deleted_node_ids||[]
+                        if(removed.indexOf(range.startId)>=0)range.startId=""
+                        if(removed.indexOf(range.endId)>=0)range.endId=""
+                        if(removed.indexOf(range.selectedId)>=0){range.selectedId="";pendingTimelineSelection=""}
+                        notice="已删除 "+removed.length+" 个时间点及其子树；已有段落和正文保留。"
+                        var issues=[];(result.affected_spans||[]).forEach(function(span){issues=issues.concat(span.diagnostics||[])})
+                        if(issues.length)notice+="\n"+diagnosticsText(issues)
+                    }else notice=op==="copy_screenplay_timeline_node"?"已复制时间点及全部下属。":op==="move_screenplay_timeline_node"?"时间点及子树已移动。":"剧本时间点已保存。"
                     page.load();return
                 }
                 if(op==="preview_adaptation_span") {
@@ -256,7 +300,7 @@ Item {
                 if(op==="check_screenplay"){notice=(result.ok?"剧本检查通过":"剧本检查结果")+"\n"+diagnosticsText(result.issues||result.diagnostics||[]);return}
                 if(op==="prepare_script_writing_targets") {
                     writingTarget={kind:"unit",ids:result.unit_ids || [],screenplay_id:screenplay.id,target_manifest:result}
-                    writingPrompt.text="按当前剧本顺序，仅为目标清单中已启用且正文为空的普通场景逐场写作；每场通过校验后提交，保留成功场。";writingDialog.open();return
+                    writingPrompt.text=page.effectivePrompts.batch_writing_shortcut || "";writingDialog.open();return
                 }
                 page.load()
             } else if(kind==="screenplay_export_saved")app.toast("已导出到 "+payload.path,false)
@@ -266,7 +310,7 @@ Item {
             }
             else if(kind==="assistant" || (kind==="conversation_progress" && payload.event==="task_complete"))page.load()
         }
-        function onErrorOccurred(kind,message){if(kind==="screenplay"){page.structureBusy=false;page.storageResetBusy=false}}
+        function onErrorOccurred(kind,message){if(kind==="project_style"){page.styleSaving=false;page.styleMessage="风格约定未保存："+message}if(kind==="screenplay"){page.structureBusy=false;page.storageResetBusy=false;page.timelineBusy=false}}
     }
     ColumnLayout {
         anchors.fill:parent;anchors.margins:16;spacing:10
@@ -279,6 +323,11 @@ Item {
             Button { text:"刷新";onClicked:page.load() }
             Button { text:"检查";enabled:!!page.screenplay.id;onClicked:page.act("check_screenplay",{screenplay_id:page.screenplay.id}) }
             Button { objectName:"screenplayExport";text:"导出";enabled:!!page.screenplay.id;onClicked:{page.exportFormat="text";page.act("export_screenplay",{screenplay_id:page.screenplay.id,format:"text"})} }
+        }
+        RowLayout {
+            Layout.fillWidth:true
+            Button {objectName:"scriptProjectStyle";text:"项目风格约定";enabled:page.styleLoaded&&!page.styleSaving;onClicked:page.openProjectStyle()}
+            Label {Layout.fillWidth:true;wrapMode:Text.Wrap;font.pixelSize:11;color:t.muted;text:page.projectStyle.text?"已设置，当前工程的所有剧本共用。":"可自由约定表达、节奏与语言风格，当前工程的所有剧本共用。"}
         }
         Label { visible:!!page.notice;text:page.notice;color:t.warn;wrapMode:Text.Wrap;Layout.fillWidth:true }
         Frame {
@@ -322,9 +371,17 @@ Item {
                 ScriptWorkbenchColumn {
                     id:rangeColumn;objectName:"scriptRangeColumn";namePrefix:"scriptRangeColumn";title:"改编时间表";t:page.t;expandedWidth:260;minimumExpandedWidth:230
                     Button {objectName:"scriptTimelineImport";text:page.hasTimelineNodes?"追加导入时间点":"从改编时间线导入";Layout.fillWidth:true;onClicked:page.act("import_screenplay_timeline_candidates",{screenplay_id:page.screenplay.id})}
-                    Label {visible:!((page.workspace.timeline||{}).nodes||[]).length;text:"尚未导入时间点。导入后保留剧本独立副本。";wrapMode:Text.Wrap;Layout.fillWidth:true;color:t.muted}
-                    Label {visible:((page.workspace.timeline||{}).nodes||[]).length>0;text:"已导入的剧本独立副本";font.pixelSize:11;Layout.fillWidth:true;color:t.muted}
-                ScriptRangePicker {id:range;objectName:"scriptRangePicker";Layout.fillWidth:true;Layout.fillHeight:true;nodes:(page.workspace.timeline||{}).nodes || [];t:page.t;onSelectionChanged:page.previewRange()}
+                    Flow {
+                        Layout.fillWidth:true;spacing:3
+                        Button {objectName:"scriptTimelineNew";text:"新建";enabled:!page.timelineBusy&&!app.busy;onClicked:{page.timelineMutationScope={screenplay_id:page.screenplay.id,timeline_id:page.screenplay.timeline_id};timelineEditor.openFor("new","")}}
+                        Button {objectName:"scriptTimelineEdit";text:"编辑";enabled:!!range.selectedId&&!page.timelineBusy&&!app.busy;onClicked:{page.timelineMutationScope={screenplay_id:page.screenplay.id,timeline_id:page.screenplay.timeline_id};timelineEditor.openFor("edit",range.selectedId)}}
+                        Button {objectName:"scriptTimelineMove";text:"移动";enabled:!!range.selectedId&&!page.timelineBusy&&!app.busy;onClicked:{page.timelineMutationScope={screenplay_id:page.screenplay.id,timeline_id:page.screenplay.timeline_id};timelineEditor.openFor("move",range.selectedId)}}
+                        Button {objectName:"scriptTimelineCopy";text:"复制";enabled:!!range.selectedId&&!page.timelineBusy&&!app.busy;onClicked:page.timelineAction("copy_screenplay_timeline_node",range.selectedId)}
+                        Button {objectName:"scriptTimelineDelete";text:"删除";enabled:!!range.selectedId&&!page.timelineBusy&&!app.busy;onClicked:{page.timelineDeleteScope={screenplay_id:page.screenplay.id,timeline_id:page.screenplay.timeline_id,node_id:range.selectedId,revision:page.workspace.timeline.revision};timelineDeleteDialog.open()}}
+                    }
+                    Label {visible:!((page.workspace.timeline||{}).nodes||[]).length;text:"尚无时间点，可新建或从改编导入。";wrapMode:Text.Wrap;Layout.fillWidth:true;color:t.muted}
+                    Label {visible:((page.workspace.timeline||{}).nodes||[]).length>0;text:"当前剧本独立时间线";font.pixelSize:11;Layout.fillWidth:true;color:t.muted}
+                ScriptRangePicker {id:range;objectName:"scriptRangePicker";timelineId:page.screenplay.timeline_id || "";Layout.fillWidth:true;Layout.fillHeight:true;nodes:(page.workspace.timeline||{}).nodes || [];t:page.t;onSelectionChanged:page.previewRange()}
                 Label { objectName:"scriptRangeStatus";Layout.fillWidth:true;wrapMode:Text.Wrap;color:page.rangePreview.status==="valid"?t.ok:t.warn;text:page.rangePreview.status ? "范围"+(page.spanLabels[page.rangePreview.status]||"")+" · 有效 "+(page.rangePreview.effective_node_ids || []).length+" · 屏蔽 "+(page.rangePreview.suppressed_count || 0)+(page.diagnosticsText(page.rangePreview.diagnostics)?"\n"+page.diagnosticsText(page.rangePreview.diagnostics):"") : "选择范围起止，容器将展开到事件/动作" }
                 RowLayout {Layout.fillWidth:true;TextField{id:segmentTitle;objectName:"scriptSegmentTitle";placeholderText:"新段落名称";Layout.fillWidth:true}Button{objectName:"scriptCreateSegment";text:"建立段落";enabled:!!segmentTitle.text.trim()&&page.rangePreview.status==="valid";onClicked:page.createSegment()}}
 
@@ -366,6 +423,7 @@ ListView {
                             Label{text:(page.bodyLabels[modelData.body_presence]||"正文为空")+" · "+(page.basisLabels[modelData.basis_state]||"依据未记录");color:t.muted;font.pixelSize:10;HoverHandler{id:unitHover}ToolTip.visible:unitHover.hovered;ToolTip.text:modelData.id}
                             Label{text:page.sceneSetting(modelData.plan);color:t.body;wrapMode:Text.Wrap;Layout.fillWidth:true}
                             Label{text:modelData.plan.summary;wrapMode:Text.Wrap;Layout.fillWidth:true;color:t.body}
+                            Label{objectName:"scriptSceneOutcome";property string unitId:modelData.id;visible:!!(modelData.plan.outcome||"").trim();text:"结果："+(modelData.plan.outcome||"");wrapMode:Text.Wrap;Layout.fillWidth:true;color:t.body}
                             Flow{Layout.fillWidth:true;spacing:6;Button{text:"编辑场表";onClicked:{page.selectedUnitId=modelData.id;planEditor.openFor(modelData)}}Button{objectName:"scriptOpenBody";text:"打开正文";onClicked:{page.openBody(modelData.id)}}Button{implicitWidth:32;Layout.preferredWidth:32;text:"↑";enabled:index>0;onClicked:page.changeSceneTable({op:"move",unit_id:modelData.id,after_id:index>1?page.units[index-2].id:null})}Button{text:"删除";onClicked:{page.selectedUnitId=modelData.id;deleteUnitDialog.open()}}}
                         }
                     }
@@ -373,9 +431,9 @@ ListView {
                 }
                 ScriptWorkbenchColumn {
                     id:bodyColumn;objectName:"scriptBodyColumn";namePrefix:"scriptBodyColumn";title:"正文";t:page.t;expandedWidth:400;minimumExpandedWidth:340
-                    RowLayout {Layout.fillWidth:true;Button{text:"写当前场";enabled:!!page.unit.id;onClicked:page.openWriting("unit",[page.unit.id],"请按本场计划写正文；只修改明确目标场，校验并自动提交。") }Button{text:"修改当前场";enabled:!!page.unit.id;onClicked:page.openWriting("unit",[page.unit.id],"")}}
+                    RowLayout {Layout.fillWidth:true;Button{text:"写当前场";enabled:!!page.unit.id;onClicked:page.openWriting("unit",[page.unit.id],page.effectivePrompts.unit_writing_shortcut || "") }Button{text:"修改当前场";enabled:!!page.unit.id;onClicked:page.openWriting("unit",[page.unit.id],"")}}
 
-                    
+
                     ComboBox {objectName:"scriptBodyUnit";Layout.fillWidth:true;model:page.units.map(function(u){return {id:u.id,title:page.unitTitle(u)}});textRole:"title";displayText:page.unit.id?page.unitTitle(page.unit):"选择场次";currentIndex:Math.max(0,page.units.findIndex(function(u){return u.id===page.selectedUnitId}));onActivated:page.selectedUnitId=model[currentIndex].id}
                     Label {text:page.unit.id?page.unitTitle(page.unit)+" · "+(page.bodyLabels[page.unit.body_presence]||"正文为空")+" · "+(page.basisLabels[page.unit.basis_state]||"依据未记录"):"";color:t.muted;wrapMode:Text.Wrap;Layout.fillWidth:true;HoverHandler{id:bodyUnitHover}ToolTip.visible:bodyUnitHover.hovered;ToolTip.text:page.unit.id||""}
                     Button {objectName:"scriptAddBlock";text:"添加正文块";enabled:!!page.unit.id;onClicked:blockEditor.openFor(null)}
@@ -390,7 +448,7 @@ ListView {
                             }
                         }
                     }
-                
+
                 }
             }
         }
@@ -421,22 +479,42 @@ ListView {
         }
     }
     Dialog {
-        id:timelineImportDialog;objectName:"scriptTimelineImportDialog";title:page.timelineImportScope.appending?"追加导入时间点":"从改编时间线导入独立副本";modal:true;anchors.centerIn:parent;width:Math.min(720,page.width-40);height:Math.min(620,page.height-30)
+        id:styleDialog;objectName:"scriptProjectStyleDialog";title:"项目风格约定";modal:true;anchors.centerIn:parent;width:Math.min(820,page.width-40);height:Math.min(620,page.height-30)
+        property string projectPath:""
+        property int revision:0
+        property string originalText:""
+        contentItem:ColumnLayout {
+            Label {Layout.fillWidth:true;wrapMode:Text.Wrap;color:t.muted;text:"当前工程的全部剧本共用。可自由约定剧本风格、视觉表达，以及对白、动作或场景的风格；无需按固定模板填写。约定供创作参考，本次具体要求优先。"}
+            ScrollView {Layout.fillWidth:true;Layout.fillHeight:true;TextArea{id:styleText;objectName:"scriptProjectStyleText";selectByMouse:true;wrapMode:TextEdit.Wrap;placeholderText:"写下本工程希望保留的表达方式、节奏、语言或其他风格约定。可留空。"}}
+            Label {objectName:"scriptProjectStyleMessage";Layout.fillWidth:true;wrapMode:Text.Wrap;visible:!!page.styleMessage;text:page.styleMessage;color:t.warn}
+            RowLayout {
+                Layout.fillWidth:true
+                Button {objectName:"scriptProjectStyleRevert";text:"还原未保存修改";enabled:!page.styleSaving;onClicked:styleText.text=styleDialog.originalText}
+                Item {Layout.fillWidth:true}
+                Button {text:"取消";onClicked:styleDialog.close()}
+                Button {objectName:"scriptProjectStyleSave";text:"保存风格约定";highlighted:true;enabled:page.styleLoaded&&!page.styleSaving&&!app.busy&&styleText.text!==styleDialog.originalText;onClicked:{if(styleDialog.projectPath!==(app.project.path||"")){styleDialog.close();return}page.styleSaving=true;bridge.saveProjectStyle(styleText.text,styleDialog.revision)}}
+            }
+        }
+    }
+    ScriptTimelineEditor {id:timelineEditor;host:page}
+    Dialog {
+        id:timelineDeleteDialog;objectName:"scriptTimelineDeleteDialog";title:"删除时间点及子树";modal:true;anchors.centerIn:parent;width:Math.min(440,page.width-30)
+        contentItem:ColumnLayout {
+            Label {Layout.fillWidth:true;wrapMode:Text.Wrap;text:"将永久移除本剧本所选时间点、全部下属和关联状态。已有段落、场表和正文保留，已绑定范围可能失效并显示诊断。";color:t.warn}
+            RowLayout {Layout.fillWidth:true;Item{Layout.fillWidth:true}Button{text:"取消";onClicked:timelineDeleteDialog.close()}Button{objectName:"scriptTimelineDeleteConfirm";text:"删除节点及子树";enabled:!page.timelineBusy&&!app.busy;onClicked:{var scope=page.timelineDeleteScope;if(scope.screenplay_id!==page.screenplay.id||scope.timeline_id!==page.screenplay.timeline_id){timelineDeleteDialog.close();return}page.timelineAction("delete_screenplay_timeline_node",scope.node_id,scope.revision)}}}
+        }
+    }
+    Dialog {
+        id:timelineImportDialog;objectName:"scriptTimelineImportDialog";title:page.timelineImportScope.appending?"追加导入时间点":"从改编时间线导入独立副本";modal:true;anchors.centerIn:parent;width:Math.min(1180,page.width-40);height:Math.min(620,page.height-30)
         contentItem:ColumnLayout {
             Label {text:page.timelineImportScope.appending?"新时间点将追加到剧本时间表；已有节点、段落、场表和正文保留。可选择已导入的容器，追加其新增子项。":"选择时间点及其子项，所需人物、地点和属性一并导入。剧本保留独立副本，源改编后续变化不会自动覆盖。";wrapMode:Text.Wrap;Layout.fillWidth:true;color:t.body}
-            ListView {
-                objectName:"scriptTimelineImportTree";Layout.fillWidth:true;Layout.fillHeight:true;clip:true;model:page.timelineImportRows
-                delegate:RowLayout {
-                    required property var modelData
-                    width:ListView.view.width
-                    ToolButton {text:page.timelineImportCollapsed[modelData.id]?"+":"-";visible:(modelData.children||[]).length>0;Layout.leftMargin:(modelData.depth||0)*16;onClicked:{var folded=Object.assign({},page.timelineImportCollapsed);folded[modelData.id]=!folded[modelData.id];page.timelineImportCollapsed=folded}}
-                    CheckDelegate {
-                        objectName:"scriptTimelineImportChoice";property string nodeId:modelData.id
-                        Layout.fillWidth:true;Layout.leftMargin:(modelData.children||[]).length?0:(modelData.depth||0)*16
-                        text:({storyline:"主要故事",big_event:"大事件",scene:"场景",event:"事件",action:"动作"}[modelData.node_type]||"时间点")+" · "+modelData.name+(modelData.imported?"（已导入）":"")+(modelData.suppressed?"（屏蔽）":"");checked:page.timelineImportSelection.indexOf(modelData.id)>=0
-                        onToggled:{var selected=page.timelineImportSelection.slice();if(checked&&selected.indexOf(modelData.id)<0)selected.push(modelData.id);if(!checked)selected=selected.filter(function(id){return id!==modelData.id});page.timelineImportSelection=selected}
-                    }
-                }
+            TimelineImportColumns {
+                objectName:"scriptTimelineImportPicker"
+                Layout.fillWidth:true;Layout.fillHeight:true
+                t:page.t
+                candidates:page.timelineImportCandidates
+                selection:page.timelineImportSelection
+                onSelectionEdited:function(ids){page.timelineImportSelection=ids}
             }
             RowLayout {Layout.fillWidth:true;Label{text:"已选 "+page.timelineImportSelection.length+" 项";color:t.muted}Item{Layout.fillWidth:true}Button{text:"取消";onClicked:timelineImportDialog.close()}Button{objectName:"scriptTimelineImportConfirm";text:page.timelineImportScope.appending?"追加所选":"导入所选";enabled:page.timelineImportSelection.length>0;onClicked:page.importTimelineSelection()}}
         }
@@ -458,6 +536,11 @@ ListView {
             Label{objectName:"scriptWritingTargetIds";visible:showTargetIds.checked;text:(page.writingTarget.ids||[]).join("\n");wrapMode:Text.Wrap;Layout.fillWidth:true;color:t.muted;font.pixelSize:11}
             Label{text:"仅修改本次固定目标；后续页面选择不会改变已发出的任务。";color:t.muted;wrapMode:Text.Wrap;Layout.fillWidth:true}
             CheckBox {text:page.writingTarget.target_manifest?"固定批量：仅正文为空的启用普通场景":"允许修改目标范围内已有正文";checked:page.writingTarget.include_existing===true;enabled:!page.writingTarget.target_manifest;onToggled:{var target=Object.assign({},page.writingTarget);target.include_existing=checked;page.writingTarget=target}}
+            RowLayout {
+                Layout.fillWidth:true
+                Label {objectName:"scriptWritingStyleSummary";Layout.fillWidth:true;wrapMode:Text.Wrap;color:t.muted;text:page.projectStyle.text?"本次写作使用项目风格约定；本次具体创作要求优先。":"尚未设置项目风格约定，可按本次要求自由创作。"}
+                Button {objectName:"scriptWritingStyleOpen";text:page.projectStyle.text?"查看风格约定":"设置风格约定";enabled:page.styleLoaded;onClicked:page.openProjectStyle()}
+            }
             TextArea{id:writingPrompt;objectName:"scriptWritingPrompt";placeholderText:"写作或修改要求";wrapMode:TextEdit.Wrap;Layout.fillWidth:true;Layout.fillHeight:true}
             RowLayout{Item{Layout.fillWidth:true}Button{text:"取消";onClicked:writingDialog.close()}Button{objectName:"scriptWritingSend";text:"发送到当前聊天";enabled:!!writingPrompt.text.trim()&&(page.writingTarget.ids||[]).length>0;onClicked:{app.assistantOpen=true;bridge.screenplayWritingTurn(writingPrompt.text,page.writingTarget)}}}
         }

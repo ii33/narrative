@@ -40,7 +40,7 @@ Dialog {
         ColumnLayout {
             width: parent.width; spacing: 8
             Label { visible: !!editor.errorText; text: editor.errorText; color: t.bad; wrapMode: Text.Wrap; Layout.fillWidth:true }
-            Label {objectName:"scriptSceneTableGuide";text:"同一连续时空默认一场；情绪、招式、胜负或镜头变化不是拆场边界。事件是场内节拍，场表不生成分镜、特效方案或镜头要求。";color:t.muted;wrapMode:Text.Wrap;Layout.fillWidth:true}
+            Label {objectName:"scriptSceneTableGuide";text:"按创作需要编写或修改内容。对话使用工程设置中的提示词，已有内容可反复编辑。场表所有字段都会供写作参考，请与当前事件线核对。";color:t.muted;wrapMode:Text.Wrap;Layout.fillWidth:true}
             RowLayout { ComboBox { id: kind; model:["普通场景","独立画面段"] } TextField { id:number; placeholderText:"场号"; Layout.preferredWidth:100 } CheckBox { id:enabledBox; text:"纳入输出与批量" } }
             TextField { id:titleField; objectName:"scriptPlanTitle"; placeholderText:"场表标题"; Layout.fillWidth:true }
             TextArea { id:summary; objectName:"scriptPlanSummary"; placeholderText:"剧情概要（必填）"; wrapMode:TextEdit.Wrap; Layout.fillWidth:true; Layout.preferredHeight:90 }
@@ -50,12 +50,13 @@ Dialog {
             RowLayout { TextField { id:duration; placeholderText:"预计秒数"; validator:DoubleValidator { bottom:0.01 } Layout.fillWidth:true } ComboBox { id:mode; model:["normal","flashback","dream","imagined"] } ComboBox { id:presentation; visible:kind.currentIndex===1; model:["title_card","black_screen","credits","other"] } }
             TextField { id:goal; placeholderText:"目标"; Layout.fillWidth:true }
             TextField { id:conflict; placeholderText:"冲突"; Layout.fillWidth:true }
-            TextField { id:outcome; placeholderText:"结果"; Layout.fillWidth:true }
+            Label {text:"结果（可选）";color:t.ink}
+            TextArea { id:outcome; objectName:"scriptPlanOutcome"; placeholderText:"本场之后的结果或变化";wrapMode:TextEdit.Wrap;Layout.preferredHeight:60;Layout.fillWidth:true }
             Button {objectName:"scriptPlanAdvancedToggle";text:editor.showAdvanced?"收起来源与可选信息":"来源与可选信息";onClicked:editor.showAdvanced=!editor.showAdvanced}
             ColumnLayout {
                 objectName:"scriptPlanAdvanced";visible:editor.showAdvanced;Layout.fillWidth:true
                 Label {visible:(editor.plan.source_event_ids||[]).length>0;text:"来源事件："+(editor.plan.source_event_ids||[]).join("、");color:t.muted;wrapMode:Text.Wrap;Layout.fillWidth:true}
-                TextArea {id:notes;objectName:"scriptPlanProductionNotes";placeholderText:"场级创作备注（可选，不填写镜头、分镜或特效制作要求）";wrapMode:TextEdit.Wrap;Layout.fillWidth:true}
+                TextArea {id:notes;objectName:"scriptPlanProductionNotes";placeholderText:"创作备注（可选）";wrapMode:TextEdit.Wrap;Layout.fillWidth:true}
                 Label {text:"仅明确的人物/物品状态连续性（可选JSON数组）";color:t.muted;wrapMode:Text.Wrap;Layout.fillWidth:true}
                 TextField {id:continuity;objectName:"scriptPlanContinuity";Layout.fillWidth:true}
                 TextField {id:storyTime;objectName:"scriptPlanStoryTime";placeholderText:"可选故事时间（JSON对象）";Layout.fillWidth:true}

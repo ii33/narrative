@@ -17,7 +17,7 @@ def test_reference_prompt_is_concise_and_does_not_require_repeating_existing_nod
         assert "唯一名称可用" in prompt and "同名必须明确ID" in prompt
         assert "不取首个匹配" in prompt
         assert "用户说：请补充已知人物的属性。" in prompt
-    assert assistant.ASSISTANT_VERSION == "conversation-agent/22"
+    assert assistant.ASSISTANT_VERSION == "conversation-agent/26"
     assert "@1" in tool_api.TOOLS["submit_extraction"].params["result"]["description"]
 
 

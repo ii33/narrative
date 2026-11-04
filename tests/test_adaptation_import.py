@@ -65,12 +65,13 @@ def test_selected_point_imports_effective_state_boundaries_and_location_only(pro
     state = project.import_adaptation([ids["事件1"]])
     imported = {n["id"]: n for n in state["nodes"]}
     assert ids["事件1"] in imported
-    assert ids["事件0"] in imported and ids["事件2"] in imported  # exact interval bounds
+    assert ids["事件0"] not in imported and ids["事件2"] not in imported
+    assert {row["id"] for row in state["state_anchors"]} == {ids["事件0"], ids["事件2"]}
     assert ids["事件3"] not in imported and ids["场景3"] not in imported
     assert ids["丙"] not in imported and ids["远处"] not in imported
     assert ids["桥边"] in imported
     assert ids["屋内"] not in imported
-    assert imported[ids["等候"]]["events"] == [ids[f"场景{i}"] for i in range(3)]
+    assert imported[ids["等候"]]["events"] == [ids["场景1"]]
     coat = [p for p in state["properties"] if p.get("property_id") == "服装"]
     assert len(coat) == 1 and coat[0]["value"] == "青衣"
     assert coat[0]["event_id"] == ids["事件0"] and coat[0]["end_event_id"] == ids["事件2"]
@@ -108,7 +109,7 @@ def test_reimport_is_idempotent_preserves_local_changes_and_records_source_confl
     prior_conflicts = state["conflicts"]
     state = project.import_adaptation([ids["事件3"]])
     assert state["conflicts"] == prior_conflicts
-    assert next(n for n in state["nodes"] if n["id"] == ids["等候"])["events"] == [ids[f"场景{i}"] for i in range(4)]
+    assert next(n for n in state["nodes"] if n["id"] == ids["等候"])["events"] == [ids["场景1"], ids["场景3"]]
     assert project.check_adaptation()["ok"]
 
 

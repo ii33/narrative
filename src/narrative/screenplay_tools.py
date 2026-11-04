@@ -13,7 +13,7 @@ def register(Tool, register_tool, validate):
     screenplay_id = {"screenplay_id": text | {"required": True}}
     selection = {"selection_ids": strings, "start_node_id": text, "end_node_id": text}
     basis = {"span_fingerprint": text | {"required": True, "description": "照用context返回的范围依据编号；程序内部还原校验，不计算hash"}, "context_fingerprint": text | {"required": True, "description": "照用context返回的上下文依据编号；程序内部校验"},
-             "dependency_refs": objects, "manifest_ref": {"type": ["string", "null"], "description": "对话任务由程序内部关联，模型省略"}, "task_id": {"type": ["string", "null"], "description": "对话任务由程序内部注入，模型省略"}}
+             "dependency_refs": objects | {"description": "可选明确参考kind/id数组；默认只含相关精简资料，可显式读取unit_plan/unit_body/previous_unit或adaptation_entity（含屏蔽/范围外参考），不会扩大创作或写入目标"}, "manifest_ref": {"type": ["string", "null"], "description": "对话任务由程序内部关联，模型省略"}, "task_id": {"type": ["string", "null"], "description": "对话任务由程序内部注入，模型省略"}}
 
     def add(name, summary, params, *, writes=False):
         def invoke(ops, args):
@@ -46,7 +46,7 @@ def register(Tool, register_tool, validate):
         "moment_ids": strings | {"required": True}, "expected_adaptation_revision": integer | {"required": True, "description": "源改编当前revision"}}, writes=True)
     add("append_screenplay_timeline", "将新选改编时间点及相关状态追加到剧本时间线末尾；已有节点、顺序、值与正文不覆盖；仅可为未改旧值补齐合法后续结束边界。重复ID跳过，实际状态冲突原子拒绝", screenplay_id | timeline_revision | reason | {
         "moment_ids": strings | {"required": True}, "expected_adaptation_revision": integer | {"required": True}}, writes=True)
-    placement = {"after_id": {"type": ["string", "null"]}, "parent_id": {"type": ["string", "null"]}}
+    placement = {"after_id": {"type": ["string", "null"], "description": "排序参照；新建/移动省略或null置于开头，复制省略或null紧随原子树末项"}, "parent_id": {"type": ["string", "null"], "description": "省略或null保持归属；空字符串移为顶层，E/A仍须合法父级"}}
     node_id = {"node_id": text | {"required": True}}
     add("edit_screenplay_timeline_node", "在目标剧本独立时间线新建或编辑节点，绝不修改源改编；新物品initial_holder必须明确", screenplay_id | timeline_revision | reason | placement | {
         "node_id": {"type": ["string", "null"]}, "changes": obj | {"required": True}}, writes=True)
@@ -70,18 +70,18 @@ def register(Tool, register_tool, validate):
     add("update_script_segment", "修改段落要求或范围绑定，使用本对象revision，不清空已有场表或正文", reason | {
         "segment_id": text | {"required": True}, "changes": obj | {"required": True}, "expected_revision": integer | {"required": True}}, writes=True)
     add("read_script_segment", "读取段落、场表、正文及逐场依据状态", {"segment_id": text | {"required": True}})
-    add("read_scene_table_context", "读取有效段落范围、场级拆场规则、旧场表编辑元数据及真实依赖（不返回旧概要或制作备注）；同一连续时空默认一场，事件/节拍不是场，情绪招式胜负或镜头变化不作场界；返回程序维护的依据编号", {
-        "segment_id": text | {"required": True}, "dependency_refs": objects})
-    unit_draft = {"type": "object", "description": "新场可省id；已有场必须传真实id。kind=scene/screen_segment，enabled，scene_number及完整plan；plan至少summary，含title/interior_exterior/location_id/location_text/time_label/cast_ids/goal/conflict/outcome/narrative_mode和必要的场级状态连续性。同一连续时空默认一场，事件和动作只是场内节拍；拆场不生成分镜、特效方案、镜头要求。plan.source_event_ids可选，仅用于记录有效事件引用，不强制分配；场数和场界按标准由模型判断，不填写结构化边界标签。保留所有已有ID；合场时保留一个启用场，冗余场设enabled=false且plan={}，不删正文。制作备注只保留必要场级信息，不生成分镜或特效方案。"}
-    add("submit_scene_table", "原子提交场级场表及依据；同一连续时空默认一场，情绪/招式/胜负/镜头变化不是拆场边界，不按事件逐条建场，不生成分镜、特效方案或镜头要求；稳定场次ID共用于正文，不得隐式删除已有场或清空正文", reason | basis | {
+    add("read_scene_table_context", "读取目标段落、当前场表、范围与有效工程指导，返回提交所需修订和依据", {
+        "segment_id": text | {"required": True}, "dependency_refs": objects | {"description": "可选明确参考kind/id数组；默认只含相关精简资料，可显式读取unit_plan/unit_body/previous_unit或adaptation_entity（含屏蔽/范围外参考），不会扩大创作或写入目标"}})
+    unit_draft = {"type": "object", "description": "新场可省id；已有场传真实id。kind=scene/screen_segment，enabled，scene_number及完整plan；启用场至少非空summary，其余字段遵循schema。plan.source_event_ids可选，只记录本范围有效事件引用。保留全部已有ID；停用已有场须enabled=false且plan={}，不删除正文。"}
+    add("submit_scene_table", "原子提交场表及依据；沿用稳定场次ID，不隐式删除已有场或清空正文", reason | basis | {
         "segment_id": text | {"required": True}, "units": {"type": "array", "items": unit_draft, "required": True},
         "expected_outline_revision": integer | {"required": True}}, writes=True)
-    add("apply_scene_table_changes", "手工原子改场表：insert(unit,after_id?)/update(unit_id,changes)/move(unit_id,after_id?)/delete(unit_id,body_policy=require_empty|discard)。同一连续时空默认一场，不以情绪招式胜负或镜头变化拆场；不生成分镜特效制作要求。不支持隐式拆合或无策略删除正文", reason | {
+    add("apply_scene_table_changes", "原子调整场表insert/update/move/delete；删除须显式body_policy=require_empty或discard，不隐式清空正文", reason | {
         "segment_id": text | {"required": True}, "changes": objects | {"required": True}, "expected_outline_revision": integer | {"required": True}}, writes=True)
     add("adopt_scene_table", "将当前场表标记采用或取消；仅工作标记，不构成人工生成审批", reason | {
         "segment_id": text | {"required": True}, "expected_outline_revision": integer | {"required": True}, "adopted": {"type": "boolean"}}, writes=True)
     add("read_script_unit_context", "读取单场plan、绑定范围、实际前文依赖、当前正文和提交指纹；不以终点状态代替全段", {
-        "unit_id": text | {"required": True}, "dependency_refs": objects, "target_block_ids": strings})
+        "unit_id": text | {"required": True}, "dependency_refs": objects | {"description": "可选明确参考kind/id数组；默认只含相关精简资料，可显式读取unit_plan/unit_body/previous_unit或adaptation_entity（含屏蔽/范围外参考），不会扩大创作或写入目标"}, "target_block_ids": strings})
     block_draft = {"type": "object", "description": "{id?,type,payload}。新块省略id由程序自动分配可读编号；更新已有块才使用读取的稳定id。type:action(text),dialogue(speaker_id?,speaker_label,text,delivery=on_screen/off_screen/voice_over/inner_voice,parenthetical),screen_text(text,presentation=overlay/card),sound(text,category=effect/music/other,entity_id?),transition(kind,text?)"}
     add("submit_script_unit", "逐场原子提交正文和当前WritingBasis；校验本场plan/body修订及实际输入依赖，不要求无关场修订一致", reason | basis | {
         "unit_id": text | {"required": True}, "blocks": {"type": "array", "items": block_draft, "required": True},
@@ -92,7 +92,7 @@ def register(Tool, register_tool, validate):
         "expected_body_revision": integer | {"required": True}}, writes=True)
     add("mark_writing_basis_current", "明确核对后记录新的当前写作依据和理由；不修改正文，不是接受队列", reason | {
         "target_kind": {"type": "string", "enum": ["segment", "unit"], "required": True}, "target_id": text | {"required": True},
-        "expected_revision": integer | {"required": True}, "dependency_refs": objects,
+        "expected_revision": integer | {"required": True}, "dependency_refs": objects | {"description": "可选明确参考kind/id数组；默认只含相关精简资料，可显式读取unit_plan/unit_body/previous_unit或adaptation_entity（含屏蔽/范围外参考），不会扩大创作或写入目标"},
         "manifest_ref": {"type": ["string", "null"], "description": "对话任务由程序内部关联，模型省略"}, "task_id": {"type": ["string", "null"], "description": "对话任务由程序内部注入，模型省略"}}, writes=True)
     add("prepare_script_writing_targets", "冻结按剧本顺序批量写作的unit清单；默认仅enabled且无正文scene，重写已有正文须明确指定", {
         "screenplay_id": text | {"required": True}, "unit_ids": strings,

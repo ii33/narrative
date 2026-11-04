@@ -7,22 +7,6 @@ from contextvars import ContextVar
 
 _METADATA: ContextVar[dict[str, str] | None] = ContextVar("tool_execution_metadata", default=None)
 _KEYS = {"task_id", "manifest_ref"}
-_SCENE_TABLE: ContextVar[bool] = ContextVar("scene_table_generation", default=False)
-
-
-@contextmanager
-def bind_scene_table_generation():
-    token = _SCENE_TABLE.set(True)
-    try:
-        yield
-    finally:
-        _SCENE_TABLE.reset(token)
-
-
-def is_scene_table_generation() -> bool:
-    return _SCENE_TABLE.get()
-
-
 @contextmanager
 def bind_tool_execution_metadata(metadata: Mapping[str, str]):
     """Bind one invocation's immutable metadata and always restore its caller."""

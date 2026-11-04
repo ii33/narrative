@@ -10,9 +10,9 @@ from narrative.project_package import layout
 from narrative.tool_api import TOOLS, call
 
 
-def test_prompt_schema_and_tools_expose_one_consistent_direction_example():
+def test_prompt_schema_and_tools_expose_consistent_direction_semantics():
     example = "node=A,property=父亲,value=B表示B是A的父亲"
-    assert example in _first_prompt("核对关系")
+    assert "value所指对象相对于node所属对象的身份、关系或作用" in _first_prompt("核对关系")
     fields = RESULT_SCHEMA["properties"]["properties"]["items"]["properties"]
     assert example in fields["property"]["description"]
     assert "参照方A" in fields["node"]["description"]

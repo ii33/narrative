@@ -237,6 +237,8 @@ ALIASES.update({
 # All screenplay flags derive from the shared tool schema, including JSON/file
 # inputs, so CLI, MCP and the resident model cannot gain divergent parameters.
 _SCREENPLAY_ALIASES = {
+    "project-style": "load_project_style", "project-style-save": "save_project_style",
+    "prompt-settings": "load_prompt_settings", "prompt-override": "save_prompt_override",
     "screenplay-storage": "inspect_screenplay_storage", "screenplay-storage-reset": "reset_screenplay_storage",
     "screenplay-timeline-candidates": "import_screenplay_timeline_candidates",
     "screenplay-timeline": "read_screenplay_timeline", "screenplay-timeline-import": "import_screenplay_timeline",
@@ -337,7 +339,7 @@ def _bind(args, spec) -> dict:
             continue
         if value is None or value == [] or (kind == "flag" and value is False):
             continue
-        if param in {"after_id", "parent_id"} and value == "":
+        if param == "after_id" and value == "":
             # These Operations use None as their default placement. Omit the
             # transport field so the published string schema stays accurate.
             continue

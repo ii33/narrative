@@ -13,6 +13,7 @@ from contextlib import closing
 
 from .browse_view import GRANULARITIES, LABELS, MOMENT_LEVELS, matches
 from .property_labels import label_for
+from .state_anchors import anchor_nodes
 
 MOMENTS = set(LABELS)
 
@@ -21,7 +22,12 @@ class _View:
     def __init__(self, snapshot):
         self.snapshot = snapshot
         self.nodes = {node["id"]: node for node in snapshot["nodes"]}
+        self.anchors = anchor_nodes(snapshot)
         self.ordered = sorted(self.nodes.values(), key=lambda node: node["sort_id"])
+        active_points = [node for node in self.ordered if self.active(node["id"]) and node["node_type"] in {"event", "action"}]
+        if not active_points:
+            active_points = [node for node in self.ordered if self.active(node["id"]) and node["node_type"] in MOMENTS]
+        self.latest_cutoff = max((node["sort_id"] for node in active_points), default=None)
         self.definitions = {row["id"]: row for row in snapshot["properties"]
                             if row.get("kind") == "property_definition"}
         self.records = [row for row in snapshot["properties"] if row.get("kind") == "property_value"]
@@ -31,7 +37,7 @@ class _View:
                 self.parents.setdefault(child, []).append(node["id"])
         self.introductions = {node["id"]: node["sort_id"] for node in self.ordered}
         def introduce(identifier, anchor):
-            if identifier in self.nodes and anchor in self.nodes and self.active(anchor):
+            if identifier in self.nodes and self.boundary(anchor) is not None and self.active(anchor):
                 self.introductions[identifier] = min(self.introductions[identifier], self.rank(anchor))
         for node in self.ordered:
             if not self.active(node["id"]):
@@ -52,7 +58,7 @@ class _View:
         # Authored introduction overrides inferred involvement, even if a
         # participant/reference was deliberately placed in an earlier event.
         for node in self.ordered:
-            if node.get("point_id") in self.nodes:
+            if self.boundary(node.get("point_id")) is not None:
                 self.introductions[node["id"]] = self.rank(node["point_id"])
 
     def node(self, identifier):
@@ -60,12 +66,18 @@ class _View:
             raise ValueError("改编节点不存在")
         return self.nodes[identifier]
 
+    def boundary(self, identifier):
+        return self.nodes.get(identifier) or self.anchors.get(identifier)
+
     def active(self, identifier):
-        node = self.nodes.get(identifier)
+        node = self.boundary(identifier)
         return bool(node and not node.get("suppressed") and not node.get("retracted"))
 
     def rank(self, identifier):
-        return self.node(identifier)["sort_id"]
+        point = self.boundary(identifier)
+        if point is None:
+            raise ValueError("改编时间边界不存在")
+        return point["sort_id"]
 
     def introduction(self, node):
         return self.introductions[node["id"]]
@@ -118,6 +130,10 @@ class _View:
         return list(dict.fromkeys(ref for ref in refs if isinstance(ref, str) and ref in self.nodes))
 
     def record_visible(self, row, cutoff=None):
+        # Metadata bounds locate state in the local timeline; they do not make
+        # unimported future narrative the user's latest reading position.
+        if cutoff is None:
+            cutoff = self.latest_cutoff
         owner = self.nodes.get(row.get("node_id"))
         if not owner or not self.visible(owner["id"], cutoff):
             return False
@@ -125,10 +141,16 @@ class _View:
         if row.get("holder_id") and not self.visible(row["holder_id"], cutoff, context):
             return False
         start, end = row.get("event_id"), row.get("end_event_id")
-        if start and (not self.visible(start, cutoff, context)):
-            return False
-        if end and (end not in self.nodes or not self.active(end)):
-            return False
+        if start:
+            if start in self.anchors:
+                if self.anchors[start].get("context_id", "canon") != context or (cutoff is not None and self.rank(start) > cutoff):
+                    return False
+            elif not self.visible(start, cutoff, context):
+                return False
+        if end:
+            endpoint = self.boundary(end)
+            if endpoint is None or not self.active(end) or endpoint.get("context_id", "canon") != context:
+                return False
         if cutoff is None:
             if end:
                 return False
@@ -144,7 +166,7 @@ class _View:
 
     def record_key(self, row):
         # Stable list order handles simultaneous values; IDs have no temporal meaning.
-        return self.rank(row["event_id"]) if row.get("event_id") in self.nodes else -1
+        return self.rank(row["event_id"]) if self.boundary(row.get("event_id")) is not None else -1
 
     def steps(self, kind):
         return [{"id": node["id"], "label_id": node["id"], "name": node["name"],

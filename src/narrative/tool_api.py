@@ -1329,6 +1329,15 @@ _ASSET_PAYLOAD = {"type": "object", "required": True, "description": "无id新�
                    "reference_images": {"type": "array", "items": _ASSET_IMAGE}, "revision": {"type": "integer"}}, "additionalProperties": False}
 _adaptation_tool("adaptation_snapshot", "读取独立改编节点、排序、属性及同步冲突", {})
 _adaptation_tool("check_adaptation", "静态检查改编结构、引用和属性有效区间", {})
+_adaptation_tool("load_project_style", "读取工程共享风格约定及独立修订；单剧本特殊要求保留在creative_brief", {})
+_adaptation_tool("save_project_style", "保存工程共享风格约定，可空；使用独立修订并记录审计，不改正文", {
+    "text": {"type": "string", "required": True}, "expected_revision": {"type": "integer", "required": True},
+    "reason": {"type": "string"}}, writes=True)
+_adaptation_tool("load_prompt_settings", "读取工程可编辑提示词、内置默认、有效值和设置修订", {})
+_adaptation_tool("save_prompt_override", "修改单项工程提示词；text=null恢复默认；保留设置修订检查与审计，下一任务使用新配置", {
+    "prompt_id": {"type": "string", "required": True},
+    "text": {"type": ["string", "null"], "required": True},
+    "expected_revision": {"type": "integer", "required": True}, "reason": {"type": "string"}}, writes=True)
 _adaptation_tool("import_adaptation_candidates", "列出可多选导入的提取时间点及层级；不写入", {})
 _adaptation_tool("import_adaptation", "从提取导入指定多个时间点、必要结构与相关有效状态，保留本地改编", _ADAPT_REV | {
     "moment_ids": {"type": "array", "items": {"type": "string"}, "required": True,
@@ -1425,12 +1434,6 @@ def call(name: str, params: dict | None = None, *, project: str | Path | None = 
                 if key in tool.params:
                     resolved[key] = value
             result = tool.handler(ops, resolved)
-            from .tool_execution_context import is_scene_table_generation
-            if is_scene_table_generation() and isinstance(result, dict) and "units" in result:
-                # Write acknowledgements must not smuggle old scene prose back
-                # into a generation task after its read tools have been scoped.
-                segment_id = resolved.get("segment_id") or result.get("id")
-                result = ops.read_scene_table_context(segment_id) | {"status": result.get("status", "accepted")}
             return encode_tool_result(ops, result)
         except ValueError as exc:
             raise ToolError(str(exc)) from exc

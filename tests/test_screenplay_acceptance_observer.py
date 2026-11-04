@@ -45,3 +45,19 @@ def test_usage_is_cumulative_across_sdk_argument_repairs_and_deduplicates_archiv
     assert observer.total() == 100
     (task / "metadata-2.json").write_text(json.dumps(current), encoding="utf-8")
     assert observer.total() == 100
+
+
+def test_tool_request_metadata_enrichment_does_not_count_usage_twice(tmp_path):
+    import json
+
+    module = runpy.run_path(str(Path(__file__).parents[1] / "scripts/accept_screenplay.py"), run_name="acceptance_observer_test")
+    current = {"model_requests": [{"complete": True, "raw": "", "usage": {"total_tokens": 33030},
+        "tool_calls": [{"id": "provider-call-stable", "argument_fragments": ["{", "}"]}]}]}
+    observer = module["TaskUsageObserver"](lambda: current, tmp_path)
+    assert observer.total() == 33030
+    task = tmp_path / "task"
+    task.mkdir()
+    enriched = {"model_requests": [{"complete": True, "raw": "final raw", "usage": {"total_tokens": 33030},
+        "tool_calls": [{"id": "provider-call-stable", "argument_fragments": ["{}"]}]}]}
+    (task / "metadata-1.json").write_text(json.dumps(enriched), encoding="utf-8")
+    assert observer.total() == 33030

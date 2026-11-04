@@ -15,6 +15,25 @@ Item {
     property string message: ""
     property string projectNameDraft: ""
     property string boundProjectPath: ""
+    property var promptSettings: ({prompts:[],revision:0})
+    property bool promptsLoaded: false
+    property bool promptSaving: false
+    property string promptMessage: ""
+    readonly property var selectedPrompt: (promptSettings.prompts || [])[promptType.currentIndex] || ({})
+    function openPrompt(preview) {
+        promptEditor.preview = preview
+        promptEditor.promptId = selectedPrompt.id || ""
+        promptEditor.promptLabel = selectedPrompt.label || "提示词"
+        promptEditor.projectPath = app.project.path || ""
+        promptEditor.revision = promptSettings.revision
+        promptText.text = selectedPrompt.effective || ""
+        promptEditor.originalText = promptText.text
+        promptEditor.open()
+    }
+    function restorePrompt() {
+        promptSaving = true
+        bridge.savePromptOverride(selectedPrompt.id, null, promptSettings.revision)
+    }
     readonly property var fields: [
         {key:"base_url", label:"API地址", name:"projectBaseUrl"},
         {key:"model", label:"模型", name:"projectModel"},
@@ -37,6 +56,7 @@ Item {
                 projectNameDraft = app.project.title || ""
             }
             bridge.loadProjectSettings()
+            bridge.loadPromptSettings()
         }
     }
     function applyProfile(value) {
@@ -67,6 +87,8 @@ Item {
                 page.boundProjectPath = path
                 page.projectNameDraft = app.project.title || ""
                 page.loaded = false
+                page.promptsLoaded = false; page.promptSettings = ({prompts:[],revision:0}); page.promptMessage = ""; page.promptSaving = false
+                promptEditor.close()
                 page.load()
             } else {
                 page.projectNameDraft = app.project.title || ""
@@ -76,7 +98,13 @@ Item {
     Connections {
         target: bridge
         function onResultReady(kind,payload) {
-            if (kind === "project_settings") {
+            if (kind === "prompt_settings") {
+                if (payload.project_path !== (app.project.path || "")) return
+                var priorId = page.selectedPrompt.id || ""
+                page.promptSettings = payload; page.promptsLoaded = true; page.promptSaving = false
+                for (var index=0;index<(payload.prompts || []).length;++index) if(payload.prompts[index].id===priorId)promptType.currentIndex=index
+                if(payload.saved){page.promptMessage=payload.restored?"已恢复所选提示词默认内容。":"提示词已保存，下次任务生效。";promptEditor.close()}
+            } else if (kind === "project_settings") {
                 page.catalog=payload.catalog || page.catalog
                 page.granularity=payload.extraction_granularity
                 granularityBox.currentIndex=page.granularity === "fine" ? 1 : 0
@@ -89,7 +117,8 @@ Item {
             } else if (kind === "provider" && payload.profile) page.applyProfile(payload.profile)
         }
         function onErrorOccurred(kind,message) {
-            if (kind === "project_settings") page.message="设置未保存："+message
+            if (kind === "prompt_settings") {page.promptSaving=false;page.promptMessage="提示词未保存："+message}
+            else if (kind === "project_settings") page.message="设置未保存："+message
             else if (kind === "project_renamed") page.message="工程名称未保存："+message
         }
     }
@@ -118,6 +147,23 @@ Item {
                     text:"保存名称"
                     enabled:page.loaded && !app.busy && page.projectNameDraft.trim().length > 0
                     onClicked: bridge.renameProject(page.projectNameDraft.trim())
+                }
+            }
+            GroupBox {
+                title:"内置提示词"
+                Layout.fillWidth:true
+                contentItem:ColumnLayout {
+                    Label {Layout.fillWidth:true;wrapMode:Text.Wrap;color:page.t.muted;text:"按用途编辑当前工程的提示词。修改从下次任务生效；恢复默认只影响所选项。"}
+                    ComboBox {id:promptType;objectName:"projectPromptType";Layout.fillWidth:true;model:page.promptSettings.prompts || [];textRole:"label";enabled:page.promptsLoaded&&!page.promptSaving}
+                    Label {objectName:"projectPromptDescription";Layout.fillWidth:true;wrapMode:Text.Wrap;color:page.t.body;text:page.selectedPrompt.description || ""}
+                    Label {objectName:"projectPromptState";text:page.selectedPrompt.overridden?"当前工程已自定义":"使用默认内容";color:page.t.muted}
+                    Flow {
+                        Layout.fillWidth:true;spacing:6
+                        Button {objectName:"projectPromptEdit";text:"编辑提示词";enabled:page.promptsLoaded&&!!page.selectedPrompt.id&&!page.promptSaving&&!app.busy;onClicked:page.openPrompt(false)}
+                        Button {objectName:"projectPromptPreview";text:"预览有效内容";enabled:page.promptsLoaded&&!!page.selectedPrompt.id&&!page.promptSaving;onClicked:page.openPrompt(true)}
+                        Button {objectName:"projectPromptRestore";text:"恢复默认";enabled:page.selectedPrompt.overridden===true&&!page.promptSaving&&!app.busy;onClicked:page.restorePrompt()}
+                    }
+                    Label {objectName:"projectPromptMessage";Layout.fillWidth:true;wrapMode:Text.Wrap;visible:text.length>0;text:page.promptMessage;color:page.t.muted}
                 }
             }
             RowLayout {
@@ -161,4 +207,24 @@ Item {
             }
         }
     }
+    Dialog {
+        id:promptEditor;objectName:"projectPromptEditor";modal:true;anchors.centerIn:parent;width:Math.min(900,page.width-40);height:Math.min(650,page.height-30)
+        property bool preview:false
+        property string promptId:""
+        property string promptLabel:""
+        property string projectPath:""
+        property int revision:0
+        property string originalText:""
+        title:(preview?"有效内容 · ":"编辑 · ")+promptLabel
+        contentItem:ColumnLayout {
+            Label {Layout.fillWidth:true;wrapMode:Text.Wrap;color:page.t.muted;text:promptEditor.preview?"这是当前工程实际使用的内容。":"保存后从下次任务生效；提示词仅用于当前工程。"}
+            ScrollView {Layout.fillWidth:true;Layout.fillHeight:true;TextArea{id:promptText;objectName:"projectPromptText";readOnly:promptEditor.preview;selectByMouse:true;wrapMode:TextEdit.Wrap}}
+            RowLayout {
+                Layout.fillWidth:true;Item{Layout.fillWidth:true}
+                Button {text:promptEditor.preview?"关闭":"取消";onClicked:promptEditor.close()}
+                Button {objectName:"projectPromptSave";text:"保存提示词";visible:!promptEditor.preview;enabled:page.promptsLoaded&&promptText.text!==promptEditor.originalText&&!page.promptSaving&&!app.busy;onClicked:{if(promptEditor.projectPath!==(app.project.path||"")){promptEditor.close();return}page.promptSaving=true;bridge.savePromptOverride(promptEditor.promptId,promptText.text,promptEditor.revision)}}
+            }
+        }
+    }
+
 }

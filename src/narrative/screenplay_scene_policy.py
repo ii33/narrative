@@ -3,18 +3,14 @@ from __future__ import annotations
 
 import copy
 
-POLICY_VERSION = "scene-standards/2"
 
-
-def scene_table_policy(resolved):
+def scene_table_policy(resolved, prompt_config=None):
+    from .prompt_defaults import DEFAULT_PROMPTS
+    text = prompt_config["texts"]["scene_policy"] if prompt_config is not None else DEFAULT_PROMPTS["scene_policy"]["text"]
     source = resolved.get("input") or {}
-    return {"version": POLICY_VERSION, "decision_owner": "model",
-        "rules": ["同一连续时空的多个事件默认合为一场；事件和剧情节拍不是场。",
-                  "情绪、招式、胜负和镜头变化不单独构成场界。",
-                  "根据实际地点、时间或叙述时空变化判断是否另起一场；不按事件数量凑场数。",
-                  "只使用当前有效事件与逐点状态；旧场表、屏蔽事件和范围外剧情不是生成依据。",
-                  "场表只写场级剧情，不写特写、慢镜、镜头调度或特效制作方案。"],
-        "source_event_ids": list(source.get("source_event_ids", []))}
+    return {"version": prompt_config["versions"]["scene_policy"] if prompt_config is not None else DEFAULT_PROMPTS["scene_policy"]["version"], "decision_owner": "model",
+            "rules": [line.strip() for line in text.splitlines() if line.strip()],
+            "source_event_ids": list(source.get("source_event_ids", []))}
 
 
 def prepare_generated_scene_table(drafts, resolved):

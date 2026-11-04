@@ -136,6 +136,8 @@ class WritingBasis(WritingModel):
     context_fingerprint: str
     plan_fingerprint: str | None = None
     dependency_refs: list[dict[str, str]] = Field(default_factory=list)
+    project_style: dict = Field(default_factory=lambda: {"revision": 0, "text": ""})
+    creation_scope: dict = Field(default_factory=dict)
     manifest_ref: str | None = None
     task_id: str | None = None
     reason: str

@@ -56,7 +56,9 @@ def test_import_uses_current_adaptation_order_and_state_not_source_disclosure(pr
     source = copy.deepcopy(project.adaptation_snapshot())
     screenplay_id = create(project)
     imported = import_points(project, screenplay_id, [ids["事件1"]])
-    assert by_id(imported, ids["事件2"])["sort_id"] < by_id(imported, ids["事件1"])["sort_id"]
+    from narrative.state_anchors import anchor_nodes
+    assert anchor_nodes(imported)[ids["事件2"]]["sort_id"] < by_id(imported, ids["事件1"])["sort_id"]
+    assert ids["事件2"] not in {n["id"] for n in imported["nodes"]}
     assert ids["事件0"] not in {n["id"] for n in imported["nodes"]}
     assert ids["事件3"] not in {n["id"] for n in imported["nodes"]}
     assert ids["场景0"] not in {n["id"] for n in imported["nodes"]}

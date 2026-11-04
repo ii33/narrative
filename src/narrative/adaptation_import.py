@@ -93,6 +93,7 @@ def select(nodes, records, orders, moment_ids, state):
     parents = _parents(nodes)
     included = set(primary)
     wanted_records = set()
+    boundary_ids = set()
     definitions = {r["id"]: r for r in records if r.get("kind") == "property_definition"}
     values = [r for r in records if r.get("kind") == "property_value"]
     cuts = [_position(by_id[key].get("disclosure"), orders) for key in primary]
@@ -114,7 +115,10 @@ def select(nodes, records, orders, moment_ids, state):
 
     def add(identifier):
         if isinstance(identifier, str) and identifier in by_id:
-            included.add(identifier)
+            if by_id[identifier]["node_type"] in MOMENTS and identifier not in primary:
+                boundary_ids.add(identifier)
+            else:
+                included.add(identifier)
 
     def include_value(row):
         wanted_records.add(row["id"])
@@ -134,9 +138,10 @@ def select(nodes, records, orders, moment_ids, state):
             node = by_id[identifier]
             if node["node_type"] in MOMENTS:
                 for parent in parents.get(identifier, []):
-                    add(parent)
-            for participant in node.get("participants", []):
-                add(participant)
+                    included.add(parent)
+            if identifier in primary:
+                for participant in node.get("participants", []):
+                    add(participant)
             occurrence = node.get("occurrence") or {}
             for ref in (occurrence.get("point"), (occurrence.get("start") or {}).get("ref"),
                         (occurrence.get("end") or {}).get("ref")):
@@ -178,7 +183,10 @@ def select(nodes, records, orders, moment_ids, state):
     incoming_records = [copy.deepcopy(r) for r in records
                         if r.get("kind") == "property_definition" and r["id"] in definition_ids] + incoming_values
     moment_order = [n["id"] for n in incoming_nodes if n["node_type"] in MOMENTS]
-    summary = {"selected_moment_ids": list(dict.fromkeys(moment_ids)),
+    from .state_anchors import selection_anchors
+    geometry = {"nodes": [{**node, "sort_id": index * 1024} for index, node in enumerate(_reading_order(nodes, orders), 1)]}
+    anchors = selection_anchors(geometry, included | existing, boundary_ids)
+    summary = {"state_anchors": anchors, "selected_moment_ids": list(dict.fromkeys(moment_ids)),
                "imported_moment_ids": [key for key in moment_order if key in primary],
                "dependency_moment_ids": [key for key in moment_order if key not in primary],
                "node_ids": [n["id"] for n in incoming_nodes], "property_ids": [r["id"] for r in incoming_records]}

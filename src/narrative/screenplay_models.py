@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from .graph_models import Node
+from .state_anchors import StateAnchor
 
 
 class ScriptModel(BaseModel):
@@ -42,6 +43,7 @@ class ScriptTimeline(ScriptModel):
     revision: int = Field(default=0, ge=0)
     source_revision: int | None = None
     nodes: list[TimelineNode] = Field(default_factory=list)
+    state_anchors: list[StateAnchor] = Field(default_factory=list)
     properties: list[dict] = Field(default_factory=list)
     conflicts: list[dict] = Field(default_factory=list)
     sync_diagnostics: list[dict] = Field(default_factory=list)

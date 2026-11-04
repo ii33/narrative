@@ -47,82 +47,7 @@ Item {
     property int revision: 0
     property var importCandidates: []
     property var importSelected: []
-    property var importCollapsed: ({})
-    // Build each index once per input change; delegates never scan the full list.
-    readonly property var importById: {
-        var index = Object.create(null)
-        for (var i = 0; i < importCandidates.length; ++i)
-            index[importCandidates[i].id] = importCandidates[i]
-        return index
-    }
-    readonly property var importSelectedIds: {
-        var index = Object.create(null)
-        for (var i = 0; i < importSelected.length; ++i) index[importSelected[i]] = true
-        return index
-    }
-    readonly property var importPartialIds: {
-        var index = Object.create(null)
-        for (var i = 0; i < importSelected.length; ++i) {
-            var row = importById[importSelected[i]]
-            var parent = row ? row.parent_id : null
-            for (var guard = 0; parent && guard < importCandidates.length; ++guard) {
-                index[parent] = true
-                var next = importById[parent]
-                parent = next ? next.parent_id : null
-            }
-        }
-        return index
-    }
-    function importAncestorSelected(row) {
-        var parent = row.parent_id
-        for (var guard = 0; parent && guard < importCandidates.length; ++guard) {
-            if (importSelectedIds[parent]) return true
-            var next = importById[parent]
-            parent = next ? next.parent_id : null
-        }
-        return false
-    }
-    function importDescendant(row, ancestorId) {
-        var parent = row.parent_id
-        for (var guard = 0; parent && guard < importCandidates.length; ++guard) {
-            if (parent === ancestorId) return true
-            var next = importById[parent]
-            parent = next ? next.parent_id : null
-        }
-        return false
-    }
-    function importHasChildren(row) {
-        return (row.children || []).length > 0
-    }
-    function importCheckState(row) {
-        if (importSelectedIds[row.id] || importAncestorSelected(row)) return Qt.Checked
-        return importPartialIds[row.id] ? Qt.PartiallyChecked : Qt.Unchecked
-    }
-    function toggleImport(row) {
-        if (importAncestorSelected(row)) return
-        if (importSelectedIds[row.id])
-            importSelected = importSelected.filter(function(id) { return id !== row.id })
-        else {
-            var selected = importSelected.filter(function(id) {
-                var item = importById[id]
-                return !item || !importDescendant(item, row.id)
-            })
-            selected.push(row.id)
-            importSelected = selected
-        }
-    }
-    readonly property var visibleImportCandidates: importCandidates.filter(function(row) {
-        var parent = row.parent_id
-        for (var guard = 0; parent && guard < importCandidates.length; ++guard) {
-            if (importCollapsed[parent]) return false
-            var next = importById[parent]
-            parent = next ? next.parent_id : null
-        }
-        return true
-    })
-    readonly property int includedImportCount: importCandidates.filter(function(row) {
-        return importSelectedIds[row.id] || importAncestorSelected(row)
-    }).length
+    readonly property int includedImportCount: importPicker.includedCount
     property string adaptationNotice: ""
     function moveTimePoint(nodeId, afterId) {
         bridge.changeAdaptation("move", {node_id: nodeId, after_id: afterId || null, expected_revision: revision})
@@ -905,7 +830,7 @@ Item {
         function onResultReady(kind, payload) {
             if (page.adaptationMode && kind === "adaptation_import_candidates") {
                 page.importCandidates = payload.moments || payload.candidates || []
-                page.importSelected = []; page.importCollapsed = ({}); importDialog.open(); return
+                page.importSelected = []; importDialog.open(); return
             }
             if (page.adaptationMode) {
                 if (kind === "adaptation_check") { page.adaptationNotice = payload.ok ? "改编静态检查通过" : JSON.stringify(payload.issues || []); return }
@@ -919,8 +844,9 @@ Item {
                         page.cutId = ""; page.cutEventId = ""; page.cutName = ""
                         page.timeFilter = false; page.appliedCut = ""
                     }
-                    page.adaptationNotice = (payload.conflicts || []).length || (payload.sync_diagnostics || []).length
-                        ? JSON.stringify({conflicts: payload.conflicts || [], diagnostics: payload.sync_diagnostics || []}) : ""
+                    var importDiagnostics = ((payload.import_summary || {}).diagnostics || []).concat(payload.sync_diagnostics || [])
+                    page.adaptationNotice = importPicker.diagnosticText(importDiagnostics)
+                    if ((payload.conflicts || []).length) page.adaptationNotice += (page.adaptationNotice ? "\n" : "") + JSON.stringify(payload.conflicts)
                     page.load(); if (nodeEditor.visible) nodeEditor.reload(); return
                 }
                 if (kind.indexOf("adaptation_") !== 0) return
@@ -2532,15 +2458,15 @@ Item {
         title: "从提取导入 · 选择时间点"
         modal: true
         anchors.centerIn: parent
-        width: Math.min(680, page.width - 40)
-        height: Math.min(560, page.height - 40)
+        width: Math.min(1180, page.width - 40)
+        height: Math.min(620, page.height - 40)
         onAccepted: if (page.importSelected.length) bridge.importAdaptation(page.importSelected, page.revision)
         contentItem: ColumnLayout {
             spacing: 8
             Label {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
-                text: "选择主要故事、大事件或场景会包含其全部下属时间点；半选表示仅选了部分下属，折叠不影响选择。"
+                text: "按提取阅读顺序显示现有时间点；导入不会改变提取数据。"
                 color: t.muted
             }
             Label {
@@ -2548,43 +2474,16 @@ Item {
                 text: "已选 " + page.importSelected.length + " 项，包含 " + page.includedImportCount + " 个时间点"
                 color: t.ink
             }
-            ListView {
-                objectName: "adaptationImportTree"
+            TimelineImportColumns {
+                id: importPicker
+                objectName: "adaptationImportPicker"
+                objectPrefix: "adaptationImport"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                clip: true
-                model: page.visibleImportCandidates
-                ScrollBar.vertical: ScrollBar {}
-                delegate: RowLayout {
-                    required property var modelData
-                    objectName: "adaptationImportRow"
-                    property string nodeId: modelData.id
-                    width: ListView.view.width
-                    height: 44
-                    spacing: 2
-                    Item { Layout.preferredWidth: Math.max(0, modelData.depth || 0) * 20 }
-                    ToolButton {
-                        objectName: "adaptationImportExpand"
-                        Layout.preferredWidth: 28
-                        text: page.importHasChildren(modelData) ? (page.importCollapsed[modelData.id] ? "+" : "−") : ""
-                        enabled: page.importHasChildren(modelData)
-                        onClicked: {
-                            var collapsed = Object.assign({}, page.importCollapsed)
-                            collapsed[modelData.id] = !collapsed[modelData.id]
-                            page.importCollapsed = collapsed
-                        }
-                    }
-                    CheckBox {
-                        objectName: "adaptationImportCheck"
-                        Layout.fillWidth: true
-                        checkState: page.importCheckState(modelData)
-                        enabled: !page.importAncestorSelected(modelData)
-                        text: (page.typeLabels[modelData.node_type] || "时间点") + " · " + (modelData.name || modelData.id)
-                              + (page.importAncestorSelected(modelData) ? "（随上级导入）" : "")
-                              + (modelData.imported ? "（已导入）" : "")
-                        onClicked: page.toggleImport(modelData)
-                    }
-                }
+                t: page.t
+                candidates: page.importCandidates
+                selection: page.importSelected
+                onSelectionEdited: function(ids) { page.importSelected = ids }
             }
         }
         footer: DialogButtonBox {

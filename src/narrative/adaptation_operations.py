@@ -13,6 +13,7 @@ from .graph_models import Node
 from .graph_store import GraphStore
 from .property_core import _valid_value
 from .readable_ids import allocate_id
+from .state_anchors import StateAnchor, anchor_nodes, merge_anchors, selection_anchors
 
 _KEY = "adaptation_workspace_v1"
 _EXTRA = {"sort_id", "suppressed", "source_node_id", "point_id"}
@@ -20,7 +21,7 @@ _EXTRA = {"sort_id", "suppressed", "source_node_id", "point_id"}
 
 def _empty():
     return {"revision": 0, "source_revision": None, "nodes": [], "properties": [],
-            "conflicts": [], "sync_diagnostics": [], "baseline_nodes": {}, "baseline_properties": {}}
+            "conflicts": [], "sync_diagnostics": [], "baseline_nodes": {}, "baseline_properties": {}, "state_anchors": []}
 
 
 def _read(db):
@@ -42,7 +43,7 @@ def _find(state, node_id):
 
 def _node_id(db, state, node_type):
     prefix = "adapt-" + node_type.replace("_", "-") + "-"
-    return allocate_id(db, "adaptation", prefix, (node["id"] for node in state["nodes"]))
+    return allocate_id(db, "adaptation", prefix, (node["id"] for node in state["nodes"] + state.get("state_anchors", [])))
 
 
 def _value_id(db, state):
@@ -66,11 +67,12 @@ def _order(state, node_id, after_id):
 
 
 def _parent(state, node_id, parent_id):
-    parent = _find(state, parent_id)
+    parent = _find(state, parent_id) if parent_id != "" else None
     for node in state["nodes"]:
         if node_id in node.get("events", []):
             node["events"].remove(node_id)
-    parent.setdefault("events", []).append(node_id)
+    if parent is not None:
+        parent.setdefault("events", []).append(node_id)
 
 
 def _normalize_properties(records, nodes):
@@ -121,6 +123,21 @@ def _issues(state):
     nodes = {n["id"]: n for n in state["nodes"]}
     def issue(code, text, node_id=None):
         issues.append({"severity": "error", "code": code, "message": text, "object_id": node_id})
+    for anchor in state.get("state_anchors", []):
+        try:
+            StateAnchor.model_validate(anchor)
+        except ValueError as exc:
+            issue("STATE_ANCHOR", str(exc), anchor.get("id"))
+    if any(item["code"] == "STATE_ANCHOR" for item in issues):
+        return issues
+    anchors = state.get("state_anchors", [])
+    for anchor in anchors:
+        for key in anchor["preceding_ids"] + anchor["following_ids"]:
+            if key not in nodes or nodes[key].get("context_id", "canon") != anchor.get("context_id", "canon"):
+                issue("STATE_ANCHOR", "状态边界参照须为现存同语境剧情时点", anchor["id"])
+    if len({a["id"] for a in anchors}) != len(anchors) or any(a["id"] in nodes for a in anchors):
+        issue("STATE_ANCHOR", "状态边界标识重复或与剧情节点重复")
+    points = {**anchor_nodes(state), **nodes}
     if len(nodes) != len(state["nodes"]):
         issue("DUPLICATE_ID", "改编节点标识重复")
     orders = [n.get("sort_id") for n in nodes.values()]
@@ -149,7 +166,7 @@ def _issues(state):
                 if child.get("context_id", "canon") != node.get("context_id", "canon"):
                     issue("CONTEXT_REF", "改编父子节点须在同一语境", node["id"])
         if node.get("point_id"):
-            point = nodes.get(node["point_id"])
+            point = points.get(node["point_id"])
             if not point or point["node_type"] not in {"storyline", "big_event", "scene", "event", "action"}:
                 issue("POINT_REF", "改编时点须引用存在的叙事节点", node["id"])
     def reaches_scene(identifier, seen):
@@ -178,7 +195,7 @@ def _issues(state):
         if row.get("kind") != "property_value":
             continue
         for field in ("node_id", "event_id", "end_event_id"):
-            if row.get(field) and row[field] not in nodes:
+            if row.get(field) and row[field] not in (nodes if field == "node_id" else points):
                 issue("PROPERTY_REF", f"属性{field}引用不存在", row.get("id"))
         if row.get("property_id") not in definitions:
             issue("PROPERTY_DEFINITION", "属性定义不存在", row.get("id"))
@@ -188,10 +205,10 @@ def _issues(state):
         if row.get("holder_id") and row["holder_id"] not in nodes:
             issue("PROPERTY_HOLDER", "改编认知持有人引用不存在", row.get("id"))
         for field in ("event_id", "end_event_id"):
-            point = nodes.get(row.get(field))
+            point = points.get(row.get(field))
             if point and point["node_type"] not in {"storyline", "big_event", "scene", "event", "action"}:
                 issue("PROPERTY_POINT", "属性有效时点必须引用叙事节点", row.get("id"))
-        start, end = nodes.get(row.get("event_id")), nodes.get(row.get("end_event_id"))
+        start, end = points.get(row.get("event_id")), points.get(row.get("end_event_id"))
         if start and end and start["sort_id"] >= end["sort_id"]:
             issue("PROPERTY_INTERVAL", "属性失效时点必须晚于生效时点", row.get("id"))
     holder_names = {p["id"] for p in state["properties"] if p.get("kind") == "property_definition"
@@ -207,7 +224,7 @@ def _issues(state):
         value = values[-1].get("value") if values else None
         if not isinstance(value, str) or (value not in {"无", "未知"} and
                                          (value not in active or value == identifier)):
-            issue("ITEM_HOLDER_REQUIRED", "活动改编物品须有明确world持有者：节点、无或未知", identifier)
+            issue("ITEM_HOLDER_REQUIRED", f"物品“{node['name']}”缺少明确持有者，请先指定现存节点、无或未知，再删除相关时点", identifier)
     return issues
 
 
@@ -271,6 +288,7 @@ def _merge_source(state, source_nodes, records, source_revision, *, partial=Fals
                 _order(state, identifier, previous)
     unique = {(c["id"], c["field"]): c for c in state["conflicts"]}
     state["conflicts"] = list(unique.values())
+    merge_anchors(state, [])
     state["source_revision"] = source_revision
 
 
@@ -332,6 +350,7 @@ class AdaptationOperationsMixin:
             relevant = {p["id"] for p in incoming_records}
             state["sync_diagnostics"] = [d for d in diagnostics if d.get("object_id") in relevant]
             _merge_source(state, incoming_nodes, incoming_records, revision, partial=True)
+            merge_anchors(state, summary.pop("state_anchors", []))
             state["import_summary"] = summary
         return self._adaptation_write(mutate, expected_revision, reason)
 
@@ -340,6 +359,7 @@ class AdaptationOperationsMixin:
         changes = copy.deepcopy(changes or {})
         if set(changes) & {"id", "kind", "sort_id", "source_node_id"}:
             raise ValueError("节点标识与排序由程序分配")
+        report = {}
         def mutate(state, db):
             if node_id is None:
                 raw = {k: v for k, v in changes.items() if k not in _EXTRA and k != "initial_holder"}
@@ -359,17 +379,18 @@ class AdaptationOperationsMixin:
                                                 "property_id": holder_name, "value": changes["initial_holder"],
                                                 "event_id": changes.get("point_id"), "scope": "world"})
                 _order(state, node["id"], after_id)
+                report["created_node_id"] = node["id"]
             else:
                 node = _find(state, node_id)
                 node.update(changes)
             if parent_id is not None:
                 _parent(state, node["id"], parent_id)
-        return self._adaptation_write(mutate, expected_revision, reason)
+        return self._adaptation_write(mutate, expected_revision, reason) | report
 
     def copy_adaptation_node(self, node_id, after_id=None, parent_id=None,
                              expected_revision=None, reason="复制改编节点") -> dict:
+        report = {}
         def mutate(state, db):
-            original = _find(state, node_id)
             # Copy the complete containment subtree and remap internal references.
             originals = {}
             def collect(identifier):
@@ -379,7 +400,9 @@ class AdaptationOperationsMixin:
                 for child in originals[identifier].get("events", []):
                     collect(child)
             collect(node_id)
+            originals = dict(sorted(originals.items(), key=lambda pair: pair[1]["sort_id"]))
             ids = {identifier: _node_id(db, state, node["node_type"]) for identifier, node in originals.items()}
+            report.update(copied_node_id=ids[node_id], copied_node_ids=list(ids.values()))
             rank = max([n["sort_id"] for n in state["nodes"]] or [0])
             for index, (identifier, source) in enumerate(originals.items(), 1):
                 node = copy.deepcopy(source)
@@ -388,8 +411,13 @@ class AdaptationOperationsMixin:
                     node[field] = [ids.get(value, value) for value in node.get(field, [])]
                 if node.get("point_id") in ids:
                     node["point_id"] = ids[node["point_id"]]
+                occurrence = node.get("occurrence") or {}
+                for ref in (occurrence.get("point"), (occurrence.get("start") or {}).get("ref"),
+                            (occurrence.get("end") or {}).get("ref")):
+                    if isinstance(ref, dict) and ref.get("event_id") in ids:
+                        ref["event_id"] = ids[ref["event_id"]]
                 state["nodes"].append(node)
-            previous = after_id or original["id"]
+            previous = after_id if after_id is not None else next(reversed(originals))
             for identifier in originals:
                 _order(state, ids[identifier], previous)
                 previous = ids[identifier]
@@ -411,7 +439,7 @@ class AdaptationOperationsMixin:
                 if definition.get("value_type") in {"node", "either"} and isinstance(row.get("value"), str):
                     row["value"] = ids.get(row["value"], row["value"])
                 state["properties"].append(row)
-        return self._adaptation_write(mutate, expected_revision, reason)
+        return self._adaptation_write(mutate, expected_revision, reason) | report
 
     def move_adaptation_node(self, node_id, after_id=None, parent_id=None,
                              expected_revision=None, reason="移动改编节点") -> dict:
@@ -422,6 +450,7 @@ class AdaptationOperationsMixin:
                 for child in _find(state, identifier).get("events", []):
                     collect(child)
             collect(node_id)
+            descendants.sort(key=lambda identifier: _find(state, identifier)["sort_id"])
             if after_id in descendants:
                 raise ValueError("不能移动到自身或子节点之后")
             previous = after_id
@@ -457,6 +486,7 @@ class AdaptationOperationsMixin:
                 for child in node.get("events", []):
                     collect(child)
             collect(node_id)
+            before = copy.deepcopy(state)
             script = load_state(db)
             domain_id = state.get("_scope_timeline_id") or timeline_id(db)
             scoped_scripts = {s["id"] for s in script["screenplays"].values() if s["timeline_id"] == domain_id}
@@ -491,7 +521,10 @@ class AdaptationOperationsMixin:
                         if span["timeline_id"] == domain_id and
                         (deleted & set(resolve_span(adaptation, span)["member_node_ids"])
                          or span["start_node_id"] in deleted or span["end_node_id"] in deleted)]
+            retained_anchors = selection_anchors(state, {n["id"] for n in state["nodes"]} - deleted,
+                {a["id"] for a in state.get("state_anchors", [])})
             state["nodes"] = [n for n in state["nodes"] if n["id"] not in deleted]
+            state["state_anchors"] = retained_anchors
             for node in state["nodes"]:
                 for field in ("events", "participants", "predecessors", "successors"):
                     node[field] = [value for value in node.get(field, []) if value not in deleted]
@@ -504,16 +537,76 @@ class AdaptationOperationsMixin:
                     node["occurrence"] = None
             definitions = {p["id"]: p for p in state["properties"] if p.get("kind") == "property_definition"}
             retained = []
+            opened = set()
             for row in state["properties"]:
                 if row.get("kind") == "property_value":
-                    if any(row.get(field) in deleted for field in ("node_id", "event_id", "end_event_id", "holder_id", "applies_to")):
+                    if any(row.get(field) in deleted for field in ("node_id", "event_id", "holder_id", "applies_to")):
                         continue
                     definition = definitions.get(row.get("property_id"), {})
                     if definition.get("value_type") in {"node", "either"} and isinstance(row.get("value"), str) and row["value"] in deleted:
                         continue
                     row["related_nodes"] = [key for key in row.get("related_nodes", []) if key not in deleted]
+                    if row.get("end_event_id") in deleted:
+                        row["end_event_id"] = None
+                        row.pop("source_valid_to", None)
+                        opened.add(row["id"])
                 retained.append(row)
             state["properties"] = retained
+            points = {**anchor_nodes(state), **{n["id"]: n for n in state["nodes"]}}
+            old_points = {**anchor_nodes(before), **{n["id"]: n for n in before["nodes"]}}
+            old_values = {row["id"]: row for row in before["properties"]}
+            def overlaps(left, right, geometry):
+                def bound(row, field, fallback):
+                    return geometry.get(row.get(field), {}).get("sort_id", fallback)
+                return max(bound(left, "event_id", float("-inf")), bound(right, "event_id", float("-inf"))) < min(
+                    bound(left, "end_event_id", float("inf")), bound(right, "end_event_id", float("inf")))
+            for row in (value for value in retained if value["id"] in opened):
+                if definitions.get(row.get("property_id"), {}).get("cardinality", "one") != "one":
+                    continue
+                for other in retained:
+                    if other.get("kind") != "property_value" or other["id"] == row["id"]:
+                        continue
+                    fields = ("node_id", "property_id", "scope", "holder_id")
+                    if any(row.get(key) != other.get(key) for key in fields):
+                        continue
+                    if overlaps(row, other, points) and not overlaps(old_values[row["id"]], old_values[other["id"]], old_points):
+                        name = points.get(row.get("node_id"), {}).get("name", row.get("node_id"))
+                        raise ValueError(f"删除结束时点会使{name}的{row.get('property_id')}单值状态区间重叠，请先显式调整状态；未删除任何内容")
+            report["deleted_property_ids"] = sorted(set(old_values) - {row["id"] for row in retained})
+            report["opened_property_ids"] = sorted(opened)
+            # Physical deletion removes source baselines and their references too.
+            state["baseline_nodes"] = {key: value for key, value in state.get("baseline_nodes", {}).items() if key not in deleted}
+            for value in state["baseline_nodes"].values():
+                for field in ("events", "participants", "predecessors", "successors"):
+                    value[field] = [key for key in value.get(field, []) if key not in deleted]
+                if value.get("point_id") in deleted:
+                    value.pop("point_id")
+                occurrence = value.get("occurrence") or {}
+                if any(isinstance(ref, dict) and ref.get("event_id") in deleted for ref in (
+                    occurrence.get("point"), (occurrence.get("start") or {}).get("ref"), (occurrence.get("end") or {}).get("ref"))):
+                    value["occurrence"] = None
+            state["baseline_properties"] = {key: copy.deepcopy(value) for key, value in state.get("baseline_properties", {}).items()
+                if key not in report["deleted_property_ids"]}
+            for value in state["baseline_properties"].values():
+                if "related_nodes" in value:
+                    value["related_nodes"] = [key for key in value["related_nodes"] if key not in deleted]
+            for identifier in opened:
+                if identifier in state["baseline_properties"]:
+                    state["baseline_properties"][identifier]["end_event_id"] = None
+                    state["baseline_properties"][identifier].pop("source_valid_to", None)
+            referenced_anchors = {row.get(field) for row in retained for field in ("event_id", "end_event_id", "holder_id", "applies_to")}
+            referenced_anchors.update(node.get("point_id") for node in state["nodes"])
+            for row in retained:
+                referenced_anchors.update(row.get("related_nodes", []))
+                if row.get("kind") == "property_value" and definitions.get(row.get("property_id"), {}).get("value_type") in {"node", "either"}:
+                    value = row.get("value")
+                    referenced_anchors.update(value if isinstance(value, list) else [value] if isinstance(value, str) else [])
+            for node in state["nodes"]:
+                occurrence = node.get("occurrence") or {}
+                for ref in (occurrence.get("point"), (occurrence.get("start") or {}).get("ref"), (occurrence.get("end") or {}).get("ref")):
+                    if isinstance(ref, dict):
+                        referenced_anchors.add(ref.get("event_id"))
+            state["state_anchors"] = [anchor for anchor in state.get("state_anchors", []) if anchor["id"] in referenced_anchors]
             current_ids = {row["id"] for row in state["nodes"] + retained}
             state["conflicts"] = [c for c in state["conflicts"] if c["id"] in current_ids]
             report["deleted_node_ids"] = sorted(deleted)

@@ -71,7 +71,7 @@ class _GenerationView(_View):
     def __init__(self, snapshot):
         super().__init__(snapshot)
         for row in self.records:
-            anchor = self.nodes.get(row.get("event_id"))
+            anchor = self.boundary(row.get("event_id"))
             owner = self.nodes.get(row.get("node_id"))
             if not anchor or not owner or not self.active(owner["id"]):
                 continue
@@ -81,14 +81,14 @@ class _GenerationView(_View):
                 if identifier in self.nodes:
                     self.introductions[identifier] = min(self.introductions[identifier], anchor["sort_id"])
         for node in self.ordered:
-            if node.get("point_id") in self.nodes:
+            if self.boundary(node.get("point_id")) is not None:
                 self.introductions[node["id"]] = self.rank(node["point_id"])
 
     def visible(self, identifier, cutoff=None, context=None):
         node = self.nodes.get(identifier)
         return bool(node and self.active(identifier)
                     and (context is None or node.get("context_id", "canon") == context)
-                    and (not node.get("point_id") or node["point_id"] in self.nodes)
+                    and (not node.get("point_id") or self.boundary(node["point_id"]) is not None)
                     and (cutoff is None or self.introduction(node) <= cutoff))
 
 
@@ -132,7 +132,7 @@ def _state_visible(view, row, identifier):
         anchor_id = row.get(field)
         if not anchor_id:
             continue
-        anchor = view.nodes.get(anchor_id)
+        anchor = view.boundary(anchor_id)
         if not anchor or anchor.get("context_id", "canon") != context:
             return False
         # A suppressed endpoint still locates a legitimate property's interval.

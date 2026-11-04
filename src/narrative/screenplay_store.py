@@ -196,6 +196,10 @@ def read_context(ops):
         db.execute("BEGIN")
         state, adaptation = load_state(db), read_adaptation(db)
         adaptation["timeline_id"] = timeline_id(db)
+        from .prompt_settings import snapshot_from_db
+        adaptation["_prompt_config"] = snapshot_from_db(db)
+        from .project_style import read_style
+        adaptation["_project_style"] = read_style(db)
         return state, adaptation
 
 
@@ -275,6 +279,10 @@ def write_transaction(ops, reason, mutate, initialize=False):
                 _rebuild_tables(db, inspection)
         state, adaptation = load_state(db), read_adaptation(db)
         adaptation["timeline_id"] = timeline_id(db)
+        from .prompt_settings import snapshot_from_db
+        adaptation["_prompt_config"] = snapshot_from_db(db)
+        from .project_style import read_style
+        adaptation["_project_style"] = read_style(db)
         before = copy.deepcopy(state)
         token = _id_context.set((db, state, {identifier for table in state.values() for identifier in table}))
         try:

@@ -35,7 +35,7 @@ def test_current_node_and_tool_contracts_have_no_provisional_field(project):
     assert "provisional_name" not in json.dumps(schema)
     assert schema["contract_version"] == "graph-nesting/11"
     assert schema["schema_version"] == GRAPH_SCHEMA_VERSION == 10
-    assert ASSISTANT_VERSION == "conversation-agent/22"
+    assert ASSISTANT_VERSION == "conversation-agent/26"
     assert "直接用清晰概括名，未完也不加暂称" in _first_prompt("提取")
 
 
