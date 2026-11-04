@@ -7,6 +7,7 @@ This command uses local files only; it never downloads or installs packages.
 from __future__ import annotations
 
 import argparse
+import filecmp
 import json
 import os
 import shutil
@@ -32,6 +33,26 @@ def main() -> int:
         if source in destination.resolve().parents:
             parser.error("The destination must not be inside the source distribution.")
         shutil.copytree(source, destination, dirs_exist_ok=True)
+    # uv 0.13 launchers can embed the original interpreter path and ignore
+    # pyvenv.cfg. Use the matching CPython redirectors, which honor that file.
+    # This script must be run by a Python outside .venv so Windows does not
+    # keep the launcher being replaced open.
+    for launcher, target in (("venvlauncher.exe", "python.exe"), ("venvwlauncher.exe", "pythonw.exe")):
+        original = destination / "Lib/venv/scripts/nt" / launcher
+        installed = root / ".venv/Scripts" / target
+        if not original.is_file() or not installed.is_file():
+            raise RuntimeError(f"Missing CPython redirector or virtual environment executable: {original}, {installed}")
+        if not filecmp.cmp(original, installed, shallow=False):
+            temporary = installed.with_suffix(".exe.narrative-tmp")
+            try:
+                shutil.copyfile(original, temporary)
+                os.replace(temporary, installed)
+            except PermissionError as exc:
+                raise RuntimeError(
+                    f"Cannot replace {installed}; close processes using this virtual environment and start again."
+                ) from exc
+            finally:
+                temporary.unlink(missing_ok=True)
     lines = config.read_text(encoding="utf-8").splitlines()
     lines = [line for line in lines if not line.startswith(("home =", "executable =", "command ="))]
     lines.insert(0, "home = " + str(destination))
@@ -41,7 +62,9 @@ def main() -> int:
     # Hatch's editable install otherwise records the original checkout path.
     editable = root / ".venv/Lib/site-packages/_editable_impl_narrative_core.pth"
     if editable.is_file():
-        editable.write_text("../../../src\n", encoding="utf-8")
+        editable_replacement = editable.with_suffix(".pth.tmp")
+        editable_replacement.write_text("../../../src\n", encoding="utf-8")
+        os.replace(editable_replacement, editable)
     env = dict(os.environ)
     env.pop("PYTHONHOME", None)
     env.pop("PYTHONPATH", None)
@@ -52,12 +75,19 @@ def main() -> int:
          "import json,sys,sysconfig; import narrative,pydantic,PySide6,deepseek_harness; "
          "print(json.dumps({'prefix':sys.prefix,'base_prefix':sys.base_prefix,"
          "'stdlib':sysconfig.get_path('stdlib'),'application':narrative.__file__}))"],
-        cwd=root, env=env, capture_output=True, text=True, check=True,
+        cwd=root, env=env, capture_output=True, text=True, check=False,
     )
+    if probe.returncode:
+        if probe.stdout:
+            print(probe.stdout, end="", file=sys.stderr)
+        if probe.stderr:
+            print(probe.stderr, end="", file=sys.stderr)
+        print("Project runtime verification failed.", file=sys.stderr)
+        return probe.returncode
     result = json.loads(probe.stdout)
     for name in ("prefix", "base_prefix", "stdlib", "application"):
         if not Path(result[name]).resolve().is_relative_to(root):
-            raise RuntimeError(f"Python still uses an external {name}")
+            raise RuntimeError(f"Python still uses an external {name}: {result[name]!r}; project: {str(root)!r}")
     print(json.dumps(result, indent=2))
     return 0
 

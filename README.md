@@ -6,21 +6,20 @@
 
 ## 启动
 
-Windows 双击 `start-desktop.cmd`，或执行：
+Windows 首次安装前需先安装 `uv` 并确保它在 PATH 中；环境脚本不会自动安装 uv。双击 `setup-environment.cmd` 完成准备，或在终端运行 `./setup-environment.ps1`。准备完成后双击 `start-desktop.cmd`，或执行：
 
 ```powershell
 ./start-desktop.ps1
 ./start-desktop.ps1 -Project D:/小说/作品.nproj
 ```
 
-普通启动只使用工程内的 `.venv` 和 `.runtime/python`。首次构建准备：
+环境配置脚本执行以下依赖同步，再准备和检查工程内 Python，不启动界面：
 
 ```powershell
-uv sync --extra desktop
-.venv/Scripts/python.exe scripts/localize_python.py
+uv sync --locked --all-packages --all-extras --all-groups
 ```
 
-本地化脚本复制受信任的本地 CPython 分发，不下载、不修改源目录。解释器、标准库、依赖与 Harness 运行时必须位于项目内；缺失时明确失败。启动也检查 Windows 进程完整性，异常 Low 标签会阻止正常目录和配置库写入。
+首次准备时会把 `.venv` 使用的本地 CPython 复制到 `.runtime/python`，并检查启动器和依赖。直接启动时也会尝试准备；已有运行时不完整时会提示检查，不会自动覆盖它。uv 重建环境后若 Python 版本或架构与已有运行时不一致，需检查并重新准备运行时。解释器、标准库、依赖与 Harness 运行时必须位于项目内。启动也检查 Windows 进程完整性，异常 Low 标签会阻止正常目录和配置库写入。
 
 升级依赖或移动目录后应重新核对本地运行时。代码修改后重启程序，已经导入的 Python 模块不会随界面刷新自动更新。
 
