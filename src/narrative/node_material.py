@@ -15,19 +15,11 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from datetime import UTC, datetime
-from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
-
-from .content_errors import ContentValidationError
-
-if TYPE_CHECKING:
-    from .graph_store import GraphStore
 
 ALLOWED_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -50,26 +42,7 @@ def _now() -> str:
 
 
 def _empty(node_id: str) -> dict:
-    return {"node_id": node_id, "cards": [], "updated_at": "",
-            "next_card_number": 1, "next_image_number": 1}
-
-
-def _serialized(method):
-    @wraps(method)
-    def locked(self, *args, **kwargs):
-        from .leases import ProjectLease
-        self.root.mkdir(parents=True, exist_ok=True)
-        try:
-            lease = ProjectLease(self.root / ".write.lock")
-        except OSError as exc:
-            raise ValueError("节点资料正在被其他操作写入，请稍后重试；未覆盖现有资料") from exc
-        try:
-            from .material_submission import validate_base
-            validate_base(self, args[0] if args else kwargs['node_id'])
-            return method(self, *args, **kwargs)
-        finally:
-            lease.release()
-    return locked
+    return {"node_id": node_id, "cards": [], "updated_at": ""}
 
 
 def _position(moment: str, snapshot: dict) -> tuple | None:
@@ -108,15 +81,7 @@ class MaterialStore:
     # -- 读写 ----------------------------------------------------------
 
     def path_for(self, node_id: str) -> Path:
-        self._component(node_id)
         return self.root / f"{node_id}.json"
-
-    @staticmethod
-    def _component(identifier):
-        if not isinstance(identifier, str) or not identifier or identifier in {".", ".."} or any(
-            char in identifier for char in '<>:"/\\|?*\0') or identifier.rstrip(" .") != identifier:
-            raise ValueError("资料节点或卡片编号不能包含路径字符")
-        return identifier
 
     def load(self, node_id: str) -> dict:
         path = self.path_for(node_id)
@@ -124,67 +89,23 @@ class MaterialStore:
             return _empty(node_id)
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValueError("节点资料文件损坏，拒绝以空资料覆盖") from exc
+        except json.JSONDecodeError:
+            return _empty(node_id)
         if not isinstance(data, dict):
-            raise ValueError("节点资料文件不是对象，拒绝覆盖")
+            return _empty(node_id)
         data.setdefault("node_id", node_id)
         cards = data.get("cards")
-        if not isinstance(cards, list):
-            raise ValueError("节点资料卡列表损坏，拒绝覆盖")
+        data["cards"] = cards if isinstance(cards, list) else []
         return data
 
-    def _save(self, node_id: str, data: dict, *, _business_result=None) -> dict:
-        from .material_submission import commit_receipt
-        commit_receipt(node_id, data, _business_result)
+    def _save(self, node_id: str, data: dict) -> dict:
         data["node_id"] = node_id
         data["updated_at"] = _now()
         self.root.mkdir(parents=True, exist_ok=True)
-        self._atomic_json(self.path_for(node_id), data)
+        self.path_for(node_id).write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         return data
-
-    @_serialized
-    def stage_content_submission(self, node_id, row, expected=None):
-        data = self.load(node_id)
-        prior = data.get('content_submissions', {}).get(row['submission_id'])
-        if expected is not None and (prior is None or prior['submission_revision'] != expected or prior['submission_status'] != 'staged'):
-            raise ValueError('资料内容暂存已变化或已完成')
-        from copy import deepcopy
-        data.setdefault('content_submissions', {})[row['submission_id']] = deepcopy(row)
-        self._save(node_id, data)
-
-    @staticmethod
-    def _atomic_json(target: Path, data: dict) -> None:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
-        try:
-            with temporary.open("x", encoding="utf-8") as stream:
-                stream.write(json.dumps(data, ensure_ascii=False, indent=2))
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, target)
-        finally:
-            temporary.unlink(missing_ok=True)
-    def _next_number(self, node_id, data, key, prefix, existing):
-        # Reserve independently before copying media/publishing a card. A failed
-        # later JSON replacement burns the number rather than reusing an ID.
-        path = self.root / ".sequences" / f"{node_id}.json"
-        try:
-            sequence = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-        except json.JSONDecodeError as exc:
-            raise ValueError("资料编号计数文件损坏，拒绝分配重复编号") from exc
-        if not isinstance(sequence, dict):
-            raise ValueError("资料编号计数文件损坏，拒绝分配重复编号")
-        numbers = (data.get(key, 1), sequence.get(key, 1))
-        if any(type(value) is not int or value < 1 for value in numbers):
-            raise ValueError("资料编号计数损坏，拒绝分配重复编号")
-        number = max(numbers)
-        known = [int(value[len(prefix):]) for value in existing
-                 if isinstance(value, str) and value.startswith(prefix) and value[len(prefix):].isdigit()]
-        number = max([number, *(value + 1 for value in known)])
-        sequence[key] = data[key] = number + 1
-        self._atomic_json(path, sequence)
-        return number
 
     def _sweep(self, node_id: str, data: dict) -> None:
         """删掉没人认领的素材。
@@ -193,8 +114,6 @@ class MaterialStore:
         记录先走，文件留到下一次读这一页时再清——那时没人引用它了。
         """
         folder = self.root / node_id
-        if not folder.resolve().is_relative_to(self.root.resolve()):
-            return
         if not folder.is_dir():
             return
         alive = {str(card.get("id") or "") for card in data.get("cards") or []}
@@ -239,7 +158,6 @@ class MaterialStore:
                 return card
         raise ValueError(f"资料不存在：{card_id}")
 
-    @_serialized
     def add_card(
         self,
         node_id: str,
@@ -252,15 +170,11 @@ class MaterialStore:
     ) -> dict:
         title = (title or "").strip()
         if not title:
-            raise ContentValidationError("资料需要一个标题")
+            raise ValueError("资料需要一个标题")
         self._check_window(valid_from, valid_to, snapshot)
         data = self.load(node_id)
-        prefix = f"{node_id}-card-"
-        number = self._next_number(node_id, data, "next_card_number", prefix, [row["id"] for row in data["cards"]])
-        while (self.root / node_id / f"{prefix}{number}").exists():
-            number = self._next_number(node_id, data, "next_card_number", prefix, [])
         card = {
-            "id": f"{prefix}{number}",
+            "id": f"card_{uuid4().hex[:8]}",
             "title": title,
             "detail": str(detail or ""),
             # 生效/失效各是一个场景或事件的编号；空 = 不限制。
@@ -270,9 +184,8 @@ class MaterialStore:
             "created_at": _now(),
         }
         data["cards"].append(card)
-        self._sync_images(node_id, card, images, data)
-        self._save(node_id, data, _business_result=card)
-        self._sweep(node_id, data)
+        self._sync_images(node_id, card, images)
+        self._save(node_id, data)
         return card
 
     @staticmethod
@@ -282,9 +195,8 @@ class MaterialStore:
         if start is None or end is None:
             return
         if start >= end:
-            raise ContentValidationError("失效时间要在生效时间之后")
+            raise ValueError("失效时间要在生效时间之后")
 
-    @_serialized
     def update_card(
         self,
         node_id: str,
@@ -301,7 +213,7 @@ class MaterialStore:
         card = self._card(data, card_id)
         if title is not None:
             if not title.strip():
-                raise ContentValidationError("资料标题不能为空")
+                raise ValueError("资料标题不能为空")
             card["title"] = title.strip()
         if detail is not None:
             card["detail"] = str(detail)
@@ -310,22 +222,17 @@ class MaterialStore:
         if valid_to is not None:
             card["valid_to"] = str(valid_to)
         self._check_window(card["valid_from"], card["valid_to"], snapshot)
-        self._sync_images(node_id, card, images, data)
-        self._save(node_id, data, _business_result=card)
-        self._sweep(node_id, data)
+        self._sync_images(node_id, card, images)
+        self._save(node_id, data)
         return card
 
-    @_serialized
     def remove_card(self, node_id: str, card_id: str) -> dict:
-        self._component(card_id)
         data = self.load(node_id)
         card = self._card(data, card_id)
         data["cards"] = [other for other in data["cards"] if other.get("id") != card_id]
         self._save(node_id, data)
         # 图片跟着资料一起删：留在磁盘上的孤儿文件没人认领。
         folder = self.root / node_id / card_id
-        if not folder.resolve().is_relative_to(self.root.resolve()):
-            raise ValueError("资料图片目录不能指向资料域外")
         if folder.is_dir():
             shutil.rmtree(folder, ignore_errors=True)
         self._sweep(node_id, data)
@@ -334,12 +241,10 @@ class MaterialStore:
     # -- 图片 ----------------------------------------------------------
 
     def _copy_image(
-        self, node_id: str, card_id: str, source: Path | str, caption: str = "", *, data: dict
+        self, node_id: str, card_id: str, source: Path | str, caption: str = ""
     ) -> dict:
         """拷一张图进这张资料的目录，只返回记录——写不写回由调用方决定。"""
         source = _as_path(source)
-        self._component(node_id)
-        self._component(card_id)
         if not source.is_file():
             raise ValueError(f"找不到图片：{source}")
         if source.suffix.lower() not in ALLOWED_SUFFIXES:
@@ -347,18 +252,10 @@ class MaterialStore:
         if source.stat().st_size > MAX_IMAGE_BYTES:
             raise ValueError(f"图片超过 {MAX_IMAGE_BYTES // 1024 // 1024}MB")
         folder = self.root / node_id / card_id
-        if not folder.resolve().is_relative_to(self.root.resolve()):
-            raise ValueError("资料图片目录不能指向资料域外")
         folder.mkdir(parents=True, exist_ok=True)
-        prefix = f"{card_id}-image-"
-        number = self._next_number(node_id, data, "next_image_number", prefix,
-            [image["id"] for card in data["cards"] for image in card.get("images", [])])
-        while (folder / f"{prefix}{number}{source.suffix.lower()}").exists():
-            number = self._next_number(node_id, data, "next_image_number", prefix, [])
-        image_id = f"{prefix}{number}"
+        image_id = f"img_{uuid4().hex[:8]}"
         target = folder / f"{image_id}{source.suffix.lower()}"
-        with source.open("rb") as incoming, target.open("xb") as outgoing:
-            shutil.copyfileobj(incoming, outgoing)
+        shutil.copyfile(source, target)
         return {
             "id": image_id,
             "file": str(target.relative_to(self.root)).replace("\\", "/"),
@@ -369,8 +266,6 @@ class MaterialStore:
     def _drop_image_file(self, record: dict) -> bool:
         """删掉图片文件。页面上还开着它时 Windows 不放，所以只是尽力而为。"""
         target = self.root / str(record.get("file") or "")
-        if not target.resolve().is_relative_to(self.root.resolve()):
-            return False
         if not target.is_file():
             return False
         try:
@@ -379,7 +274,7 @@ class MaterialStore:
         except OSError:
             return False
 
-    def _sync_images(self, node_id: str, card: dict, entries: list[dict] | None, data: dict) -> None:
+    def _sync_images(self, node_id: str, card: dict, entries: list[dict] | None) -> None:
         """把这张资料的图片改成 `entries` 说的样子。
 
         一条 entry 带 `id` 就是已有的那张（只改说明），带 `path` 是新加的源文件。
@@ -401,22 +296,22 @@ class MaterialStore:
             if not source:
                 continue
             # 不要先转成 Path：QML 给的是 `file:///C:/…`，Path 会把它拆坏。
-            kept.append(self._copy_image(node_id, str(card["id"]), source, caption, data=data))
+            kept.append(self._copy_image(node_id, str(card["id"]), source, caption))
+        for image_id, image in existing.items():
+            if all(item.get("id") != image_id for item in kept):
+                self._drop_image_file(image)
         card["images"] = kept
 
-    @_serialized
     def add_image(
         self, node_id: str, card_id: str, source: Path, caption: str = ""
     ) -> dict:
         data = self.load(node_id)
         card = self._card(data, card_id)
-        record = self._copy_image(node_id, card_id, source, caption, data=data)
+        record = self._copy_image(node_id, card_id, source, caption)
         card.setdefault("images", []).append(record)
         self._save(node_id, data)
-        self._sweep(node_id, data)
         return record | {"path": str(self.root / str(record["file"]))}
 
-    @_serialized
     def update_image_caption(
         self, node_id: str, card_id: str, image_id: str, caption: str
     ) -> dict:
@@ -428,10 +323,9 @@ class MaterialStore:
         if image is None:
             raise ValueError(f"图片不存在：{image_id}")
         image["caption"] = str(caption or "")
-        self._save(node_id, data, _business_result={"id": image_id, "caption": image["caption"]})
+        self._save(node_id, data)
         return {"id": image_id, "caption": image["caption"]}
 
-    @_serialized
     def remove_image(self, node_id: str, card_id: str, image_id: str) -> dict:
         data = self.load(node_id)
         card = self._card(data, card_id)
@@ -449,6 +343,7 @@ class MaterialStore:
     def view(self, node_id: str, cut: str = "", *, snapshot: dict) -> dict:
         """这个阅读位置上有效的资料卡；别的时间点的只报个数。"""
         data = self.load(node_id)
+        self._sweep(node_id, data)
         shown: list[dict] = []
         hidden = 0
         diagnostics, unpositioned = [], []
@@ -481,44 +376,3 @@ class MaterialStore:
             "root": str(self.root),
             "updated_at": data.get("updated_at", ""),
         }
-
-
-class MaterialOperationsMixin:
-    """Shared Operations boundary for original-node material cards."""
-
-    _store: GraphStore
-
-    def _node_material(self, node_id):
-        method = "graph_snapshot"
-        snapshot = getattr(self, method)()
-        if not any(node["id"] == node_id and not node.get("retracted") for node in snapshot["nodes"]):
-            raise ValueError("资料节点不存在")
-        return MaterialStore(self._store.path), snapshot
-
-    def material_view(self, node_id, cut=""):
-        store, snapshot = self._node_material(node_id)
-        return store.view(node_id, cut=cut, snapshot=snapshot)
-
-    def material_add_card(self, node_id, title, detail="", valid_from="", valid_to="", images=None):
-        store, snapshot = self._node_material(node_id)
-        return store.add_card(node_id, title, detail, valid_from, valid_to, images, snapshot=snapshot)
-
-    def material_update_card(self, node_id, card_id, **changes):
-        store, snapshot = self._node_material(node_id)
-        return store.update_card(node_id, card_id, snapshot=snapshot, **changes)
-
-    def material_remove_card(self, node_id, card_id):
-        store, _snapshot = self._node_material(node_id)
-        return store.remove_card(node_id, card_id)
-
-    def material_add_image(self, node_id, card_id, source, caption=""):
-        store, _snapshot = self._node_material(node_id)
-        return store.add_image(node_id, card_id, source, caption)
-
-    def material_update_image_caption(self, node_id, card_id, image_id, caption):
-        store, _snapshot = self._node_material(node_id)
-        return store.update_image_caption(node_id, card_id, image_id, caption)
-
-    def material_remove_image(self, node_id, card_id, image_id):
-        store, _snapshot = self._node_material(node_id)
-        return store.remove_image(node_id, card_id, image_id)

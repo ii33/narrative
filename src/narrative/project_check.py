@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from . import property_categories, property_core
 from .property_audit import audit_properties
+from .property_store import invalid_at
 
 
 def _locate(issue: dict, objects: dict, records: dict, sources: dict) -> dict:
@@ -42,7 +43,7 @@ def _locate(issue: dict, objects: dict, records: dict, sources: dict) -> dict:
 
 
 def check(ops) -> dict:
-    # Capture objects, event changes and immutable sources in one read transaction.
+    # Capture objects, value intervals and immutable sources in one read transaction.
     graph = ops._store.snapshot(validation_data=True)
     revision = graph["revision"]
     validation = graph.pop("_validation")
@@ -51,13 +52,18 @@ def check(ops) -> dict:
     records = raw
     indexed = {row["id"]: row for row in records}
     issues = ops._service.validate_snapshot(graph, records)
-    from .temporal_state import change_issues, projected_changes
-    issues.extend(change_issues(graph, records))
-    current = records
-    historical = []
+    from .temporal_state import interval_issues
+    issues.extend(interval_issues(graph, records))
+    invalid = invalid_at(records, None)
+    # Invalid disclosures remain available as reference targets, but their old
+    # value/type/evidence is not presented as a current-state defect.
+    current = [row for row in records if row.get("id") not in invalid]
+    historical = [row for row in records if row.get("id") in invalid]
     enriched = graph
     issues.extend(property_core.validate_records(current, enriched, historical))
-    audit_rows = [row for row in records if row.get("kind") == "property_definition"] + projected_changes(graph, records)
+    canonical = current
+    # Ended value intervals belong to time history, not current defects.
+    audit_rows = canonical
     active_nodes = [row for row in graph["nodes"] if not row.get("retracted")]
     active_ids = {row["id"] for row in active_nodes}
     audit_rows = [row for row in audit_rows if not row.get("node_id") or row["node_id"] in active_ids]
@@ -66,7 +72,7 @@ def check(ops) -> dict:
         categories = property_categories.normalize_vocabulary(json.loads(category_config)) if category_config else None
     except json.JSONDecodeError:
         categories = None
-    issues.extend(audit_properties(audit_rows, active_nodes, categories=categories, usage_records=records)["issues"])
+    issues.extend(audit_properties(audit_rows, active_nodes, categories=categories)["issues"])
     objects = {row["id"]: row for row in graph["objects"]}
     sources = {row["id"]: row for row in graph["sources"]}
     located = [_locate(issue, objects, indexed, sources) for issue in issues]

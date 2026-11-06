@@ -66,9 +66,8 @@ def test_bridge_assistant_uses_native_source_tools_and_closes_host_on_project_sw
                 for title, start, end in zip(titles, starts, ends, strict=True)]
     before = ops.graph_snapshot()
     requests, server_errors = [], []
-    tool_names = ["load_tools", "list_sources", "read_source", "list_source_slices", "create_source_slices"]
+    tool_names = ["list_sources", "read_source", "list_source_slices", "create_source_slices"]
     actions = [
-        ("load_tools", {"names": ["create_source_slices"]}),
         ("list_sources", {}),
         ("read_source", {"source_id": source_id, "start": 0, "length": len(text)}),
         ("list_source_slices", {"source_id": source_id}),
@@ -86,22 +85,20 @@ def test_bridge_assistant_uses_native_source_tools_and_closes_host_on_project_sw
             try:
                 number = len(requests) - 1
                 native = {tool["function"]["name"] for tool in request["tools"]}
-                assert set(tool_names) - {"create_source_slices"} <= native
-                assert ("create_source_slices" in native) == (number > 0)
-                assert not {"locate_source", "read_project_state", "preview_changes", "apply_changes", "record_property_change", "revise_node"} & native
+                assert set(tool_names) <= native
+                assert "locate_source" in native
+                assert {"read_project_state", "preview_changes", "apply_changes", "add_property", "revise_node"} <= native
                 assert not {"list_projects", "create_project"} & native
                 if number:
                     observations = [message for message in request["messages"] if message.get("role") == "tool"]
                     assert len(observations) == number
                     if number == 1:
-                        assert contains_value(observations[-1], "create_source_slices")
-                    elif number == 2:
                         assert contains_value(observations[-1], source_id)
-                    elif number == 3:
+                    elif number == 2:
                         assert contains_value(observations[-1], text)
-                    elif number == 4:
+                    elif number == 3:
                         assert contains_value(observations[-1], [])
-                    elif number == 5:
+                    elif number == 4:
                         for title in titles:
                             assert contains_value(observations[-1], title)
                 if number < len(actions):
@@ -112,7 +109,7 @@ def test_bridge_assistant_uses_native_source_tools_and_closes_host_on_project_sw
                     }]}
                     finish = "tool_calls"
                 else:
-                    assert number == 5
+                    assert number == 4
                     delta = {"role": "assistant", "content": answer}
                     finish = "stop"
                 chunks = [
@@ -167,7 +164,7 @@ def test_bridge_assistant_uses_native_source_tools_and_closes_host_on_project_sw
         result = wait("assistant")
         assert not server_errors, server_errors
         assert result["answer"] == answer
-        assert len(requests) == 6
+        assert len(requests) == 5
         assert [step["tool"] for step in result["steps"]] == tool_names
         assert all(step["ok"] and step["summary"] for step in result["steps"])
         slices = ops.source_slices(source_id)
@@ -186,7 +183,7 @@ def test_bridge_assistant_uses_native_source_tools_and_closes_host_on_project_sw
         address = urlsplit(host.config["url"])
         connection = http.client.HTTPConnection(address.hostname, address.port, timeout=2)
         try:
-            connection.request("POST", "/call", json.dumps({"name": "record_property_change", "args": {}}),
+            connection.request("POST", "/call", json.dumps({"name": "add_property", "args": {}}),
                                {"Authorization": "Bearer " + host.token, "Content-Type": "application/json"})
             response = connection.getresponse()
             assert response.status == 400

@@ -32,7 +32,7 @@ class BatchReader:
         self.batch = batch
 
     def new_property_id(self) -> str:
-        identifier = f'PC{self.batch._cursor[0]}'
+        identifier = f'PV{self.batch._cursor[0]}'
         self.batch._cursor[0] += 1
         return identifier
 
@@ -118,7 +118,7 @@ def _state(snapshot: BatchSnapshot, graph: dict, records: list[dict], issues: li
     object_rows, record_rows = delta(objects, previous_objects), delta(values, previous_records)
     next_id = int(snapshot._meta.get('next_property_id', '1'))
     for identifier, kind, _payload in record_rows:
-        if kind == 'property_change' and identifier not in previous_records and identifier.startswith('PC') and identifier[2:].isdigit():
+        if kind == 'property_value' and identifier not in previous_records and identifier.startswith('PV') and identifier[2:].isdigit():
             next_id = max(next_id, int(identifier[2:]) + 1)
     return PreparedChanges(snapshot, graph, records, tuple(issues), object_rows, record_rows,
                            tuple(previous_objects.keys() - objects.keys()),
@@ -141,7 +141,7 @@ def prepare(snapshot: BatchSnapshot, graph_objects: list[dict], property_records
     reserved = {row["id"] for row in snapshot._records} | {row["id"] for row in property_records if isinstance(row.get("id"), str)}
     allocator = snapshot.reader
     for row in property_records:
-        if row.get('kind') == 'property_change' and 'id' not in row:
+        if row.get('kind') == 'property_value' and 'id' not in row:
             identifier = allocator.new_property_id()
             while identifier in reserved:
                 identifier = allocator.new_property_id()
@@ -178,26 +178,7 @@ def _write_delta(db, prepared: PreparedChanges, revision: int) -> None:
                        ((*row, revision) for row in prepared._record_rows))
 
 
-def _committed_changes(prepared):
-    before_objects = {row['id']: row for row in prepared._snapshot._graph['objects']}
-    before_records = {row['id']: row for row in prepared._snapshot._records}
-    changes = []
-    def compact(row, category):
-        kind = row.get('node_type') or row.get('kind', 'object')
-        return {'domain': 'extraction', 'action': category, 'object_type': kind, 'id': row['id'],
-                'name': row.get('name') or row.get('title') or row.get('property_id') or row['id'], 'count': 1}
-    for encoded, prior in ((prepared._object_rows, before_objects), (prepared._record_rows, before_records)):
-        for identifier, _kind, data in encoded:
-            row = json.loads(data)
-            category = 'updated' if identifier in prior else 'created'
-            changes.append(compact(row, category))
-    for identifiers, prior in ((prepared._delete_objects, before_objects), (prepared._delete_records, before_records)):
-        for identifier in identifiers:
-            changes.append(compact(prior.get(identifier, {'id': identifier}), 'deleted'))
-    return changes
-
-
-def commit(store, prepared: PreparedChanges, reason: str, *, action: str = 'apply', transaction_callback=None) -> dict:
+def commit(store, prepared: PreparedChanges, reason: str, *, action: str = 'apply') -> dict:
     if not isinstance(reason, str) or not reason.strip():
         raise ValueError('请说明修改原因')
     if Path(store.path) != Path(prepared._snapshot.store.path):
@@ -205,7 +186,6 @@ def commit(store, prepared: PreparedChanges, reason: str, *, action: str = 'appl
     if not prepared.valid:
         return prepared.preview() | {'status': 'rejected'}
     changed = sum(prepared.counts.values())
-    committed_changes = _committed_changes(prepared) if changed else []
     with store.connect(write=True) as db:
         current = int(db.execute("SELECT value FROM meta WHERE key='revision'").fetchone()[0])
         if current != prepared._snapshot.revision:
@@ -220,12 +200,8 @@ def commit(store, prepared: PreparedChanges, reason: str, *, action: str = 'appl
             summary = {'object_ids': [row[0] for row in prepared._object_rows],
                        'record_ids': [row[0] for row in prepared._record_rows],
                        'deleted_object_ids': list(prepared._delete_objects),
-                       'deleted_record_ids': list(prepared._delete_records), 'changed_count': changed,
-                       'committed_changes': committed_changes}
+                       'deleted_record_ids': list(prepared._delete_records), 'changed_count': changed}
             db.execute('INSERT INTO actions(id,revision,action,reason,summary) VALUES (?,?,?,?,?)',
                        (f'r{revision}', revision, action, reason,
                         json.dumps(summary, ensure_ascii=False)))
-        result = {'status': 'accepted' if changed else 'unchanged', 'revision': revision, **prepared.counts, 'committed_changes': committed_changes}
-        if transaction_callback is not None:
-            transaction_callback(db, result)
-    return result
+    return {'status': 'accepted' if changed else 'unchanged', 'revision': revision, **prepared.counts}

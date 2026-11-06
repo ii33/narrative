@@ -41,7 +41,6 @@ def _at_argument(value):
 
 def main():
     parser = argparse.ArgumentParser(description="叙事证据工作台")
-    parser.add_argument("--access-mode", dest="trusted_access_mode", choices=["standard", "full"], default="standard", help="可信主机访问模式")
     parser.add_argument("--db", default="data/demo.nproj", help=".nproj 工程入口信息文件")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("graph-create", help="创建工程包（节点 + 属性记录 + 原文）")

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from .graph_query import revealed
 from .property_core import canonical_definitions
-from .temporal_state import boundary_at, point, position, projected_changes, source_order
+from .temporal_state import boundary_at, point, position, source_order
 
 MOMENTS = {"storyline", "big_event", "scene", "event", "action"}
 
@@ -16,6 +16,7 @@ def involvement(snapshot: dict, records: list[dict], node_id: str, cut=None) -> 
         return result
     context = owner.get("context_id", "canon")
     boundary = boundary_at(snapshot, cut) if cut is not None else None
+    cutoff = position(boundary, snapshot) if boundary else None
     orders = source_order(snapshot)
     def visible(row):
         return (not row.get("retracted") and row.get("context_id", "canon") == context
@@ -47,18 +48,22 @@ def involvement(snapshot: dict, records: list[dict], node_id: str, cut=None) -> 
         for identifier in member.get("participants") or []:
             add(identifier, event_id)
     definitions = canonical_definitions(records)
-    for record in projected_changes(snapshot, records, boundary):
-        if record.get("state_kind") != "known" or record.get("node_id") not in members:
+    for record in records:
+        if record.get("kind") != "property_value" or record.get("node_id") not in members:
             continue
         if record.get("scope", "world") != "world":
             continue
         definition = definitions.get(str(record.get("property_id") or ""), {})
         if definition.get("value_type") not in {"node", "either"}:
             continue
+        begin, end = position(point(record), snapshot), position(record.get("valid_to"), snapshot)
+        if cutoff is not None and (begin is None or begin > cutoff or end is not None and end <= cutoff):
+            continue
+        if cutoff is None and record.get("valid_to") is not None:
+            continue
         value = record.get("value")
-        for target in value if isinstance(value, list) else [value]:
-            if isinstance(target, str):
-                add(target, record["node_id"], record.get("id"))
+        if isinstance(value, str):
+            add(value, record["node_id"], record.get("id"))
     def reading_key(item):
         return min(position(point(members[event_id]), snapshot) or (float("inf"), 0) for event_id in item["event_ids"]), item["id"]
     for row in sorted(collected.values(), key=reading_key):

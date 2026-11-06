@@ -479,7 +479,7 @@ Item {
                     ctx.fillStyle = "#ffffff"
                     ctx.fillRect(box.x, box.y, box.w, box.h)
                     ctx.strokeStyle = page.hoveredEdgeKey === routes[e].edge_key ? page.accent : page.line
-                    ctx.lineWidth = (page.hoveredEdgeKey === routes[e].edge_key ? 1.2 : .5)/viewScale
+                    ctx.lineWidth = (page.hoveredEdgeKey === routes[e].edge_key ? 1.5 : .65)/viewScale
                     ctx.strokeRect(box.x,box.y,box.w,box.h)
                     ctx.fillStyle = page.accent
                     ctx.save()

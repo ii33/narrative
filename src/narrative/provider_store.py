@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from contextlib import contextmanager
 from pathlib import Path
 
 # Settings saved before any project is open: the launcher's global defaults.
@@ -53,31 +52,6 @@ class ProviderStore:
                 "ON CONFLICT(project_id,key) DO UPDATE SET value=excluded.value",
                 (project_id, key, value),
             )
-
-    @contextmanager
-    def copy_scope(self, source_id: str, destination_id: str):
-        """Copy only explicit model profiles, committing with successful publish.
-
-        Filesystem callers publish inside this context; failure rolls back the
-        new scope. Global defaults and recent-project records are never copied.
-        """
-        if source_id == destination_id or destination_id == GLOBAL_SCOPE:
-            raise ValueError("副本模型配置须使用新的独立工程标识")
-        db = self._connect()
-        try:
-            db.execute("BEGIN IMMEDIATE")
-            if db.execute("SELECT 1 FROM provider_settings WHERE project_id=?", (destination_id,)).fetchone():
-                raise ValueError("目标工程模型配置已存在，不能覆盖")
-            rows = list(db.execute("SELECT key,value FROM provider_settings WHERE project_id=? AND key IN ('harness_settings','harness_profiles')", (source_id,)))
-            db.executemany("INSERT INTO provider_settings(project_id,key,value) VALUES(?,?,?)",
-                           [(destination_id, key, value) for key, value in rows])
-            yield [key for key, _value in rows]
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-        finally:
-            db.close()
 
     def get_json(self, project_id: str, key: str) -> dict | None:
         raw = self.get(project_id, key)

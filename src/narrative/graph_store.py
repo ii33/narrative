@@ -1,4 +1,4 @@
-"""Current schema-11 graph database; never upgrades historical projects."""
+"""Current schema-10 graph database; never upgrades historical projects."""
 
 from __future__ import annotations
 
@@ -6,74 +6,10 @@ import contextlib
 import json
 import sqlite3
 from contextlib import contextmanager
-from contextvars import ContextVar
 from pathlib import Path
 from uuid import uuid4
 
-GRAPH_SCHEMA_VERSION = 11
-
-
-_POST_COMMIT_WARNINGS: ContextVar[list | None] = ContextVar('graph_post_commit_warnings', default=None)
-
-
-_SHARED_TRANSACTIONS: ContextVar[dict | None] = ContextVar('graph_shared_transactions', default=None)
-
-
-def active_connection(path):
-    entry = (_SHARED_TRANSACTIONS.get() or {}).get(str(Path(path).resolve()))
-    return entry['db'] if entry else None
-
-
-def on_rollback(path, callback):
-    entry = (_SHARED_TRANSACTIONS.get() or {}).get(str(Path(path).resolve()))
-    if entry is None:
-        return False
-    entry['rollback'].append(callback)
-    return True
-
-
-def defer_after_commit(path, callback):
-    entry = (_SHARED_TRANSACTIONS.get() or {}).get(str(Path(path).resolve()))
-    if entry is None:
-        return False
-    entry['commit'].append(callback)
-    return True
-
-
-@contextmanager
-def atomic_write_scope(store):
-    key = str(Path(store.path).resolve())
-    if active_connection(store.path) is not None:
-        raise RuntimeError('重复创建共享业务事务')
-    entry = {'rollback': [], 'commit': []}
-    _POST_COMMIT_WARNINGS.set([])
-    try:
-        with store.connect(write=True) as db:
-            entry['db'] = db
-            token = _SHARED_TRANSACTIONS.set({**(_SHARED_TRANSACTIONS.get() or {}), key: entry})
-            try:
-                yield db
-            finally:
-                _SHARED_TRANSACTIONS.reset(token)
-    except BaseException as error:
-        for callback in reversed(entry['rollback']):
-            try:
-                callback()
-            except BaseException as cleanup_error:
-                error.add_note(f'回滚清理失败：{type(cleanup_error).__name__}: {cleanup_error}')
-        raise
-    for callback in entry['commit']:
-        try:
-            callback()
-        except Exception as exc:
-            warnings = _POST_COMMIT_WARNINGS.get()
-            if warnings is not None:
-                warnings.append({'severity': 'warning', 'code': 'POST_COMMIT_FEEDBACK', 'message': str(exc)})
-
-
-
-def post_commit_warnings():
-    return list(_POST_COMMIT_WARNINGS.get() or [])
+GRAPH_SCHEMA_VERSION = 10
 
 
 class GraphStore:
@@ -107,7 +43,7 @@ class GraphStore:
                     CREATE INDEX property_records_node ON property_records(json_extract(data,'$.node_id'));
                     CREATE INDEX property_records_property ON property_records(json_extract(data,'$.property_id'));
                     CREATE TABLE provider_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                    PRAGMA user_version=11;
+                    PRAGMA user_version=10;
                 """)
                 db.executemany(
                     "INSERT INTO meta(key,value) VALUES (?,?)",
@@ -148,10 +84,6 @@ class GraphStore:
 
     @contextmanager
     def connect(self, *, write: bool = False):
-        shared = active_connection(self.path)
-        if shared is not None:
-            yield shared
-            return
         db = sqlite3.connect(self.path, timeout=10)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
@@ -168,7 +100,7 @@ class GraphStore:
 
     def info(self) -> dict:
         with self.connect() as db:
-            meta = {r["key"]: r["value"] for r in db.execute("SELECT key,value FROM meta WHERE key IN ('project_id','title','revision')")}
+            meta = {r["key"]: r["value"] for r in db.execute("SELECT key,value FROM meta")}
             count = db.execute("SELECT COUNT(*) FROM sources").fetchone()[0]
         return {
             "path": str(self.path),
@@ -213,8 +145,7 @@ class GraphStore:
 
     def snapshot(self, *, validation_data: bool = False) -> dict:
         with self.connect() as db:
-            if not db.in_transaction:
-                db.execute("BEGIN")
+            db.execute("BEGIN")
             current = int(db.execute("SELECT value FROM meta WHERE key='revision'").fetchone()[0])
             rows = list(db.execute("SELECT data FROM objects"))
             objects = [json.loads(row["data"]) for row in rows]
@@ -228,7 +159,7 @@ class GraphStore:
                     'records': [json.loads(row['data']) for row in db.execute(
                         'SELECT data FROM property_records ORDER BY rowid')],
                     'sources': full_sources,
-                    'meta': {row['key']: row['value'] for row in db.execute("SELECT key,value FROM meta WHERE key NOT GLOB 'extraction_submission:*' AND key!='next_extraction_submission_number' AND key NOT GLOB 'content_submission:*' AND key!='next_content_submission_number'")},
+                    'meta': {row['key']: row['value'] for row in db.execute('SELECT key,value FROM meta')},
                 }
             else:
                 sources = [dict(row) for row in db.execute(

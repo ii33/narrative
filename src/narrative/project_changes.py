@@ -40,6 +40,6 @@ def state(ops) -> dict:
     graph = ops.graph_snapshot()
     records = ops.property_records()
     diagnostics = (event_scene_issues(graph["objects"]) + storyline_issues(graph["objects"], graph)
-                   + item_possession_issues(graph["objects"], records, snapshot=graph))
+                   + item_possession_issues(graph["objects"], records))
     return {"diagnostics": diagnostics, "revision": graph["revision"], "graph": graph,
             "property_records": records}

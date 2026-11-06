@@ -72,7 +72,6 @@ examples/harness_events_result.json
 # Local agent configuration
 .agents/
 .codex/
-.codex-attachments/
 
 # Assistant working memory (local only)
 .workbuddy-ai/

@@ -10,14 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .adaptation_operations import AdaptationOperationsMixin
-from .adaptation_views import AdaptationViewsMixin
-from .asset_operations import AssetOperationsMixin
-from .assistant_access import AssistantAccessOperationsMixin
-from .assistant_host import HostOperationsMixin
-from .chat_attachments import ChatAttachmentOperationsMixin
-from .compile_settings import CompileSettingsOperationsMixin
-from .content_operations import install_content_operations
 from .graph_facades import (
     GraphProfileFacade,
     GraphProjectFacade,
@@ -31,17 +23,9 @@ from .graph_service import GraphService
 from .graph_store import GraphStore
 from .graph_timeline_ops import TimelineService
 from .graphrag_ops import GraphRagService
-from .node_material import MaterialOperationsMixin
-from .project_style import ProjectStyleOperationsMixin
-from .prompt_settings import PromptSettingsOperationsMixin
+from .order_ids import order_key
 from .property_store import PropertyStore
 from .provider_store import ProviderStore
-from .screenplay_operations import ScreenplayOperationsMixin
-from .screenplay_timeline import ScreenplayTimelineOperationsMixin
-from .screenplay_writing import WritingOperationsMixin
-from .storyboard_operations import StoryboardOperationsMixin
-from .task_write_summary import TaskWriteSummaryOperationsMixin
-from .usage_statistics import UsageStatisticsOperationsMixin
 
 
 @dataclass(frozen=True)
@@ -49,11 +33,7 @@ class _ProjectPath:
     path: str
 
 
-class GraphOperations(ChatAttachmentOperationsMixin, AssistantAccessOperationsMixin, HostOperationsMixin, StoryboardOperationsMixin, TaskWriteSummaryOperationsMixin, UsageStatisticsOperationsMixin, CompileSettingsOperationsMixin, ProjectStyleOperationsMixin, PromptSettingsOperationsMixin, AdaptationOperationsMixin, AssetOperationsMixin, AdaptationViewsMixin,
-                      ScreenplayOperationsMixin, ScreenplayTimelineOperationsMixin, WritingOperationsMixin,
-                      MaterialOperationsMixin):
-    _copy_report: dict
-
+class GraphOperations:
     def __init__(self, path: str | Path, *, create: bool = False):
         self._store = GraphStore(path, create=create)
         self._service = GraphService(self._store)
@@ -78,19 +58,23 @@ class GraphOperations(ChatAttachmentOperationsMixin, AssistantAccessOperationsMi
 
         return check(self)
 
-    def record_property_change(self, node_id, property_id, event_id, op, *, expected_revision, reason, **fields):
-        from .property_operations import record_change
-        return record_change(self, node_id, property_id, event_id, op, expected_revision=expected_revision, reason=reason, **fields)
-
-    def correct_property(self, record_id, changes, reason, *, expected_revision):
+    def correct_property(self, record_id: str, value, reason: str, *, event_id=None,
+                         source_id=None, quote=None, category=None, scope=None, holder_id=None) -> dict:
         from .temporal_state import correct
-        if not isinstance(changes, dict) or not changes:
-            raise ValueError('请提供明确更正字段')
-        return correct(self, record_id, changes, reason, expected_revision=expected_revision)
+        return correct(self, record_id, value, reason, event_id=event_id, source_id=source_id,
+                       quote=quote, category=category, scope=scope, holder_id=holder_id)
 
-    def delete_property_records(self, ids: list[str], reason: str, *, expected_revision: int) -> dict:
+    def expire_properties(self, record_ids: list[str], source_id: str, start: int, *,
+                          event_id=None, reason: str) -> dict:
+        from .temporal_state import expire
+        return expire(self, record_ids, source_id, start, event_id=event_id, reason=reason)
+
+    def expire_property(self, record_id: str, source_id: str, start: int, *, event_id=None, reason: str) -> dict:
+        return self.expire_properties([record_id], source_id, start, event_id=event_id, reason=reason)
+
+    def delete_property_records(self, ids: list[str], reason: str) -> dict:
         from .temporal_state import delete_records
-        return delete_records(self, ids, reason, expected_revision=expected_revision)
+        return delete_records(self, ids, reason)
 
     def rename_property(self, from_id: str, to_id: str, reason: str, expected_revision: int) -> dict:
         from .temporal_state import rename
@@ -119,9 +103,9 @@ class GraphOperations(ChatAttachmentOperationsMixin, AssistantAccessOperationsMi
             raise ValueError("批次快照不属于当前工程")
         return prepare(snapshot, graph_objects, property_records, expected_revision)
 
-    def commit_changes(self, prepared, reason: str, *, _transaction_callback=None) -> dict:
+    def commit_changes(self, prepared, reason: str) -> dict:
         from .batch_write import commit
-        return commit(self._store, prepared, reason, transaction_callback=_transaction_callback)
+        return commit(self._store, prepared, reason)
 
     def graph_project_info(self) -> dict:
         return self.project.info()
@@ -174,38 +158,6 @@ class GraphOperations(ChatAttachmentOperationsMixin, AssistantAccessOperationsMi
         from .event_merge import merge
 
         return merge(self, source_event_id, target_event_id, expected_revision, evidence, reason)
-
-    def content_submission_contract(self):
-        from .content_operations import catalog_view
-        return catalog_view()
-
-    def list_content_submissions(self, operation=None, target=None, limit=20, after=0):
-        from .business_staging import list_pending
-        return list_pending(self, operation, target, limit, after)
-
-    def read_content_submission(self, submission_id, paths=None):
-        from .business_staging import read
-        return read(self, submission_id, paths)
-
-    def preview_content_patch(self, submission_id, expected_revision, patches):
-        from .business_staging import preview_patch
-        return preview_patch(self, submission_id, expected_revision, patches)
-
-    def patch_content_submission(self, submission_id, expected_revision, patches, reason):
-        from .business_staging import patch
-        return patch(self, submission_id, expected_revision, patches, reason)
-
-    def list_extraction_submissions(self, source_id=None, limit=20, after=0):
-        from .extraction_staging import list_pending
-        return list_pending(self, source_id, limit=limit, after=after)
-
-    def read_extraction_submission(self, submission_id, section=None, indices=None):
-        from .extraction_staging import read
-        return read(self, submission_id, section=section, indices=indices)
-
-    def patch_extraction_submission(self, submission_id, expected_revision, patches, reason):
-        from .extraction_staging import patch
-        return patch(self, submission_id, expected_revision, patches, reason)
 
     def preview_extraction(self, source_id: str, result: dict, start: int = 0,
                            end: int | None = None) -> dict:
@@ -351,8 +303,108 @@ class GraphOperations(ChatAttachmentOperationsMixin, AssistantAccessOperationsMi
             include_diagnostics=include_diagnostics,
         )
 
-    def property_event_state(self, node_id, property_id, event_id, *, scope='world', holder_id=None):
-        return self.property_state(node_id, property_id, at=event_id, scope=scope, holder_id=holder_id)
+    def property_event_state(
+        self,
+        node_id: str,
+        property_id: str,
+        event_id: str,
+        *,
+        scope: str = "world",
+        holder_id: str | None = None,
+        axis: str = "disclosure",
+    ) -> dict:
+        """Value of a property at an event, read from its value sequence.
+
+        Each entry is (value, checkpoint). Which entries apply depends on the
+        axis, and the two must not be confused:
+
+        ``disclosure`` (default) — what the reader knows after reaching this
+        event. The applicable entry is the last one disclosed at or before that
+        point. The order is linear by construction, so no inference is needed.
+
+        ``story`` — what holds at this story event. Only entries carrying an
+        explicit ``applies_to`` link are eligible; the disclosure anchor is not
+        reused here, because "the reader learns it here" is not "it holds there".
+        Records without that link answer ``unlinked`` rather than guessing.
+        """
+        records = [
+            item for item in self.property_records()
+            if item["kind"] == "property_value"
+            and item.get("node_id") == node_id
+            and item.get("property_id") == property_id
+            and (item.get("scope") or "world") == scope
+            and (scope == "world" or item.get("holder_id") == holder_id)
+        ]
+        if not records:
+            return {"kind": "unrecorded", "reason": "该属性没有值记录"}
+
+        if axis == "story":
+            # Only records explicitly linked to a story event can answer this. The
+            # disclosure anchor is a reading position and must not stand in for it:
+            # a value learned in a flashback is disclosed now, not then.
+            ancestors = self._event_ancestors(event_id)
+            linked = [
+                item for item in records
+                if isinstance(item.get("applies_to"), str)
+                and item["applies_to"] in ancestors
+            ]
+            if not linked:
+                return {
+                    "kind": "unlinked",
+                    "reason": "尚未建立属性与逻辑事件的适用关系，无法据此求故事状态",
+                    "disclosure_available": True,
+                }
+            latest = max(linked, key=self._record_position)
+            conflicting = [
+                item for item in linked
+                if item.get("value") != latest.get("value")
+                and not self._record_position(item) < self._record_position(latest)
+            ]
+            if conflicting:
+                return {
+                    "kind": "divergent",
+                    "reason": "多条分支各自记录了不同的值，未确定哪一条生效",
+                    "values": sorted({str(item.get("value")) for item in linked}),
+                    "record_ids": [item.get("id") for item in linked],
+                }
+            return {
+                "kind": "known",
+                "value": latest.get("value"),
+                "event_id": latest.get("applies_to"),
+                "record_id": latest.get("id"),
+                "axis": "story",
+            }
+
+        reading = self.property_state(node_id, property_id, at=event_id, scope=scope, holder_id=holder_id)
+        state = dict(reading["state"])
+        state["axis"] = "disclosure"
+        record_ids = reading.get("record_ids") or []
+        if record_ids:
+            selected = next(row for row in records if row["id"] == record_ids[0])
+            state.update(event_id=selected.get("event_id"), record_id=selected["id"], record_ids=record_ids)
+        else:
+            state["reason"] = "读到该位置时没有有效的属性记录"
+        return state
+
+    def _record_position(self, record: dict) -> tuple[int, ...]:
+        """Where a value becomes visible: its anchor event's number."""
+        anchor = record.get("event_id")
+        key = order_key(anchor) if isinstance(anchor, str) else None
+        return key or (999,)
+
+    def _event_ancestors(self, event_id: str) -> set[str]:
+        """The event itself plus everything reachable through predecessors."""
+        nodes = {item["id"]: item for item in self.graph_snapshot()["nodes"]}
+        reached = {event_id}
+        stack = [event_id]
+        while stack:
+            current = stack.pop()
+            node = nodes.get(current) or {}
+            for parent in node.get("predecessors") or []:
+                if parent not in reached:
+                    reached.add(parent)
+                    stack.append(parent)
+        return reached
 
     def property_disclosure_state(
         self,
@@ -429,17 +481,13 @@ class GraphOperations(ChatAttachmentOperationsMixin, AssistantAccessOperationsMi
 
     def set_property_categories(self, config: object) -> dict:
         """Replace the vocabulary; renames migrate the records they renamed."""
-        from .content_errors import content_validation
-        with content_validation():
-            return self.properties.set_categories(config)
+        return self.properties.set_categories(config)
 
     def property_categorize(
         self, targets: list[str], category: str, note: str = ""
     ) -> dict:
         """Move disclosures to a category. Appends a record; never rewrites one."""
-        from .content_errors import content_validation
-        with content_validation():
-            return self.properties.categorize(targets, category, note)
+        return self.properties.categorize(targets, category, note)
 
 
 
@@ -447,13 +495,20 @@ class GraphOperations(ChatAttachmentOperationsMixin, AssistantAccessOperationsMi
 
 
     def node_editor(self, node_id: str, cut: object = None) -> dict:
-        """Current derived states and editable event-change history at a reading cut.
+        """Everything the node editor needs: the node, its properties, the events.
 
-        Corrections edit a named mistaken record and preserve its sequence. New
-        narrative changes append at an explicitly selected event/action; a cut
-        never silently chooses a different writing event.
+        The editor is about the present: only what still stands at the reading
+        position is listed, and an aspect with no standing value is not listed at
+        all — there is nothing left to correct, and a row that can only be looked
+        at invites edits that go nowhere. Invalidated disclosures are not lost:
+        the browsing pane's 「全部」 answers what was said over time and why a
+        record stopped counting.
+
+        With a reading cut the properties are what the reader had met by then.
+        That view is a window, not a lock: an edit made while looking at the past
+        is written at the disclosure the reader is standing on.
         """
-        from .browse_view import _reading_key, steps
+        from .browse_view import steps
 
         snapshot = self.graph_snapshot()
         node = next(
@@ -462,7 +517,6 @@ class GraphOperations(ChatAttachmentOperationsMixin, AssistantAccessOperationsMi
         if node is None:
             raise ValueError("节点不存在")
         summary = self.properties.node_properties(node_id, cut=cut)
-        anchor_nodes = {item["id"]: item for item in snapshot["nodes"]}
         properties = summary["properties"]
         names = {item["id"]: item.get("name") or item["id"] for item in snapshot["nodes"]}
         return {
@@ -470,13 +524,13 @@ class GraphOperations(ChatAttachmentOperationsMixin, AssistantAccessOperationsMi
             "node": node,
             "properties": properties,
             "events": steps(snapshot, "event"),
-            "anchor_steps": sorted(steps(snapshot, "event") + steps(snapshot, "action"),
-                key=lambda row: _reading_key(snapshot)(anchor_nodes[row["id"]])),
             "revision": summary["revision"],
             "cut": summary.get("cut"),
             "cut_name": names.get(str(summary.get("cut") or ""), ""),
             "later_count": summary.get("later_count", 0),
-            # The reading cut filters derived state; writes always name their event.
+            # Not read-only: an edit made while looking at the past is written at
+            # the disclosure the reader is standing on. The flag only says the
+            # history is a window, so the pane can say so.
             "at_cut": bool(cut),
         }
 
@@ -540,9 +594,9 @@ class GraphOperations(ChatAttachmentOperationsMixin, AssistantAccessOperationsMi
         from .project_settings import load
         return load(self)
 
-    def save_project_settings(self, settings: dict, api_key=None, clear_api_key=False) -> dict:
+    def save_project_settings(self, settings: dict) -> dict:
         from .project_settings import save
-        return save(self, settings, api_key=api_key, clear_api_key=clear_api_key)
+        return save(self, settings)
 
     def provider_profile(self) -> dict:
         return self.profiles.settings()
@@ -553,20 +607,5 @@ class GraphOperations(ChatAttachmentOperationsMixin, AssistantAccessOperationsMi
     def save_harness_settings(self, settings: dict) -> dict:
         return self.profiles.save(settings)
 
-    def save_provider_profile(self, settings: dict, api_key=None, clear_api_key=False) -> dict:
-        return self.profiles.save(settings, api_key=api_key, clear_api_key=clear_api_key)
-
-    def provider_api_key_status(self, profile=None):
-        return self._profile.credential_status(profile)
-
-    def _saved_provider_api_key(self, profile):
-        return self._profile.saved_api_key(profile)
-
-    def check_model_credential(self, profile=None, api_key=None, ignore_saved_key=False):
-        from .credential_check import check_model_credential
-        return check_model_credential(self, profile if profile is not None else self.provider_profile(),
-                                      supplied_key=api_key, ignore_saved_key=ignore_saved_key)
-
-
-
-install_content_operations(GraphOperations)
+    def save_provider_profile(self, settings: dict) -> dict:
+        return self.profiles.save(settings)

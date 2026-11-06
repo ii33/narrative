@@ -5,8 +5,6 @@ import QtQuick.Dialogs
 
 Item {
     id: page
-    SubmissionState{id:contentSubmission;owner:page;operation:"";target:({})}
-
     objectName: "sourcePage"
     property var app
     readonly property var t: app.theme
@@ -137,8 +135,6 @@ Item {
     }
 
     ColumnLayout {
-        SubmissionFeedback{state:contentSubmission}
-
         anchors.fill: parent
         anchors.margins: 16
         spacing: 8

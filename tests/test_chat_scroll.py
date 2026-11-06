@@ -244,32 +244,3 @@ def test_single_tall_user_can_wheel_back_to_tail_then_follow_new_output(tmp_path
                         kind='model_output', message_id='A:later')
         ui.publish()
         assert ui.bottom() and ui.messages()[-1]['text'].startswith('新的正文')
-
-def wheel_at(ui, item, delta=120):
-    from PySide6.QtCore import QPoint, QPointF, Qt
-    from PySide6.QtGui import QWheelEvent
-    from PySide6.QtWidgets import QApplication
-
-    local = item.mapToScene(QPointF(item.width() / 2, item.height() / 2))
-    from PySide6.QtTest import QTest
-    QTest.mouseMove(ui.window, local.toPoint())
-    event = QWheelEvent(local, ui.window.mapToGlobal(local.toPoint()), QPoint(), QPoint(0, delta),
-                        Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False)
-    QApplication.sendEvent(ui.window, event)
-    ui.settle()
-
-
-def test_actual_wheel_scrolls_answer_and_survives_stream_update(tmp_path, monkeypatch):
-    with transcript_shell(tmp_path, monkeypatch) as ui:
-        ui.view.positionViewAtEnd()
-        ui.settle()
-        before = ui.view.property('contentY')
-        wheel_at(ui, ui.view)
-        assert ui.view.property('contentY') < before - 10
-        assert not ui.panel.property('followTail')
-        after = ui.anchor()
-        ui.store.append(ui.a['id'], 'assistant', '新流式内容' * 40,
-                        kind='model_output', message_id='wheel:new')
-        ui.publish()
-        assert ui.anchor()[0] == after[0]
-        assert abs(ui.anchor()[1] - after[1]) < 4

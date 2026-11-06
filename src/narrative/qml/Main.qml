@@ -77,27 +77,13 @@ ApplicationWindow {
     property string notice: ""
     property string mode: "launcher"
     property string currentPage: "browse"
-    property int storyboardRequestSequence:0
-    property var storyboardSelection:({})
-    function nextStoryboardToken(){return ++storyboardRequestSequence}
-    property string screenplayId: ""
-    property var screenplaySelection: ({})
     // 常驻协作者：面板跨页面保留，收起后状态还在（消息不丢）。
     property bool assistantOpen: false
-    property bool navigationCollapsed:false
-    property real navigationExpandedWidth:196
-    function toggleNavigation(){if(!navigationCollapsed)navigationExpandedWidth=Math.max(150,sidebar.width);navigationCollapsed=!navigationCollapsed;sidebar.SplitView.preferredWidth=navigationCollapsed?56:navigationExpandedWidth}
 
     readonly property var navItems: [
         {key: "browse", label: "数据浏览", hint: "按分类看节点"},
         {key: "relations", label: "关系图", hint: "人物与关系"},
         {key: "source", label: "原文", hint: "导入与回查"},
-        {key: "adaptation", label: "改编", hint: "独立编辑叙事"},
-        {key: "assets", label: "资产", hint: "形象、物品与视觉设定"},
-        {key: "screenplay", label: "剧本", hint: "选段、场表与正文"},
-        {key: "storyboard", label: "分镜稿", hint: "分镜文字、图格与导出"},
-        {key: "director", label: "导演台", hint: "调度、机位与动态预演"},
-        {key: "screenplay_structure", label: "结构", hint: "集、幕与段落"},
         {key: "static_check", label: "静态检查", hint: "约束与问题定位"},
         {key: "project_settings", label: "工程设置", hint: "提取粒度与模型"}
     ]
@@ -143,8 +129,6 @@ ApplicationWindow {
         function onResultReady(kind, payload) {
             resultKinds = resultKinds.concat([kind])
             if (kind === "project") {
-                screenplayId = ""
-                screenplaySelection = ({});storyboardSelection=({})
                 errorText = ""
                 project = payload.project || ({})
                 notice = "已打开 " + (project.title || project.name || "工程")
@@ -154,10 +138,8 @@ ApplicationWindow {
                 notice = "工程名称已更新为 " + (project.title || "")
                 bridge.loadRecentProjects()
             } else if (kind === "project_closed") {
-                screenplaySelection = ({});storyboardSelection=({})
-                screenplayId = ""
-                mode = "launcher"
                 project = ({})
+                mode = "launcher"
                 assistantOpen = false
             } else if (kind === "static_check_target" && !payload.superseded) {
                 if (payload.kind === "source") app.openSourceSpan(payload.source_id, payload.start, payload.end)
@@ -246,34 +228,27 @@ ApplicationWindow {
                 }
 
                 Rectangle {
-                    id:sidebar;objectName:"applicationNavigation"
-                    SplitView.preferredWidth:app.navigationCollapsed?56:app.navigationExpandedWidth
-                    SplitView.minimumWidth:app.navigationCollapsed?56:150
-                    SplitView.maximumWidth:app.navigationCollapsed?56:320
+                    SplitView.preferredWidth: 196
+                    SplitView.minimumWidth: 150
+                    SplitView.maximumWidth: 320
                     SplitView.fillHeight: true
                     color: themeTokens.card
                     border.color: themeTokens.line
 
                     ColumnLayout {
                         anchors.fill: parent
-                        anchors.margins:app.navigationCollapsed?6:14
+                        anchors.margins: 14
                         spacing: 4
 
                         Button {
                             objectName: "backToProjectsButton"
                             Layout.fillWidth: true
                             flat: true
-                            text:app.navigationCollapsed?"":"← 工程列表"
-                            implicitWidth:app.navigationCollapsed?40:150
-                            NavigationIcon{visible:app.navigationCollapsed;name:"back";ink:themeTokens.ink;anchors.centerIn:parent;width:24;height:24}
-                            ToolTip.visible:hovered
-                            ToolTip.text:"工程列表"
+                            text: "← 工程列表"
                             onClicked: app.backToLauncher()
                         }
 
-                        ToolButton{objectName:"navigationCollapse";text:app.navigationCollapsed?">":"< 收起导航";Layout.fillWidth:true;implicitWidth:40;onClicked:app.toggleNavigation();ToolTip.visible:hovered;ToolTip.text:app.navigationCollapsed?"展开导航":"收起导航"}
                         Label {
-                            visible:!app.navigationCollapsed
                             Layout.fillWidth: true
                             Layout.topMargin: 8
                             text: project.title || project.name || "未命名工程"
@@ -284,7 +259,6 @@ ApplicationWindow {
                         }
                         Label {
                             Layout.fillWidth: true
-                            visible:!app.navigationCollapsed
                             text: "修订 " + (project.revision !== undefined ? project.revision : "—")
                             color: themeTokens.muted
                             font.pixelSize: 11
@@ -298,13 +272,10 @@ ApplicationWindow {
                             color: themeTokens.line
                         }
 
-                        ScrollView {id:navScroll;contentWidth:availableWidth;Layout.fillWidth:true;Layout.fillHeight:true;clip:true
-                            ColumnLayout {width:navScroll.availableWidth;spacing:4
                         Repeater {
                             model: app.navItems
                             delegate: Item {
                                 required property var modelData
-                                objectName: "navigation_" + modelData.key
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: 46
 
@@ -314,11 +285,9 @@ ApplicationWindow {
                                     color: app.currentPage === modelData.key
                                         ? themeTokens.accentSoft : "transparent"
                                 }
-                                NavigationIcon {name:modelData.key;ink:app.currentPage===modelData.key?themeTokens.accent:themeTokens.ink;width:24;height:24;anchors.verticalCenter:parent.verticalCenter;x:app.navigationCollapsed?(parent.width-width)/2:10}
                                 Column {
-                                    visible:!app.navigationCollapsed
                                     anchors.left: parent.left
-                                    anchors.leftMargin: 44
+                                    anchors.leftMargin: 12
                                     anchors.verticalCenter: parent.verticalCenter
                                     spacing: 1
                                     Label {
@@ -335,10 +304,7 @@ ApplicationWindow {
                                         font.pixelSize: 11
                                     }
                                 }
-                                ToolTip.visible:navMouse.containsMouse
-                                ToolTip.text:modelData.label
                                 MouseArea {
-                                    id:navMouse;hoverEnabled:true
                                     anchors.fill: parent
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: app.goTo(modelData.key)
@@ -346,13 +312,10 @@ ApplicationWindow {
                             }
                         }
 
-                            }
-                        }
-
+                        Item { Layout.fillHeight: true }
 
                         Label {
                             Layout.fillWidth: true
-                            visible:!app.navigationCollapsed
                             text: project.path || ""
                             color: themeTokens.muted
                             font.pixelSize: 10
@@ -429,12 +392,6 @@ ApplicationWindow {
                         BrowsePage { id: browsePage; app: app }
                         RelationPage { app: app }
                         SourcePage { id: sourcePage; app: app }
-                        AdaptationPage { app: app }
-                        AssetsPage { app: app }
-                        ScreenplayPage { app: app }
-                        StoryboardPage { app: app }
-                        DirectorDeskPage { app: app }
-                        ScreenplayStructurePage { app: app }
                         StaticCheckPage { app: app }
                         ProjectSettingsPage { app: app }
                     }

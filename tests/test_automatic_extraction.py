@@ -18,15 +18,15 @@ def test_preview_is_readonly_and_submit_automatically_applies_with_traceable_unc
     result = project.submit_extraction(sid, data)
     assert result['status'] == 'accepted'
     with project.project.store.connect() as db:
-        note = json.loads(db.execute("SELECT reason FROM actions WHERE revision=? AND action!='extraction_staging'", (result["revision"],)).fetchone()[0])
+        note = json.loads(db.execute("SELECT reason FROM actions WHERE revision=?", (result["revision"],)).fetchone()[0])
     assert note["uncertainties"] == data["uncertainties"]
-    assert "expirations" not in note
+    assert note["expirations"] == data["expirations"]
     assert "accepted" not in result and result["uncertainty_count"] == 1
     records = project.property_records()
-    plan = next(r for r in records if r.get('property_id') == '计划' and r['kind'] == 'property_change' and r['op'] == 'set')
-    end = next(r for r in records if r.get('property_id') == '计划' and r.get('op') == 'clear')
+    plan = next(r for r in records if r.get('property_id') == '计划' and r['kind'] == 'property_value')
+    end = plan['valid_to']
     assert any(r['property_id'] == '计划' for r in project.property_node_summary(plan['node_id'], cut=plan['event_id'])['properties'])
-    assert project.property_state(plan['node_id'], '计划', end['event_id'], scope='claim', holder_id=plan['holder_id'])['state'] == {'kind': 'absent'}
+    assert not any(r['property_id'] == '计划' for r in project.property_node_summary(plan['node_id'], cut=end['event_id'])['properties'])
 
 
 def test_duplicate_submission_is_idempotent_and_later_new_facts_apply(project):
@@ -49,7 +49,7 @@ def test_invalid_submission_never_mutates_graph_or_leaves_pending(project, probl
     if problem == 'quote':
         data['nodes'][0]['quotes'] = ['原文没有这句话']
     elif problem == 'expiration':
-        data['properties'].append({'node': '甲', 'property': '计划', 'op': 'clear', 'at_event': 'missing', 'quotes': ['甲接到乙后离开。']})
+        data['expirations'] = [{'record_id': 'missing', 'at_event': '甲接到乙后离开', 'reason': '无目标'}]
     elif problem == 'heading':
         data['nodes'][2].update(name='远行', quotes=[heading])
         data['nodes'][3]['big_event'] = '远行'
@@ -57,7 +57,7 @@ def test_invalid_submission_never_mutates_graph_or_leaves_pending(project, probl
         data['properties'][1].update(property=problem, value_type='either')
     before = copy.deepcopy(project.graph_snapshot())
     assert not project.preview_extraction(sid, data)['valid']
-    assert project.submit_extraction(sid, data)['status'] == 'staged'
+    assert project.submit_extraction(sid, data)['status'] == 'rejected'
     assert project.graph_snapshot() == before
 
 
@@ -79,7 +79,7 @@ def test_unicode_range_and_structured_values_are_checked_without_hashing(project
     sid = project.import_source('合成原文', '😀前缀\n' + TEXT)
     assert project.preview_extraction(sid, draft_result(), start=4)['valid']
     assert project.submit_extraction(sid, draft_result(), start=4)['status'] == 'accepted'
-    plan = next(row for row in project.property_records() if row.get('property_id') == '计划' and row['kind'] == 'property_change' and row['op'] == 'set')
+    plan = next(row for row in project.property_records() if row.get('property_id') == '计划' and row['kind'] == 'property_value')
     assert plan['disclosure']['start'] == 4
     with pytest.raises(ValueError):
         project.submit_extraction(sid, draft_result(), start=-1)

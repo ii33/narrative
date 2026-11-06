@@ -108,20 +108,15 @@ class GraphService:
         return locate_text(self.store.source(source_id)["text"], quotes, limit_per_quote)
 
     def schema(self) -> dict:
-        from copy import deepcopy
-
-        from .content_operations import catalog_view
-        from .extraction_draft import DRAFT_VERSION, RESULT_SCHEMA, submission_input_schema
-        from .tool_api import TOOLS
         property_fields = {
             "property_definition": {
                 "required": ["id", "value_type", "cardinality"],
                 "optional": ["target_node_types", "evidence", "semantic", "symmetric"],
             },
-            "property_change": {
-                "required": ["node_id", "property_id", "event_id", "op", "sequence"],
-                "optional": ["id", "value", "scope", "holder_id", "context_id",
-                             "disclosure", "evidence", "category", "source", "related_nodes"],
+            "property_value": {
+                "required": ["node_id", "property_id", "value", "event_id"],
+                "optional": ["id", "anchor_basis", "applies_to", "scope", "holder_id",
+                             "disclosure", "evidence", "valid_from", "valid_to", "category"],
             },
         }
         return {
@@ -130,14 +125,13 @@ class GraphService:
             "contract_version": "graph-nesting/11",
             "property_contract_version": PROPERTY_CONTRACT_VERSION,
             "item_possession_rule": "活动物品须有当前world持有者：合法节点或显式无/未知。定义semantic=item_holder，默认属性名持有者；认知holder_id不替代。",
-            "state_storage": "节点只存当前对象；属性只存当前定义与事件处的变更，按正式事件顺序和sequence推导状态。无有效期或属性起止；错录correct/delete，剧情变化追加change。",
-            "property_changes": {"ordering": "提取按正式来源与事件Unicode位置，再按sequence；独立工作区按sort_id；不按ID或提交顺序。",
-                                 "sequence": "持久非负整数；提取由程序从定位引文start生成，人工明确追加。",
-                                 "operations": {"set": "建立或替换", "add": "加入集合或单个人际对象", "remove": "移除集合项或指定关系对象", "clear": "整组失效", "unknown": "明确未知"}},
+            "state_storage": "节点只存当前版本；属性值以valid_from/valid_to自身区间表示状态。新状态关闭旧值区间再追加；录入错误用correct/delete直接修正。",
+            "property_interval": {"shape": {"source_id": "原文ID", "start": "Unicode坐标", "event_id": "可选锚点"},
+                                  "bounds": "[valid_from,valid_to)，valid_to=null表示继续有效"},
             "rollback": "rollback_to(source_id,start,expected_revision,reason)保留该点，删除后续并清理引用；不重放节点旧版本。",
             "event_scene_rule": "活动事件须经包含路径归属同语境活动场景；动作必须直属恰好一个同语境活动事件，不能含子项。events不得成环。",
             "action_rule": "action按需提取，有独立A编号，支持披露、引文、参与者和可选发生区间；不由程序拆分所有事件。",
-            "property_identifiers": "新变更可省id由程序分配PCn；更正错误变更沿用其id；定义id仍为语义属性名。",
+            "property_identifiers": "新取值可省id由程序分配PVn；已有取值更新用其现有id；定义id仍为语义属性名。",
             "property_record_kinds": list(PROPERTY_RECORD_KINDS),
             "property_record_fields": property_fields,
             "property_records": property_fields,
@@ -146,29 +140,10 @@ class GraphService:
             "property_value_types": ["string", "number", "boolean", "node", "either", "any"],
             "property_cardinalities": ["one", "many"],
             "property_symmetry": "property_definition.symmetric为严格布尔值，默认false；true表示关系本身对称，不补写反向取值。",
-            "content_submission": catalog_view() | {
-                'repair_tools': {name: TOOLS[name].schema() for name in (
-                    'list_content_submissions', 'read_content_submission', 'patch_content_submission')},
-                'patch_root': '原Operations绑定arguments；提取从result.nodes/result.properties进入，0基数组索引保持稳定。',
-                'completion': '仅accepted/unchanged表示自动正式写入；staged保留草稿并反馈问题，无人工接受。',
-            },
             "extraction_submission": {
                 "preview": "Operations.preview_extraction(source_id, result, start, end)",
                 "submit": "Operations.submit_extraction(source_id, result, start, end)",
-                "draft_contract_version": DRAFT_VERSION,
-                "input_schema": submission_input_schema(),
-                "result_schema": deepcopy(RESULT_SCHEMA),
-                "outer_parameters": ["source_id", "result", "start", "end"],
-                "range_rule": "source_id/start/end属于工具调用外层，不是result字段；start/end是本批实际证据范围的全局Unicode坐标，end不包含。",
-                "draft_vs_storage": "submit_extraction只接收本节input_schema的提取草稿：nodes用type/name/quotes及直属父级引用，新增ID由程序分配。下面fields、property_record_fields和examples描述存储对象/显式图编辑，不能直接放进草稿；例如identity_note是存储节点字段，不是合法draft字段。",
-                "call_shape_example": {"source_id": "SRC1", "start": 0, "end": 120, "result": {"nodes": [], "properties": []}},
-                "behavior": "已解析草稿持久暂存后自动定位预检；合法立即原子入库，未通过则status=staged、submission_status=staged，返回问题行，不能冒充正式事实。后续仅patch问题项，重检通过自动入库，无人工accept。",
-                "list_staged": "Operations.list_extraction_submissions(source_id=None, limit=20, after=0)",
-                "read_staged": "Operations.read_extraction_submission(submission_id, section=None, indices=None)",
-                "patch_staged": "Operations.patch_extraction_submission(submission_id, expected_revision, patches, reason)",
-                "staging_revision": "submission_revision只约束暂存稿；patch.expected_revision使用此值，不是正式工程revision。已committed不可再patch。",
-                "patch_indices": "section为nodes/properties/uncertainties/exclusions；index0基，nodes.reference仍为原1基@n；只set/remove字段或append对象，不删除整行或重排。",
-                "repair_tools": {name: TOOLS[name].schema() for name in ('list_extraction_submissions', 'read_extraction_submission', 'patch_extraction_submission')},
+                "behavior": "同一对话任务提取与自审；程序校验完整图与属性草稿后自动入库，并保留内部审计。",
                 "records": list(PROPERTY_RECORD_KINDS),
             },
             "property_evidence": {
@@ -185,7 +160,6 @@ class GraphService:
             ],
             "time_bound_states": ["known", "unknown", "unbounded"],
             "validation": "引文、结构及预检通过后经 Operations 自动采用；模型存疑和程序诊断保留于审计。",
-            "fields_contract": "以下为存储Graph对象字段，不是submit_extraction的草稿字段；提取请用extraction_submission.input_schema。",
             "fields": {
                 "node": {"required": ["kind", "id", "node_type", "name"], "optional": ["aliases", "subtype", "context_id", "identity_note", "occurrence", "disclosure", "completion", "evidence", "evidence_spans", "retracted", "participants", "predecessors", "successors", "events", "source_marks"]},
                 "context": {"required": ["kind", "id", "label", "context_type"], "optional": ["parent_id", "holder_id"]},
@@ -201,10 +175,10 @@ class GraphService:
                     "kind": "property_definition", "id": "持有者", "value_type": "either",
                     "cardinality": "one",
                 },
-                "property_change": {
-                    "kind": "property_change",
+                "property_value": {
+                    "kind": "property_value",
                     "node_id": "key", "property_id": "持有者", "value": "p1", "scope": "world",
-                    "event_id": "e1", "op": "set", "sequence": 120,
+                    "event_id": "e1", "anchor_basis": "model",
                     "disclosure": {"source_id": "s1", "start": 120},
                     "evidence": {"source_id": "s1", "quote": "原文逐字引文"},
                 },
@@ -222,7 +196,7 @@ class GraphService:
                     "timeline_id": "story", "form": "event_boundary",
                     "event_id": "e1", "boundary": "end",
                 },
-                "occurrence": {
+                "validity": {
                     "start": {"state": "unknown"}, "end": {"state": "unbounded"}
                 },
             },
@@ -261,8 +235,7 @@ class GraphService:
 
         accepted_properties = (_accepted_properties if _accepted_properties is not None else
                                PropertyStore(self.store).accepted_records())
-        merged_graph = snapshot | {"objects": list(merged.values()), "nodes": [row for row in merged.values() if row.get("kind") == "node"]}
-        issues.extend(item_possession_issues(list(merged.values()), accepted_properties + (property_records or []), snapshot=merged_graph))
+        issues.extend(item_possession_issues(list(merged.values()), accepted_properties + (property_records or [])))
         groups: dict[str, dict[str, dict]] = defaultdict(dict)
         for item in merged.values():
             groups[item["kind"]][item["id"]] = item

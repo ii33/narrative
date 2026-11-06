@@ -50,13 +50,14 @@ def test_operations_summary_classifies_chinese_ids_without_rewriting_records(pro
     text = "甲约好接乙。乙收起便笺。甲接到乙后离开。"
     source_id = project.import_source("分类回归合成原文", text)
     data = draft_result()
+    data["expirations"] = []
     properties = data["properties"]
     for record in properties:
         record.pop("category", None)
     properties[0]["property"] = "计划"
     properties.extend([
         {"node": "甲", "property": name, "value": value, "value_type": "string",
-         "quotes": ["甲约好接乙。"], "op": "set", "at_event": "甲约好接乙"}
+         "quotes": ["甲约好接乙。"], "at_event": "甲约好接乙"}
         for name, value in [
             ("年龄", "二十岁"), ("身高", "一米七"), ("身份", "门主"),
             ("修为境界", "灵寂期"), ("秘书", "乙"), ("手下", "乙"),

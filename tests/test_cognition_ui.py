@@ -17,8 +17,8 @@ def texts(item):
 
 def test_scope_purpose_and_holder_contract_are_explicit():
     prompt = _first_prompt("复核")
-    assert "世界事实与人物所知、所信、意图和言说分别记录" in prompt
-    assert "认知或主张注明认知者、说话人" in prompt
+    assert "人物心理意图、所知所信也要查漏" in prompt
+    assert "认知或主张注明认知者/说话人" in prompt
     assert "不按对白形式机械决定scope" in prompt
     fields = RESULT_SCHEMA["properties"]["properties"]["items"]["properties"]
     assert "cognition为某人物所知所信" in fields["scope"]["description"]

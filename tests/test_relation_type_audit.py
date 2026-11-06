@@ -15,7 +15,7 @@ def test_relation_id_literal_warns_only_for_explicit_relation_category(project, 
     sid = project.import_source('合成关系原文', TEXT)
     assert project.submit_extraction(sid, draft_result())['status'] == 'accepted'
     nodes = {node['name']: node['id'] for node in project.graph_snapshot()['nodes']}
-    record = {'kind': 'property_change', 'op': 'set', 'sequence': 0, 'node_id': nodes['甲'], 'property_id': '查证对象',
+    record = {'kind': 'property_value', 'node_id': nodes['甲'], 'property_id': '查证对象',
               'value': nodes['乙'], 'event_id': nodes['甲约好接乙'],
               'evidence': {'source_id': sid, 'quote': '甲约好接乙。'}}
     if category is not None:

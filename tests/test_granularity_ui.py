@@ -39,7 +39,7 @@ def test_actual_settings_save_persists_project_model_and_granularity_without_mod
     with transcript_shell(tmp_path, monkeypatch) as ui:
         ops = Operations.open(ui.bridge._project_path)
         original = ops.load_project_settings()
-        assert original["extraction_granularity"] == "fine"
+        assert original["extraction_granularity"] == "standard"
         other = Operations.create_graph_project(tmp_path / "other-settings.nproj")
         other_before = other.load_project_settings()
         ui.window.setProperty("assistantOpen", False)
@@ -178,8 +178,8 @@ def test_event_editor_action_button_dispatches_into_click_time_chat_and_opens_sa
         assert (
             chat == ui.a["id"]
             and image == ""
-            and '"event_id": "E9"' in instruction
-            and "动作" in instruction
+            and "event_id=E9" in instruction
+            and "action" in instruction
         )
         assert ops.graph_snapshot() == before
 

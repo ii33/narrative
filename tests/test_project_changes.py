@@ -58,7 +58,7 @@ def batch(ops, sid):
             "cardinality": "one",
         },
         {
-            "kind": "property_change", "op": "set",
+            "kind": "property_value",
             "id": "generic-value",
             "node_id": person["id"],
             "property_id": "generic-property",
@@ -84,7 +84,7 @@ def test_catalog_contains_all_project_writes_but_no_external_tools():
         "get_schema",
         "read_project_state",
         "revise_node",
-        "record_property_change",
+        "add_property",
         "attach_children",
         "import_source",
     } <= project_tools
@@ -134,13 +134,8 @@ def test_generic_invalid_batch_never_writes_or_stages(project, bad):
         records[-1]["node_id"] = "missing-person"
     else:
         objects = [row for row in objects if row["id"] != "generic-scene"]
-    if bad == "reference":
-        from narrative.content_errors import ContentGuardError
-        with pytest.raises(ContentGuardError):
-            project.apply_changes(objects, records, before["revision"], "静态失败")
-    else:
-        result = project.apply_changes(objects, records, before["revision"], "静态失败")
-        assert result["status"] == "staged" and not result["valid"]
+    result = project.apply_changes(objects, records, before["revision"], "静态失败")
+    assert result["status"] == "rejected" and not result["valid"]
     assert project.graph_snapshot() == before
 
 
@@ -180,7 +175,7 @@ def test_project_runtime_registers_and_dispatches_general_writes_only_in_active_
     runtime = get_runtime(project, HarnessSettings(), "offline-placeholder", runner_factory=Runner)
     entry = layout(project.project_info().path).entry
     try:
-        assert {"apply_changes", "revise_node", "record_property_change"} <= {
+        assert {"apply_changes", "revise_node", "expire_properties"} <= {
             row["name"] for row in runtime.host.config["tools"]
         }
         with (

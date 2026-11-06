@@ -34,13 +34,14 @@ def draft():
             "value_type": "node",
             "category": "关系",
             "quotes": [events[i] + "。"],
-            "at_event": events[i], "op": "set",
+            "at_event": events[i],
         }
         for i, name in enumerate("乙丙")
     ]
     return {
         "nodes": nodes,
         "properties": props,
+        "expirations": [],
         "uncertainties": [],
         "exclusions": [],
     }
@@ -53,8 +54,11 @@ def setup_relations(project):
 
 
 def values(project, node, cut=None):
-    state = project.property_state(node, '朋友', cut)['state']
-    return set(state['value']) if state['kind'] == 'known' else set()
+    return {
+        x["value"]
+        for x in project.property_node_summary(node, cut=cut)["properties"]
+        if x["property_id"] == "朋友"
+    }
 
 
 def test_multiple_counterparts_survive_submit_state_and_browse(project):
@@ -62,15 +66,22 @@ def test_multiple_counterparts_survive_submit_state_and_browse(project):
     assert values(project, ids["甲"]) == {ids["乙"], ids["丙"]}
     state = project.property_state(ids["甲"], "朋友")
     assert set(state["state"]["value"]) == {ids["乙"], ids["丙"]}
-    assert len(state["active_change_ids"]) == 2
+    assert len(state["record_ids"]) == 2
     assert values(project, ids["甲"], ids["甲认识朋友乙"]) == {ids["乙"]}
     assert not any(r["kind"] == "property_retraction" for r in project.property_records())
 
 
 def test_one_counterpart_expires_without_erasing_other_or_past_map(project):
     ids = setup_relations(project)
-    project.record_property_change(ids["甲"], "朋友", ids["甲与乙绝交"], "remove", value=ids["乙"],
-        expected_revision=project.graph_project_info()["revision"], reason="原文已绝交")
+    old = next(
+        r
+        for r in project.property_records()
+        if r.get("node_id") == ids["甲"] and r.get("value") == ids["乙"]
+    )
+    source = old["valid_from"]["source_id"]
+    project.expire_property(
+        old["id"], source, TEXT.index("甲与乙绝交"), reason="原文已绝交", event_id=ids["甲与乙绝交"]
+    )
     assert values(project, ids["甲"]) == {ids["丙"]}
     assert values(project, ids["甲"], ids["甲认识朋友丙"]) == {ids["乙"], ids["丙"]}
     latest = tool_api.call("relation_map", {}, project=layout(project.project_info().path).entry)
@@ -84,13 +95,13 @@ def test_one_counterpart_expires_without_erasing_other_or_past_map(project):
 
 
 def test_nonrelationship_node_values_close_previous_holder_interval(project):
-    from test_item_possession import install, record
-    sid, ids, _ = install(project, value='无')
-    rows = record(sid, ids, ids['甲'], identifier='holder1', event_index=1)
-    assert project.apply_changes([], rows, project.graph_project_info()['revision'], '换手')['status'] == 'accepted'
-    assert project.property_state('I1', '持有者', ids['一块石头在地上'])['state']['value'] == '无'
-    assert project.property_state('I1', '持有者')['state']['value'] == ids['甲']
-    assert next(r for r in project.property_records() if r['id'] == 'holder0')['value'] == '无'
+    from test_current_state_contract import item_transfer
+
+    sid, _cut = item_transfer(project)
+    rows = {row["id"]: row for row in project.property_records() if row["kind"] == "property_value"}
+    assert rows["holder0"]["valid_to"]["source_id"] == sid
+    assert rows["holder0"]["valid_to"]["start"] == rows["holder1"]["valid_from"]["start"]
+    assert rows["holder1"].get("valid_to") is None
 
 
 def test_person_id_shaped_text_is_not_a_relationship(project):
@@ -98,7 +109,7 @@ def test_person_id_shaped_text_is_not_a_relationship(project):
     records = [
         {"kind": "property_definition", "id": "代号", "value_type": "string", "cardinality": "one"},
         {
-            "kind": "property_change", "op": "set", "sequence": 0,
+            "kind": "property_value",
             "id": "text-id",
             "node_id": ids["甲"],
             "property_id": "代号",
@@ -131,21 +142,26 @@ def test_named_relationship_interval_expiry_preserves_other_counterpart(project,
         for r in project.property_records()
         if r.get("property_id") == "朋友" and r["value"] == ids["乙"]
     )
-    project.record_property_change(ids['甲'], '朋友', ids['甲与乙绝交'], 'remove', value=ids['乙'],
-        expected_revision=project.graph_project_info()['revision'], reason='明确结束乙这一对象')
+    project.expire_property(
+        target["id"],
+        sid,
+        TEXT.index("甲与乙绝交"),
+        event_id=ids["甲与乙绝交"],
+        reason="明确结束乙这一对象",
+    )
     assert values(project, ids["甲"]) == {ids["丙"]}
     assert values(project, ids["甲"], ids["甲认识朋友丙"]) == {ids["乙"], ids["丙"]}
     ended = next(r for r in project.property_records() if r["id"] == target["id"])
-    assert ended["value"] == ids["乙"] and ended["op"] == "set"
+    assert ended["value"] == ids["乙"] and ended["valid_to"]["start"] == TEXT.index("甲与乙绝交")
 
 
 @pytest.mark.parametrize("value_type", ["string", "any"])
 def test_expiry_does_not_convert_id_shaped_opaque_value(project, value_type):
     ids = setup_relations(project)
     source = next(
-        r["disclosure"]["source_id"]
+        r["valid_from"]["source_id"]
         for r in project.property_records()
-        if r["kind"] == "property_change"
+        if r["kind"] == "property_value"
     )
     rows = [
         {
@@ -155,7 +171,7 @@ def test_expiry_does_not_convert_id_shaped_opaque_value(project, value_type):
             "cardinality": "one",
         },
         {
-            "kind": "property_change", "op": "set", "sequence": 0,
+            "kind": "property_value",
             "id": "opaque_id_text",
             "node_id": ids["甲"],
             "property_id": "记号",
@@ -171,8 +187,12 @@ def test_expiry_does_not_convert_id_shaped_opaque_value(project, value_type):
         )["status"]
         == "accepted"
     )
-    project.record_property_change(ids['甲'], '记号', ids['甲与乙绝交'], 'clear',
-        expected_revision=project.graph_project_info()['revision'], reason='明确清空字面状态')
-    assert project.property_state(ids['甲'], '记号')['state'] == {'kind': 'absent'}
+    project.expire_property(
+        "opaque_id_text",
+        source,
+        TEXT.index("甲与乙绝交"),
+        event_id=ids["甲与乙绝交"],
+        reason="结束指定记录而非转换值",
+    )
     ended = next(r for r in project.property_records() if r["id"] == "opaque_id_text")
-    assert ended["value"] == ids["乙"] and ended["op"] == "set"
+    assert ended["value"] == ids["乙"] and ended["valid_to"]["start"] == TEXT.index("甲与乙绝交")

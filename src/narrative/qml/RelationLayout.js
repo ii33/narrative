@@ -75,7 +75,7 @@ function layout(persons, links, radii, width, height) {
                 // keeps many roles from collapsing nodes or shrinking their radii.
                 var pairKey = JSON.stringify([a, b].sort())
                 var count = Object.keys(roles[pairKey]).length
-                var gap = (24 + 46 / Math.max(1, count)) * 1.25
+                var gap = 24 + 46 / Math.max(1, count)
                 var stiffness = .08 * (1 + 8 * Math.log(Math.max(1, count)))
                 var pull = (distance - p.r - other.r - gap) * stiffness
                 force[a].x += dx / distance * pull; force[a].y += dy / distance * pull
@@ -99,7 +99,7 @@ function layout(persons, links, radii, width, height) {
         }
         var box = {ids: members, points: local, minX: minX, minY: minY,
                    width: maxX - minX, height: maxY - minY}
-        boxes.push(box); area += (box.width + 75) * (box.height + 75); widest = Math.max(widest, box.width)
+        boxes.push(box); area += (box.width + 60) * (box.height + 60); widest = Math.max(widest, box.width)
     }
     // Disconnected components get separate boxes, so unrelated people do not
     // crowd between members of one connected group. Only the camera fits it.
@@ -107,13 +107,13 @@ function layout(persons, links, radii, width, height) {
     var x = 0, y = 0, rowHeight = 0, totalWidth = 0
     for (c = 0; c < boxes.length; ++c) {
         box = boxes[c]
-        if (x > 0 && x + box.width > targetWidth) { x = 0; y += rowHeight + 75; rowHeight = 0 }
+        if (x > 0 && x + box.width > targetWidth) { x = 0; y += rowHeight + 60; rowHeight = 0 }
         for (i = 0; i < box.ids.length; ++i) {
             id = box.ids[i]; p = box.points[id]
             positions[id] = {x: x + p.x - box.minX, y: y + p.y - box.minY, r: p.r}
         }
         totalWidth = Math.max(totalWidth, x + box.width); rowHeight = Math.max(rowHeight, box.height)
-        x += box.width + 75
+        x += box.width + 60
     }
     var totalHeight = boxes.length ? y + rowHeight : 0
     for (i = 0; i < ids.length; ++i) {
@@ -129,7 +129,7 @@ function separate(ids, points) {
         for (var j = i + 1; j < ids.length; ++j) {
             var a = points[ids[i]], b = points[ids[j]], dx = b.x - a.x, dy = b.y - a.y
             var distance = Math.sqrt(dx * dx + dy * dy)
-            var minimum = a.r + b.r + 18
+            var minimum = a.r + b.r + 14
             if (distance >= minimum) continue
             if (distance < .001) { dx = 1; dy = .5; distance = Math.sqrt(1.25) }
             var shift = (minimum - distance) / 2
@@ -264,7 +264,7 @@ function placeLabels(positions, routes, sizes) {
     var boxes = [], result = []
     for (var i=0; i<routes.length; ++i) {
         var route = routes[i], size = sizes[route.edge_index] || {width:labelWidth(route.edge),height:18}
-        var w=size.width+8, h=size.height+4, spot=null
+        var w=size.width+12, h=size.height+8, spot=null
         function clear(rect) {
             for (var id in positions) if (rectangleHitsCircle(rect,positions[id],8)) return false
             for (var j=0; j<boxes.length; ++j) if (rectanglesOverlap(rect,boxes[j],7)) return false

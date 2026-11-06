@@ -68,11 +68,7 @@ def main(argv: list[str] | None = None) -> int:
         from PySide6.QtQuickControls2 import QQuickStyle
         from PySide6.QtWidgets import QApplication, QMessageBox, QStyleFactory
     except ImportError as exc:
-        if isinstance(exc, ModuleNotFoundError) and exc.name == "PySide6":
-            message = "未安装 PySide6；请在项目目录运行 uv sync --locked --extra desktop。"
-        else:
-            message = "PySide6 导入失败；请检查下面的原始错误和系统运行库。"
-        print(f"{message}\n{type(exc).__name__}: {exc}", file=sys.stderr)
+        print("桌面界面依赖缺失；请在项目目录运行 uv sync --extra desktop。", file=sys.stderr)
         raise SystemExit(2) from exc
 
     from .native_bridge import NativeBridge

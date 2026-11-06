@@ -2,9 +2,8 @@
 
 Extraction is loose on purpose — one record is one disclosure, and a property may
 carry several. That looseness is right for capture but leaves four kinds of
-noise: duplicate disclosures, contradictory relationship labels, missing references,
-and properties that were never declared. Current facts are supplied by the
-shared event-change reducer. This module
+noise: overlapping records, contradicting records, records that a later
+disclosure supersedes, and properties that were never declared. This module
 finds those without asking a model, so the same input always yields the same
 findings.
 
@@ -17,6 +16,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from . import property_categories, property_labels
+from .order_ids import order_key
 from .property_core import canonical_definitions
 
 ERROR = "error"
@@ -57,8 +57,11 @@ def _normalized_name(property_id: str) -> str:
 
 
 def _position(record: dict) -> tuple:
-    disclosure = record.get("disclosure") or {}
-    return (str(disclosure.get("source_id") or ""), disclosure.get("start", 0), record.get("sequence", 0))
+    anchor = record.get("event_id")
+    key = order_key(anchor) if isinstance(anchor, str) else None
+    disclosure = record.get("disclosure")
+    offset = disclosure.get("start") if isinstance(disclosure, dict) else None
+    return (key or (999,), offset if isinstance(offset, int) else 0)
 
 
 _INVERSE = {
@@ -93,26 +96,33 @@ def audit_properties(
     *,
     node_ids: set[str] | None = None,
     categories: dict | None = None,
-    usage_records: list[dict] | None = None,
 ) -> dict:
     """Audit property records, optionally limited to the given nodes.
 
-    Returns findings grouped by node plus a flat list. Definition usage counts
-    the complete stored history independently from the current-state/node/cut
-    projection being audited; callers with a projection pass usage_records.
+    Returns findings grouped by node plus a flat list, so a caller can show
+    either "this node has problems" or "the whole extraction has problems".
     """
     names = {node["id"]: node for node in nodes}
+    ended_ids = {row.get("id") for row in records
+                 if row.get("kind") == "property_value" and row.get("valid_to")}
     indexed_values = [
-        record for record in records if record.get("kind") == "property_change"
+        record for record in records if record.get("kind") == "property_value"
     ]
     values_all = [
         record for record in indexed_values
-        if (record.get("state_kind", "known") == "known" and record.get("op") not in {"clear", "unknown"})
-        and (node_ids is None or record.get("node_id") in node_ids)
+        if node_ids is None or record.get("node_id") in node_ids
     ]
-    values = values_all
+    values = [record for record in values_all if record.get("id") not in ended_ids]
     definitions = canonical_definitions(records)
+    # A category move is one record pointing at one disclosure; the last accepted
+    # one is the grouping a reader sees.
     overrides: dict[str, str] = {}
+    for record in records:
+        if record.get("kind") != "property_categorization":
+            continue
+        target, category = record.get("target_id"), record.get("category")
+        if isinstance(target, str) and isinstance(category, str) and category.strip():
+            overrides[target] = category.strip()
 
     retracted_nodes = {node["id"] for node in nodes if node.get("retracted")}
     # Deterministic state audit: older values a later disclosure replaced.
@@ -194,6 +204,21 @@ def audit_properties(
                 suggestion="改成一个已有大类，或把它加进分类表；也可以留着，不影响取值",
             ))
 
+    value_ids = {
+        record["id"] for record in records
+        if record.get("kind") == "property_value" and isinstance(record.get("id"), str)
+    }
+    for record in records:
+        if record.get("kind") != "property_categorization":
+            continue
+        if record.get("target_id") not in value_ids:
+            issues.append(_issue(
+                "categorization_target_missing", ERROR,
+                f"分类记录指向的 {record.get('target_id') or '（空）'} 不是已有的取值记录",
+                property_id=None, records=[record],
+                suggestion="分类只能指向一条已接受的取值记录",
+            ))
+
     if unclassified:
         total = sum(unclassified.values())
         issues.append(_issue(
@@ -208,14 +233,17 @@ def audit_properties(
         if isinstance(node_id, str) and isinstance(property_id, str):
             groups[(
                 node_id, property_id, (record.get("scope") or "world"),
-                record.get("holder_id"), record.get("context_id") or "canon",
+                record.get("holder_id"),
             )].append(record)
 
-    for (node_id, property_id, scope, holder_id, _context_id), rows in groups.items():
+    for (node_id, property_id, scope, holder_id), rows in groups.items():
         node = names.get(node_id, {"id": node_id, "name": node_id})
         label = _SCOPE_LABELS.get(scope, scope)
-        # Callers provide the shared reducer's current-state projection.
-        ordered = sorted(rows, key=_position)
+        # Retracted rows are not evidence of anything: they are only kept so the
+        # group exists. Every check below works on what still stands.
+        ordered = sorted(
+            (row for row in rows if row.get("id") not in ended_ids), key=_position
+        )
         if not ordered:
             continue
         seen: dict[str, list[dict]] = defaultdict(list)
@@ -228,14 +256,15 @@ def audit_properties(
             # purpose — flagging it as an error would punish correct capture.
             at_position: dict[tuple, list[dict]] = defaultdict(list)
             for row in same:
-                at_position[(row.get("event_id"), row.get("sequence"), row.get("op"))].append(row)
+                disclosure = row.get("disclosure") or {}
+                at_position[(disclosure.get("source_id"), disclosure.get("start"))].append(row)
             for rows_here in at_position.values():
                 if len(rows_here) > 1:
                     issues.append(_issue(
                         "duplicate_value", ERROR,
                         f"属性「{property_id}」（{label}）在同一披露位置重复记录：{value_text or '（空）'}",
                         node=node, property_id=property_id, records=rows_here,
-                        suggestion="同一事件位置重复输出，核实后物理删除错误重复记录",
+                        suggestion="同一披露点重复输出，保留一条，其余撤回",
                     ))
             if len(same) > 1 and len(at_position) > 1:
                 issues.append(_issue(
@@ -295,22 +324,13 @@ def audit_properties(
         node_id_: node for node_id_, node in names.items()
         if node.get("node_type") == "person"
     }
-    relation_values = []
+    relations: dict[tuple[str, str], list[dict]] = {}
     for record in values:
-        definition = definitions.get(str(record.get("property_id") or ""), {})
-        value = record.get("value")
-        if definition.get("value_type") in {"node", "either"} and isinstance(value, list):
-            relation_values.extend(dict(record, value=target) for target in value)
-        else:
-            relation_values.append(record)
-    relations: dict[tuple, list[dict]] = {}
-    for record in relation_values:
         left, right = str(record.get("node_id") or ""), str(record.get("value") or "")
         if left not in people or right not in people or left == right:
             continue
         kind = str(record.get("property_id") or "")
-        scope_key = (record.get("context_id") or "canon", record.get("scope") or "world", record.get("holder_id"))
-        relations.setdefault((left, right, *scope_key), []).append(record)
+        relations.setdefault((left, right), []).append(record)
         if kind in PAIR_RELATIONS:
             issues.append(_issue(
                 "relation_pair_name", INFO,
@@ -321,13 +341,13 @@ def audit_properties(
                 records=[record],
                 suggestion="写成两边各自的身份：父亲 / 儿子、丈夫 / 妻子、上司 / 下属",
             ))
-    for (left, right, context_id, scope, holder_id), rows in relations.items():
+    for (left, right), rows in relations.items():
         for record in rows:
             kind = str(record.get("property_id") or "")
             if kind not in ROLE_RELATIONS:
                 continue
             twin = [
-                other for other in relations.get((right, left, context_id, scope, holder_id), [])
+                other for other in relations.get((right, left), [])
                 if str(other.get("property_id") or "") == kind
             ]
             if not twin:
@@ -375,23 +395,22 @@ def audit_properties(
             suggestion="在 property_labels.LABELS 里补一条，或用节点编辑器的「改名」换成中文",
         ))
 
-    # Historical changes still use their definition even when their value is no
-    # longer the derived current state.
-    usage = records if usage_records is None else usage_records
-    used = {record.get("property_id") for record in usage if record.get("kind") == "property_change"}
+    # A definition whose records were all taken back is not unused — it is in use
+    # and currently empty, which `retracted_no_successor` already says.
+    used = {record.get("property_id") for record in values_all}
     for property_id in definitions:
         if property_id not in used:
             issues.append(_issue(
                 "definition_unused", INFO,
                 f"属性定义「{property_id}」没有任何取值记录",
                 property_id=property_id,
-                suggestion="定义可保留供后续使用；无取值不表示漏提，不应据此新增关系或恢复已结束状态",
+                suggestion="若无用就撤回定义，否则说明有属性被漏提",
             ))
 
     # 关系得指向人：值既不是节点编号也不是任何节点的名字，说明写成了句子
     # （「恋人 = 与沈砚是多年的恋人」）。这种在关系网上画不出来。
     by_name = {_text(node.get("name")): node for node in nodes if node.get("name")}
-    for record in relation_values:
+    for record in values:
         if str(record.get("category") or "") != "关系":
             continue
         node = names.get(str(record.get("node_id") or "")) or {}
@@ -421,7 +440,7 @@ def audit_properties(
 
     # 值就是它自己：「某人的女友 · 关系 = 某人的女友」这种，说的是身份不是关系，
     # 画到关系网上就是一条自己指向自己的边。只报不改——可能是方面名写错了。
-    for record in relation_values:
+    for record in values:
         node = names.get(str(record.get("node_id") or "")) or {}
         if not node:
             continue

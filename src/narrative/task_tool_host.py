@@ -119,15 +119,15 @@ class TaskToolHost:
             return bool(not self._closed and waiter and (nonce is None or nonce == waiter["nonce"])
                         and waiter["active"]())
 
-    def _control(self, session_id: str, nonce: str, active, *, kind="interrupt", payload=None) -> dict:
-        """Authenticated host control; never part of the model tool catalog."""
+    def interrupt(self, session_id: str, nonce: str, active) -> dict:
+        """Request one exact active turn; keep waiting only while that turn exists."""
         identifier = secrets.token_hex(12)
         waiter = {"event": threading.Event(), "result": None, "nonce": nonce, "active": active}
         with self._control_lock:
             if self._closed:
                 raise ValueError("工具宿主已关闭")
             self._control_waiters[identifier] = waiter
-        self._controls.put({"id": identifier, "session_id": session_id, "nonce": nonce, "kind": kind, **(payload or {})})
+        self._controls.put({"id": identifier, "session_id": session_id, "nonce": nonce})
         deadline = time.monotonic() + 10  # Local control transport, never a model task deadline.
         try:
             while not waiter["event"].wait(.1):
@@ -144,15 +144,6 @@ class TaskToolHost:
         finally:
             with self._control_lock:
                 self._control_waiters.pop(identifier, None)
-
-    def interrupt(self, session_id, nonce, active):
-        return self._control(session_id, nonce, active)
-
-    def steer(self, session_id, nonce, message_id, blocks, active):
-        return self._control(session_id, nonce, active, kind="steer", payload={"message_id": message_id, "content_blocks": blocks})
-
-    def remove_steering(self, session_id, nonce, message_ids, active):
-        return self._control(session_id, nonce, active, kind="remove_steering", payload={"message_ids": message_ids})
 
     def close(self):
         if not self._closed:

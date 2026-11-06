@@ -30,7 +30,7 @@ def shell(tmp_path, monkeypatch):
     text = '😀甲与乙是朋友。\n乙向甲问好。'
     sid = ops.import_source('合成全文', text)
     start, end = text.index('甲'), text.index('。') + 1
-    part = ops.create_source_slices(sid, [{'title': '合成片段', 'start': start, 'end': end}])['result'][0]
+    part = ops.create_source_slices(sid, [{'title': '合成片段', 'start': start, 'end': end}])[0]
     app = QApplication.instance() or QApplication([])
     bridge = NativeBridge()
     results, errors = [], []
@@ -68,7 +68,6 @@ def shell(tmp_path, monkeypatch):
 
     try:
         invoke('project', lambda: bridge.openProject(str(tmp_path / 'source-buttons.nproj')))
-        window.setProperty('assistantOpen', False)
         window.setProperty('currentPage', 'source')
         page = window.findChild(object, 'sourcePage')
         wait(lambda: page.property('selectedId') == sid and page.property('previewText') == text)
@@ -97,10 +96,7 @@ def test_full_and_selected_slice_buttons_use_current_chat_and_block_duplicate_cl
             return False
 
         def agent_turn(self, instruction, session, *, on_message=None):
-            text = instruction if isinstance(instruction, str) else "\n".join(
-                block["text"] for block in instruction if block.get("type") == "text"
-            )
-            requests.append((text, session, self))
+            requests.append((instruction, session, self))
             entered.set()
             assert release.wait(5)
             return SimpleNamespace(raw='离线工程回归完成', metadata={'finish_reason': 'completed'})
@@ -120,7 +116,7 @@ def test_full_and_selected_slice_buttons_use_current_chat_and_block_duplicate_cl
         # cleanup must not discard a conversation governed by its own deadline.
         for request_id, request in list(ui.bridge._requests.items()):
             if request[0] == 'assistant':
-                ui.bridge._requests[request_id] = (*request[:4], time.perf_counter() - ui.bridge.STALE_AFTER_SECONDS - 1, *request[5:])
+                ui.bridge._requests[request_id] = (*request[:4], time.perf_counter() - ui.bridge.STALE_AFTER_SECONDS - 1)
         ui.bridge.loadSourceSlices(ui.sid)
         assert 'assistant' in ui.bridge.pendingOperations()
         assert not ui.errors, ui.errors

@@ -18,24 +18,19 @@ ColumnLayout {
             preview_pattern_slices: "预览章节切点", create_pattern_slices: "批量创建切片",
             create_source_slices: "创建切片", list_nodes: "查看节点", get_node: "查看节点详情",
             node_properties: "查看属性", preview_extraction: "核对提取草稿", submit_extraction: "提交自动入库"}
-        return labels[name] || name || "工具"
+        return labels[name] || "工具调用"
     }
 
     readonly property string summary: tools.map(function(tool) {
-        return tool.display_name || activity.label(tool.tool || "工具")
+        return activity.label(tool.tool || "工具")
     }).join("、")
     readonly property string details: tools.map(function(tool) {
         var args = tool.args || ({})
         if (typeof args === "string") {
             try { args = JSON.parse(args) } catch (ignored) {}
         }
-        return (tool.display_name || activity.label(tool.tool)) + "（"+(tool.tool||"工具")+"）"
-            + (tool.error ? " · " + tool.error : "")
-            + "\n参数\n" + (tool.arguments_text!==undefined?tool.arguments_text:JSON.stringify(args,null,2))
-            + (tool.arguments_truncated?"\n参数预览已截断；完整参数保留在任务记录。":"")
-            + "\n输出\n" + (tool.output_text!==undefined?tool.output_text:tool.summary||"等待工具结果")
-            + (tool.output_truncated?"\n输出预览已截断；完整结果保留在任务记录。":"")
-
+        return (tool.tool || "工具") + (tool.summary ? " · " + tool.summary : "")
+            + (tool.error ? " · " + tool.error : "") + "\n" + JSON.stringify(args, null, 2)
     }).join("\n\n")
 
     ToolButton {
@@ -51,7 +46,7 @@ ColumnLayout {
             verticalAlignment: Text.AlignVCenter
         }
     }
-    AssistantSelectableText {
+    TextArea {
         objectName: "assistantToolDetails"
         Layout.fillWidth: true
         visible: activity.expanded

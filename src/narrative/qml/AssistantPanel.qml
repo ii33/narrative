@@ -15,44 +15,9 @@ Rectangle {
     // 一条消息：{role: "user"|"assistant", text, steps: [{tool, summary, ok}]}
     property var messages: []
     property var rawMessages: []
-    property var taskToolSteps: ({})
-    property var lastChatSnapshot: ({})
-    property string accessMode:"standard"
-    property int accessRevision:-1
-    property bool accessSaving:false
-    property string accessError:""
-    property var taskAccessModes:({})
-    readonly property string activeAccessMode:taskAccessModes[activeTaskIds[chatId]||""]||""
-    function loadAccess(){if(chatId)bridge.loadChatAccess(chatId)}
-    function changeAccess(mode){if(!chatId||accessSaving)return;accessSaving=true;accessError="";bridge.setChatAccessMode(chatId,mode)}
-    function applyAccess(payload){
-        var project=app.project?app.project.path:""
-        if(!payload||payload.chat_id!==chatId||!payload.project_path||bridge.recentProjectKey(payload.project_path)!==bridge.recentProjectKey(project))return
-        if(payload.error){if(payload.operation==="set")accessSaving=false;accessError=payload.error;return}
-        if(payload.access_revision<accessRevision)return
-        if(payload.access_mode!=="standard"&&payload.access_mode!=="full")return
-        accessMode=payload.access_mode;accessRevision=payload.access_revision
-        if(payload.operation==="set"){accessSaving=false;accessError=""}
-    }
-    property var usageStatistics: ({})
-    property string usageUpdatedAt: ""
-    function applyUsage(payload) {
-        var project = app.project ? app.project.path : ""
-        if (!payload || payload.chat_id !== panel.chatId || (!payload.project_path || bridge.recentProjectKey(payload.project_path) !== bridge.recentProjectKey(project))) return
-        if (panel.usageActiveTask && payload.task_id !== panel.usageActiveTask) return
-        if (panel.usageUpdatedAt && (!payload.data_updated_at || new Date(payload.data_updated_at).getTime() < new Date(panel.usageUpdatedAt).getTime())) return
-        panel.usageUpdatedAt = payload.data_updated_at || panel.usageUpdatedAt
-        panel.usageStatistics = payload
-    }
-    function loadUsage() {
-        if (panel.chatId) bridge.loadUsageStatistics(panel.chatId, panel.activeTaskIds[panel.chatId] || "")
-    }
-    onChatIdChanged: { attachments=[];steeringPending=false;steeringNotice="";pendingSteering=({});steeringReceipts=({}); accessMode="standard";accessRevision=-1;accessSaving=false;accessError="";usageStatistics=({});usageUpdatedAt="";Qt.callLater(panel.loadUsage);Qt.callLater(panel.loadAccess) }
-
     ListModel { id: messageRows }
     property int optimisticSequence: 0
     property var expandedTools: ({})
-    property var expandedSummaries: ({})
     property var expandedProcesses: ({})
     property bool followTail: true
     property bool changingMessages: false
@@ -127,6 +92,14 @@ Rectangle {
         restoringScroll = false
     }
 
+    function transcriptWheelPoint(event) {
+        if (event.point && event.point.scenePosition)
+            return transcript.mapFromItem(null, event.point.scenePosition.x, event.point.scenePosition.y)
+        if (event.position !== undefined && event.position !== null) return event.position
+        if (event.x !== undefined) return Qt.point(event.x, event.y)
+        return null
+    }
+
     function contentLayoutChanged() {
         // Lazy delegate height estimates during a wheel gesture belong to the
         // user's scroll, not a message update that should restore an old anchor.
@@ -142,11 +115,9 @@ Rectangle {
     function projectProcessRows(rawRows) {
         var projected = []
         function processOnly(row) {
-            if (row.role !== "assistant") return false
-            if (row.displayKind === "thought") return true
-            return String(row.text || "").trim().length === 0
+            return row.role === "assistant" && String(row.text || "").trim().length === 0
                 && !(row.image || "") && !(row.resultRef || "") && !(row.diagnosticPath || "")
-                && !(row.auditDirectory || "") && (row.tools || []).length + (row.steps || []).length > 0
+                && !(row.auditDirectory || "") && ((row.tools || []).length + (row.steps || []).length > 0)
         }
         for (var i=0; i<rawRows.length; ++i) {
             var source=rawRows[i], row=({})
@@ -154,19 +125,12 @@ Rectangle {
             row.toolBatches=[{key:row.messageKey,tools:(row.tools || []).concat(row.steps || [])}]
             var only=processOnly(row), previous=projected.length ? projected[projected.length-1] : null
             var sameTask=previous && previous.taskId && previous.taskId === row.taskId
-            var hasOwnMedia=!!row.image||!!row.resultRef||!!row.diagnosticPath||(row.attachments||[]).length>0
-            var previousMedia=previous&&(!!previous.image||!!previous.resultRef||!!previous.diagnosticPath||(previous.attachments||[]).length>0)
-            if (only && previous && previous.processGroup === true && sameTask && !hasOwnMedia && !previousMedia) {
-                previous.thoughtGroup=previous.thoughtGroup||row.displayKind==="thought"
-                if(row.displayKind==="thought"&&row.text)previous.thoughtTexts.push(row.text)
-                previous.auditDirectory=row.auditDirectory||previous.auditDirectory
+            if (only && previous && previous.processGroup === true && sameTask) {
                 previous.sourceMessageKeys.push(row.messageKey)
                 previous.toolBatches.push({key:row.messageKey,tools:(row.tools || []).concat(row.steps || [])})
             } else {
                 if (only) {
                     row.processGroup=true
-                    row.thoughtGroup=row.displayKind==="thought"
-                    row.thoughtTexts=row.thoughtGroup&&row.text?[row.text]:[]
                     row.text=""
                     row.sourceMessageKeys=[row.messageKey]
                 }
@@ -215,70 +179,28 @@ Rectangle {
     property string chatTitle: "新会话"
     property bool busy: false
     property var busyChats: ({})
-    property real activitySequence:-1
     property var activeTaskIds: ({})
-    readonly property string usageActiveTask:activeTaskIds[chatId]||""
-    onUsageActiveTaskChanged: {
-        if (usageActiveTask && usageStatistics.task_id !== usageActiveTask) {
-            var next=Object.assign({},usageStatistics)
-            next.task_usage=({});next.task_id=usageActiveTask
-            next.context=Object.assign({},next.context||{}, {stale:true})
-            usageStatistics=next
-        }
-        Qt.callLater(panel.loadUsage)
-    }
     property string stoppingTaskId: ""
     property string requestedChatId: ""
     property string progressText: ""
     property string draft: ""
-    property var attachments: []
-    property bool steeringPending:false
-    property string steeringNotice:""
-    property var steeringReceipts:({})
-    property var pendingSteering:({})
+    // 附图：本地路径 + 缩略图地址。发送时一起交给模型。
+    property string attached: ""
+    property string attachedUrl: ""
+
     function send() {
         var text = panel.draft.trim()
-        if ((text.length === 0 && !panel.attachments.length)||panel.steeringPending) return
-        var files=panel.attachments.slice()
-        if(panel.busy){
-            var taskId=panel.activeTaskIds[panel.chatId]||"";
-            if(!taskId)return;
-            panel.pendingSteering={chat_id:panel.chatId,task_id:taskId,text:panel.draft,files:JSON.stringify(files)};
-            panel.steeringPending=true;
-            panel.steeringNotice="正在提交插话…";
-            bridge.assistantSteer(text,JSON.stringify(files),panel.chatId,taskId);
-            return;
-        }
+        if (text.length === 0 || panel.busy) return
         var next = panel.rawMessages.slice()
-        next.push({role: "user", text: text, steps: [], attachments:files.map(function(path){return {name:panel.fileName(path),url:path}}),
+        next.push({role: "user", text: text, steps: [], image: panel.attachedUrl,
                    messageKey: "optimistic:" + (++panel.optimisticSequence)})
         panel.syncMessages(next, false)
+        var image = panel.attached
         panel.draft = ""
-        panel.attachments = []
+        panel.attached = ""
+        panel.attachedUrl = ""
         panel.busy = true
-        bridge.assistantTurnWithAttachments(text,JSON.stringify(files))
-    }
-    function fileName(path){var parts=String(path).replace(/\\/g,"/").split("/");try{return decodeURIComponent(parts[parts.length-1])}catch(ignored){return parts[parts.length-1]}}
-    function attach(paths){var next=panel.attachments.slice();(typeof paths!=="string"&&paths&&paths.length!==undefined?Array.from(paths):[paths]).forEach(function(path){path=String(path);if(path&&next.indexOf(path)<0)next.push(path)});panel.attachments=next}
-    function removeAttachment(index){var next=panel.attachments.slice();next.splice(index,1);panel.attachments=next}
-    function applySteering(payload){
-        if(!panel.sameProject(payload)||payload.chat_id!==panel.chatId)return;
-        if(panel.pendingSteering.task_id&&payload.task_id!==panel.pendingSteering.task_id)return;
-        var id=payload.message_id||"", prior=id?(panel.steeringReceipts[id]||{}):{};
-        var status=(prior.status==="delivered"||prior.status==="not_delivered")?prior.status:payload.status;
-        if(id){var receipts=Object.assign({},panel.steeringReceipts);receipts[id]={status:status,acknowledged:prior.acknowledged||payload.status==="queued"};panel.steeringReceipts=receipts}
-        if(payload.status==="delivered"&&panel.steeringPending)return;
-        if(payload.status==="queued"&&prior.acknowledged){if(panel.steeringPending)return;}
-        else {
-            panel.steeringPending=false;
-            if(payload.status==="queued"){
-                if(panel.draft===panel.pendingSteering.text)panel.draft="";
-                if(JSON.stringify(panel.attachments)===panel.pendingSteering.files)panel.attachments=[];
-            }
-        }
-        if(payload.error){panel.steeringNotice="插话未发送："+payload.error;return}
-        panel.steeringNotice=status==="delivered"?"插话已送达当前任务":status==="queued"?"插话已排队，尚未确认送达":"插话未送达"+(payload.reason?"："+payload.reason:"");
-
+        bridge.assistantTurn(text, image)
     }
 
     function urlOf(path) {
@@ -298,7 +220,7 @@ Rectangle {
     }
 
     function visibleBlocks(row) {
-        if (row.content && typeof row.content!=="string" && row.content.length!==undefined) return Array.from(row.content)
+        if (Array.isArray(row.content)) return row.content
         if (row.full_output) {
             try {
                 var parsed = JSON.parse(row.full_output)
@@ -333,71 +255,30 @@ Rectangle {
         return text
     }
 
-    function toolArgumentsKey(value) {
-        if(typeof value === "string") {try {value=JSON.parse(value)} catch(ignored) {}}
-        try {value=JSON.parse(JSON.stringify(value,function(key,item){return item===undefined?null:item}))} catch(ignored) {}
-        function normalized(item) {
-            if(Array.isArray(item))return item.map(normalized)
-            if(item && typeof item === "object") {var out={};Object.keys(item).sort().forEach(function(key){out[key]=normalized(item[key])});return out}
-            return item
-        }
-        return JSON.stringify(normalized(value || {}))
-    }
     function applyChat(chat) {
-        panel.lastChatSnapshot=chat
         var switchedChat = panel.chatId !== (chat.id || "")
         panel.chatId = chat.id || ""
-        panel.applyAccess({chat_id:panel.chatId,project_path:app.project.path,access_mode:chat.access_mode,access_revision:chat.access_revision})
         panel.chatTitle = chat.title || "新会话"
         var rows = []
         var messages = chat.messages || []
-        var taskTools = ({}), completed = ({}), queues = ({}), offsets = ({})
-        for(var task in panel.taskToolSteps)completed[task]=panel.taskToolSteps[task]
+        var taskTools = ({})
         for (var j = 0; j < messages.length; ++j) {
             if (messages[j].task_id && panel.modelTools(messages[j]).length > 0)
                 taskTools[messages[j].task_id] = true
-            var savedTask=messages[j].task_id || ""
-            if(savedTask && (messages[j].steps || []).length >= (completed[savedTask] || []).length)
-                completed[savedTask]=messages[j].steps || []
-        }
-        for(var completedTask in completed){
-            var grouped={}
-            ;(completed[completedTask] || []).forEach(function(step){
-                if(!step)return
-                var key=step.tool+"\n"+panel.toolArgumentsKey(step.args)
-                if(!grouped[key])grouped[key]=[]
-                grouped[key].push(step)
-            })
-            queues[completedTask]=grouped
         }
         for (var i = 0; i < messages.length; ++i) {
             var row = messages[i]
-            var modelCalls=panel.modelTools(row), taskQueues=queues[row.task_id] || ({}), taskOffsets=offsets[row.task_id] || ({})
-            modelCalls=modelCalls.map(function(call){
-                var decorated=Object.assign({},call), key=call.tool+"\n"+panel.toolArgumentsKey(call.args)
-                var matches=taskQueues[key] || [], index=taskOffsets[key] || 0
-                if(index<matches.length){
-                    var step=matches[index];taskOffsets[key]=index+1;
-                    ["display_name","arguments_text","arguments_truncated","output_text","output_truncated","output_characters","summary","error"].forEach(function(field){if(step[field]!==undefined)decorated[field]=step[field]})
-                }
-                return decorated
-            })
-            if(row.task_id)offsets[row.task_id]=taskOffsets
             rows.push({
                 messageKey: row.message_id || (panel.chatId + ":history:" + i),
                 role: row.role,
                 taskId: row.task_id || "",
                 text: panel.modelText(row),
-                tools: modelCalls,
+                tools: panel.modelTools(row),
                 kind: row.kind || "",
-                displayKind: row.display_kind || "",
-                commitSummary: row.commit_summary || null,
                 resultRef: row.result_ref || "",
                 diagnosticPath: row.diagnostic_path || "",
                 auditDirectory: row.audit_directory || "",
                 steps: row.kind === "model_output" || taskTools[row.task_id] ? [] : (row.steps || []),
-                attachments:row.attachments||[],
-                steeringStatus:row.steering_status||"",
                 image: panel.urlOf(row.image || "")
             })
         }
@@ -411,18 +292,22 @@ Rectangle {
         bridge.openChat(id)
     }
 
+    function attach(path) {
+        panel.attached = path
+        panel.attachedUrl = path ? "file:///" + String(path).replace(/\\/g, "/") : ""
+    }
 
     function apply(payload) {
         var expected = panel.requestedChatId || panel.chatId
         if (payload.chat_id && expected && payload.chat_id !== expected) return
         if (payload.chat) {
             panel.applyChat(payload.chat)
-            panel.busy = panel.busyChats[panel.chatId]===true
+            panel.busy = false
             panel.progressText = ""
             panel.applyIndex(payload.items, panel.chatId)
             return
         }
-        panel.busy = panel.busyChats[panel.chatId]===true
+        panel.busy = false
         var next = panel.rawMessages.slice()
         next.push({
             role: "assistant",
@@ -448,64 +333,25 @@ Rectangle {
         return bridge.recentProjectKey(payload.project_path) === bridge.recentProjectKey(app.project.path)
     }
 
-    function applyActivity(payload){
-        if(!panel.sameProject(payload)||!payload.active_tasks||typeof payload.activity_sequence!=="number"||payload.activity_sequence<=panel.activitySequence)return;
-        panel.activitySequence=payload.activity_sequence;
-        var tasks=Object.assign({},payload.active_tasks),states={};
-        Object.keys(tasks).forEach(function(id){states[id]=true});
-        panel.activeTaskIds=tasks;panel.busyChats=states;
-        panel.busy=!!tasks[panel.chatId];
-        if(panel.stoppingTaskId&&!Object.keys(tasks).some(function(id){return tasks[id]===panel.stoppingTaskId}))panel.stoppingTaskId="";
-        if(!panel.busy)panel.progressText="";
-    }
-
-    function applyStop(payload){
-        if(!panel.sameProject(payload)||!payload.task_id)return;
-        if(payload.status!=="not_running")return;
-        if(panel.stoppingTaskId===payload.task_id)panel.stoppingTaskId="";
-        var id=payload.chat_id||"";
-        if(id&&panel.activeTaskIds[id]===payload.task_id){
-            var tasks=Object.assign({},panel.activeTaskIds),states=Object.assign({},panel.busyChats);
-            delete tasks[id];states[id]=false;panel.activeTaskIds=tasks;panel.busyChats=states;
-            if(id===panel.chatId){panel.busy=false;panel.progressText="目标任务已结束";}
-        }
-    }
-
     function applyProgress(payload) {
         if (!panel.sameProject(payload)) return
         var id = payload.chat_id || ""
-        if(payload.task_id&&["standard","full"].indexOf(payload.access_mode)>=0&&!panel.taskAccessModes[payload.task_id]){var modes=Object.assign({},panel.taskAccessModes);modes[payload.task_id]=payload.access_mode;panel.taskAccessModes=modes}
         var states = ({})
         for (var key in panel.busyChats) states[key] = panel.busyChats[key]
-        var authoritative=payload.active_tasks!==undefined;
-        var currentTask=panel.activeTaskIds[id]||"";
-        var staleEnd=payload.busy===false&&payload.task_id&&currentTask&&currentTask!==payload.task_id;
-        if (id && payload.busy !== undefined&&!staleEnd&&!authoritative) states[id] = payload.busy === true;
-        if(payload.busy===false&&payload.task_id&&panel.stoppingTaskId===payload.task_id)panel.stoppingTaskId="";
+        if (id && payload.busy !== undefined) states[id] = payload.busy === true
         panel.busyChats = states
         var tasks = ({})
         for (var taskChat in panel.activeTaskIds) tasks[taskChat] = panel.activeTaskIds[taskChat]
-        if (id && payload.task_id && payload.busy !== false&&!authoritative) tasks[id] = payload.task_id
-        if (id && payload.busy === false&&!authoritative && (!payload.task_id || tasks[id] === payload.task_id)) delete tasks[id]
+        if (id && payload.task_id && payload.busy !== false) tasks[id] = payload.task_id
+        if (id && payload.busy === false && (!payload.task_id || tasks[id] === payload.task_id)) delete tasks[id]
         panel.activeTaskIds = tasks
-        if(staleEnd)return;
         var expected = panel.requestedChatId || panel.chatId || payload.current
-        if(payload.items)panel.applyIndex(payload.items, expected)
-        if(payload.event==="tool_complete" && payload.task_id){
-            var timings=Object.assign({},panel.taskToolSteps), steps=(timings[payload.task_id]||[]).slice()
-            steps[payload.step_index]=payload.step || ({})
-            timings[payload.task_id]=steps;panel.taskToolSteps=timings
-        }
-        if(payload.event==="task_complete" && payload.task_id && payload.chat){
-            var retained=Object.assign({},panel.taskToolSteps);delete retained[payload.task_id];panel.taskToolSteps=retained
-        }
+        panel.applyIndex(payload.items, expected)
         if (!id || (expected && id !== expected) || (payload.current && id !== payload.current)) return
         if (payload.chat) panel.applyChat(payload.chat)
-        else if(payload.event==="tool_complete" && (panel.lastChatSnapshot.id || "")===id)panel.applyChat(panel.lastChatSnapshot)
         panel.busy = states[id] === true
         if (payload.event === "task_started") panel.progressText = "正在提取与核对…"
         else if (payload.event === "assistant_started") panel.progressText = "正在处理…"
-        else if (payload.event === "tool_complete") panel.progressText = "程序工具已完成，等待模型继续…"
         else if (payload.event === "tool") panel.progressText = (payload.step || {}).summary || "正在查证资料…"
         else if (payload.event === "format_correction") panel.progressText = "模型正在同一任务中修正工具参数…"
         else if (payload.event === "task_result") panel.progressText = "核对完成，正在入库…"
@@ -514,8 +360,6 @@ Rectangle {
     }
 
     function clearConversation() {
-        panel.taskToolSteps=({});panel.lastChatSnapshot=({});panel.taskAccessModes=({});panel.accessMode="standard";panel.accessRevision=-1;panel.accessSaving=false;panel.accessError=""
-        panel.usageStatistics=({});panel.usageUpdatedAt="";panel.activitySequence=-1
         panel.syncMessages([], true)
         panel.sessions = []
         panel.chatId = ""
@@ -640,15 +484,6 @@ Rectangle {
             }
         }
 
-        AssistantAccess{objectName:"assistantAccess";panel:panel;Layout.fillWidth:true}
-
-        AssistantUsage {
-            objectName: "assistantUsage"
-            Layout.fillWidth: true
-            statistics: panel.usageStatistics
-            t: panel.t
-        }
-
         ListView {
             id: transcript
             objectName: "assistantTranscript"
@@ -670,33 +505,23 @@ Rectangle {
             }
             WheelHandler {
                 id: transcriptWheel
-                parent: transcript
                 target: null
-                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-                blocking: true
+                blocking: false
                 onWheel: function(event) {
-                    // Wheel coordinates on a Flickable may be content coordinates;
-                    // delivery already hit-tests its clipped viewport.
-                    var delta = event.pixelDelta.y || event.angleDelta.y / 120 * 60
-                    if (!delta) { event.accepted = false; return }
-                    // Own movement and capture its anchor before a stream update
-                    // can restore the previous reading position.
-                    ++panel.scrollGeneration
-                    panel.scrollScheduled = false
-                    panel.restoreAfterMovement = false
-                    transcript.cancelFlick()
-                    transcript.forceLayout()
-                    var minimum = transcript.originY
-                    var maximum = Math.max(minimum, minimum + transcript.contentHeight - transcript.height)
-                    transcript.contentY = Math.max(minimum, Math.min(maximum, transcript.contentY - delta))
-                    panel.captureScroll(true)
-                    event.accepted = true
+                    var point = panel.transcriptWheelPoint(event)
+                    if (!point || !transcript.contains(point)) {
+                        event.accepted = false
+                        return
+                    }
+                    panel.userScrolled()
+                    var delta = event.pixelDelta.y || event.angleDelta.y
+                    event.accepted = (delta > 0 && transcript.atYBeginning)
+                        || (delta < 0 && transcript.atYEnd)
                     Qt.callLater(panel.captureScroll, true)
                 }
             }
             ScrollBar.vertical: ScrollBar {
                 id: transcriptScrollBar
-                objectName: "assistantTranscriptScrollBar"
                 onPositionChanged: if (pressed) panel.userScrolled()
             }
 
@@ -710,7 +535,7 @@ Rectangle {
 
                 Label {
                     Layout.fillWidth: true
-                    visible: modelData.kind!=="task_summary"&&(modelData.role !== "assistant" || (modelData.text || "").length > 0)
+                    visible: modelData.role !== "assistant" || (modelData.text || "").length > 0
                     text: modelData.role === "user" ? "你" : (modelData.role === "system" ? "程序反馈" : ((modelData.text || "").length > 0 ? "协作者" : "处理过程"))
                     color: modelData.role === "assistant" ? t.accent : t.muted
                     font.pixelSize: 9
@@ -723,15 +548,6 @@ Rectangle {
                     fillMode: Image.PreserveAspectFit
                     asynchronous: true
                 }
-                Repeater{model:modelData.attachments||[]
-                    delegate:ColumnLayout{
-                        required property var modelData
-                        Layout.fillWidth:true
-                        Image{visible:modelData.kind==="image";source:visible?(modelData.url||panel.urlOf(modelData.path)):"";Layout.preferredWidth:120;Layout.preferredHeight:90;fillMode:Image.PreserveAspectFit;asynchronous:true}
-                        Label{objectName:"assistantMessageAttachment";Layout.fillWidth:true;text:"附件 · "+modelData.name+(modelData.kind==="file"?"（文件，未解析正文）":"");wrapMode:Text.Wrap;color:t.muted;font.pixelSize:10}
-                    }
-                }
-                Label{visible:!!modelData.steeringStatus;text:modelData.steeringStatus==="queued"?"插话 · 已排队，尚未确认送达":modelData.steeringStatus==="delivered"?"插话 · 已送达":"插话 · 未送达";font.pixelSize:10;color:t.muted}
                 ColumnLayout {
                     id: processBlock
                     objectName: "assistantProcessActivity"
@@ -739,11 +555,11 @@ Rectangle {
                     property bool expanded: panel.expandedProcesses[blockKey] === true
                     onBlockKeyChanged: expanded = panel.expandedProcesses[blockKey] === true
                     Layout.fillWidth: true
-                    visible: modelData.thoughtGroup===true||(modelData.toolBatches || []).some(function(batch) { return batch.tools.length > 0 })
+                    visible: (modelData.toolBatches || []).some(function(batch) { return batch.tools.length > 0 })
                     ToolButton {
                         objectName: "assistantProcessToggle"
                         Layout.fillWidth: true
-                        text: (processBlock.expanded ? "− " : "+ ") + (modelData.thoughtGroup?"思考":"处理过程")
+                        text: (processBlock.expanded ? "▾ " : "▸ ") + "处理过程（" + (modelData.toolBatches || []).length + "批）"
                         onClicked: {
                             processBlock.expanded = !processBlock.expanded
                             var states = Object.assign({},panel.expandedProcesses)
@@ -752,8 +568,6 @@ Rectangle {
                             panel.captureScroll(false); panel.scheduleScroll()
                         }
                     }
-                    Label{objectName:"assistantThoughtUnavailable";visible:processBlock.expanded&&(modelData.thoughtTexts||[]).length===0;text:"本轮模型未提供过程说明";color:panel.t.muted;wrapMode:Text.Wrap;Layout.fillWidth:true;font.pixelSize:11}
-                    AssistantSelectableText{objectName:"assistantThoughtText";visible:processBlock.expanded&&(modelData.thoughtTexts||[]).length>0;text:processBlock.expanded?(modelData.thoughtTexts||[]).join("\n\n"):"";textFormat:Text.MarkdownText;wrapMode:Text.Wrap;Layout.fillWidth:true;color:panel.t.body;font.pixelSize:12}
                     Repeater {
                         model: processBlock.expanded ? (modelData.toolBatches || []) : []
                         delegate: ToolActivity {
@@ -773,20 +587,11 @@ Rectangle {
                         }
                     }
                 }
-                TaskSubmissionSummary {
-                    property string summaryKey:panel.expansionKey(messageKey)
-                    visible:modelData.kind==="task_summary"&&!!modelData.commitSummary
-                    Layout.fillWidth:true
-                    summary:modelData.commitSummary||({})
-                    t:panel.t
-                    expanded:panel.expandedSummaries[summaryKey]===true
-                    onUserToggled:{var states=Object.assign({},panel.expandedSummaries);states[summaryKey]=expanded;panel.expandedSummaries=states;panel.captureScroll(false);panel.scheduleScroll()}
-                }
                 // 回答可能是 Markdown 或一小段 HTML：按内容选渲染方式，别把星号原样显示。
-                AssistantSelectableText {
+                Label {
                     objectName: "assistantAnswer"
                     Layout.fillWidth: true
-                    visible: modelData.kind!=="task_summary"&&(modelData.text || "").length > 0
+                    visible: (modelData.text || "").length > 0
                     text: modelData.text
                     textFormat: panel.richFormat(modelData.text)
                     color: t.body
@@ -834,23 +639,34 @@ Rectangle {
             wrapMode: Text.Wrap
         }
 
-        Label{visible:panel.steeringNotice.length>0;text:panel.steeringNotice;objectName:"assistantSteeringNotice";wrapMode:Text.Wrap;Layout.fillWidth:true;color:t.muted;font.pixelSize:10}
-        ScrollView{
-            Layout.fillWidth:true;visible:panel.attachments.length>0
-            Layout.preferredHeight:Math.min(120,attachmentList.implicitHeight)
-            contentWidth:availableWidth
-            clip:true
-            ColumnLayout{
-            id:attachmentList; width:parent.width
-            Repeater{model:panel.attachments
-                delegate:RowLayout{
-                    required property int index
-                    required property string modelData
-                    Layout.fillWidth:true
-                    Label{Layout.fillWidth:true;text:panel.fileName(modelData);elide:Text.ElideMiddle;font.pixelSize:10;color:t.body}
-                    ToolButton{objectName:"assistantRemoveAttachment";text:"移除";enabled:!panel.steeringPending;onClicked:panel.removeAttachment(index)}
-                }
+        RowLayout {
+            Layout.fillWidth: true
+            visible: panel.attached.length > 0
+            spacing: 6
+            Image {
+                Layout.preferredWidth: 40
+                Layout.preferredHeight: 40
+                source: panel.attachedUrl
+                fillMode: Image.PreserveAspectFit
+                asynchronous: true
             }
+            Label {
+                Layout.fillWidth: true
+                text: "已附一张图"
+                color: t.muted
+                font.pixelSize: 10
+            }
+            Label {
+                objectName: "assistantDropImage"
+                text: "移除"
+                color: t.bad
+                font.pixelSize: 10
+                font.underline: true
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: panel.attach("")
+                }
             }
         }
 
@@ -859,7 +675,7 @@ Rectangle {
             spacing: 6
             Label {
                 objectName: "assistantAttach"
-                text: "附件"
+                text: "图"
                 color: t.muted
                 font.pixelSize: 11
                 font.underline: true
@@ -873,9 +689,9 @@ Rectangle {
                 id: prompt
                 objectName: "assistantPrompt"
                 Layout.fillWidth: true
-                placeholderText: panel.busy ? "发送插话，不停止当前任务" : "问点什么，回车发送"
+                placeholderText: panel.busy ? "它还在查…" : "问点什么，回车发送"
                 text: panel.draft
-                enabled: !panel.steeringPending
+                enabled: !panel.busy
                 onTextChanged: panel.draft = text
                 onAccepted: panel.send()
             }
@@ -892,9 +708,9 @@ Rectangle {
             }
             Button {
                 objectName: "assistantSend"
-                text: panel.busy?"插话":"发送"
+                text: "发送"
                 font.pixelSize: 11
-                enabled: !panel.steeringPending && (panel.draft.trim().length > 0||panel.attachments.length>0) && (!panel.busy||!!panel.activeTaskIds[panel.chatId])
+                enabled: !panel.busy && panel.draft.trim().length > 0
                 onClicked: panel.send()
             }
         }
@@ -935,10 +751,9 @@ Rectangle {
     FileDialog {
         id: imagePicker
         objectName: "assistantImagePicker"
-        title: "添加附件"
-        fileMode:FileDialog.OpenFiles
-        nameFilters: ["所有文件 (*)"]
-        onAccepted: panel.attach(Array.from(imagePicker.selectedFiles,function(value){return value.toString()}))
+        title: "选一张图给它看"
+        nameFilters: ["图片 (*.png *.jpg *.jpeg *.webp *.gif)"]
+        onAccepted: panel.attach(imagePicker.selectedFile.toString())
     }
 
     Component.onCompleted: panel.load()
@@ -951,12 +766,7 @@ Rectangle {
     Connections {
         target: bridge
         function onResultReady(kind, payload) {
-            if(payload.active_tasks!==undefined)panel.applyActivity(payload)
-            if (kind === "assistant_stop") panel.applyStop(payload)
-            else if (kind === "assistant_steer") panel.applySteering(payload)
-            else if (kind === "chat_access") panel.applyAccess(payload)
-            else if (kind === "assistant_usage") panel.applyUsage(payload)
-            else if (kind === "assistant") panel.apply(payload)
+            if (kind === "assistant") panel.apply(payload)
             else if (kind === "conversation_progress") panel.applyProgress(payload)
             else if (kind === "project" || kind === "project_closed") {
                 panel.clearConversation()
@@ -975,9 +785,7 @@ Rectangle {
             }
         }
         function onErrorOccurred(kind, message) {
-            if(kind==="assistant_steer"){panel.steeringPending=false;panel.steeringNotice="插话未发送："+message}
-            else if(kind==="chat_access"){panel.accessSaving=false;panel.accessError=message}
-            else if (kind === "assistant") panel.fail(message)
+            if (kind === "assistant") panel.fail(message)
         }
     }
 }

@@ -1,282 +1,489 @@
-"""Schema 11 event-bound property facts and deterministic state reduction."""
+"""Pure validation and projection for current definitions and value intervals.
+
+This module intentionally has no storage, UI, or model-service dependencies.
+It consumes JSON-shaped dictionaries and the reviewed graph snapshot.
+"""
+
 from __future__ import annotations
 
-import json
-import math
-from collections import defaultdict
+from datetime import datetime
 from typing import Any
 
-from .source_location import ExactQuoteLookup
-
-KINDS = {'property_definition', 'property_change'}
-OPS = {'set', 'add', 'remove', 'clear', 'unknown'}
-VALUE_TYPES = {'string', 'number', 'boolean', 'node', 'either', 'any'}
-CHANGE_FIELDS = {'id', 'kind', 'node_id', 'property_id', 'event_id', 'op', 'value', 'sequence',
-                 'scope', 'holder_id', 'context_id', 'disclosure', 'evidence', 'evidence_spans',
-                 'source', 'category', 'related_nodes', 'anchor_basis'}
-DEFINITION_FIELDS = {'id', 'kind', 'value_type', 'cardinality', 'target_node_types', 'semantic', 'symmetric', 'evidence'}
-
-
-def _issue(code, message, object_id=None, severity='error'):
-    return {'code': code, 'message': message, 'object_id': object_id, 'severity': severity}
-
-
-def canonical_definitions(records):
-    return {r['id']: r for r in records if isinstance(r, dict) and r.get('kind') == 'property_definition' and isinstance(r.get('id'), str)}
-
-
-def _freeze(value):
-    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+_KINDS = {
+    "property_definition",
+    "property_value",
+}
+# "any" means the shape is not fixed: one property may hold a number, a
+# description and a relative phrase over time.
+_VALUE_TYPES = {"string", "number", "boolean", "node", "any", "either"}
+_CARDINALITIES = {"one", "many"}
+_CELL_KINDS = {"known", "unknown", "absent"}
+_EFFECT_OPS = {"set", "add", "remove", "unknown", "absent"}
+_SCOPES = {"world", "cognition", "claim"}
+_COMMON = {"id", "kind", "evidence"}
+_SCOPED_FIELDS = {"scope", "holder_id", "disclosure"}
+_FIELDS = {
+    "property_definition": _COMMON | {"value_type", "cardinality", "target_node_types", "semantic", "symmetric"},
+    "property_value": _COMMON | _SCOPED_FIELDS | {"node_id", "property_id", "value", "event_id",
+        "anchor_basis", "applies_to", "source", "related_nodes", "category", "valid_from", "valid_to"},
+}
 
 
-def _valid_value(value: Any, definition: dict, graph_nodes: dict) -> bool:
-    kind = definition.get('value_type')
-    if kind == 'any':
+def _record_scope(record: dict) -> str:
+    scope = (record.get("scope") or "world")
+    return scope if isinstance(scope, str) else "world"
+
+
+def _scope_matches(record: dict, scope: str, holder_id: str | None) -> bool:
+    if record.get("kind") in {"property_definition"}:
         return True
-    if kind == 'string':
-        return isinstance(value, str)
-    if kind == 'number':
-        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-    if kind == 'boolean':
-        return type(value) is bool
-    if kind == 'either':
-        return isinstance(value, str)
-    if kind == 'node':
-        target = graph_nodes.get(value) if isinstance(value, str) else None
-        return bool(target and (not definition.get('target_node_types') or target.get('node_type') in definition['target_node_types']))
-    return False
+    if _record_scope(record) != scope:
+        return False
+    if scope == "world":
+        return True
+    return record.get("holder_id") == holder_id
 
 
-def relation_target(record, nodes=None, definitions=None):
-    nodes, definitions = nodes or {}, definitions or {}
-    value = record.get('value')
-    property_id = record.get('property_id')
-    definition = definitions.get(property_id, {}) if isinstance(property_id, str) else {}
-    if definition.get('cardinality', 'one') != 'one' or not isinstance(definition.get('value_type'), str) or definition['value_type'] not in {'node', 'either'}:
-        return None
-    if isinstance(value, str) and nodes.get(record.get('node_id') if isinstance(record.get('node_id'), str) else None, {}).get('node_type') == 'person' and nodes.get(value, {}).get('node_type') == 'person':
-        return value
-    return None
+def _issue(code: str, message: str, object_id: str | None = None, severity: str = "error") -> dict:
+    return {"severity": severity, "code": code, "message": message, "object_id": object_id}
 
 
-def change_group(row):
-    return (row.get('node_id'), row.get('property_id'), row.get('context_id', 'canon'), row.get('scope', 'world'), row.get('holder_id'))
+def _all_objects(snapshot: dict) -> dict[str, dict]:
+    result: dict[str, dict] = {}
+    for key in ("objects", "nodes", "predicates", "contexts", "timelines"):
+        for item in snapshot.get(key, []) or []:
+            if isinstance(item, dict) and isinstance(item.get("id"), str):
+                result[item["id"]] = item
+    return result
 
 
-def _rank(value):
-    return value if isinstance(value, tuple) else tuple(value) if isinstance(value, list) else (value,)
+def _active(records: list[dict]) -> tuple[list[dict], set[str]]:
+    ended = {row["id"] for row in records if isinstance(row.get("id"), str)
+             and row.get("kind") == "property_value" and row.get("valid_to")}
+    return [row for row in records if row.get("id") not in ended], ended
 
 
-def change_key(row, event_order):
-    rank = event_order.get(row.get('event_id'))
-    return None if rank is None else (_rank(rank), row.get('sequence', -1))
-
-
-def reduce_changes(changes, definition, nodes, *, event_order, cut=None):
-    """Fold one scoped property group; caller supplies its authoritative event axis."""
-    rows = [r for r in changes if r.get('kind') == 'property_change']
-    diagnostics = []
-    groups = {change_group(r) for r in rows}
-    if len(groups) > 1:
-        diagnostics.append(_issue('STATE_GROUP', '状态推导只能处理一个主体、属性、语境及立场分组'))
-    selected = []
-    limit = None
-    if cut is not None:
-        event = cut.get('event_id') if isinstance(cut, dict) else cut
-        rank = event_order.get(event)
-        if rank is None:
-            raise ValueError('状态切点事件不存在或没有正式顺序')
-        sequence = cut.get('sequence', math.inf) if isinstance(cut, dict) else math.inf
-        if sequence != math.inf and (type(sequence) is not int or sequence < 0):
-            raise ValueError('切点sequence必须为非负整数')
-        limit = (_rank(rank), sequence)
-    for row in rows:
-        key = change_key(row, event_order)
-        if key is None:
-            diagnostics.append(_issue('EVENT_ORDER', '属性变更事件缺少正式顺序', row.get('id')))
-        elif type(row.get('sequence')) is not int or row['sequence'] < 0:
-            diagnostics.append(_issue('SEQUENCE', 'sequence必须为非负整数', row.get('id')))
-        elif limit is None or key <= limit:
-            selected.append(row)
-    selected.sort(key=lambda r: change_key(r, event_order) or ((-1,), -1))
-    relation = definition.get('cardinality', 'one') == 'one' and any(relation_target(r, nodes, {r.get('property_id'): definition}) is not None for r in rows)
-    many = definition.get('cardinality') == 'many'
-    state = {'kind': 'unrecorded'}
-    active = []
-    partners = {}
-    known_members = {}
-    baseline = False
-    batches = defaultdict(list)
-    for row in selected:
-        batches[change_key(row, event_order)].append(row)
-    for batch in batches.values():
-        signatures = {(r.get('op'), _freeze(r.get('value'))) for r in batch}
-        relation_commutes = False
-        if relation and all(r.get('op') in {'set', 'add', 'remove'} and relation_target(r, nodes, {r.get('property_id'): definition}) is not None for r in batch):
-            directions = defaultdict(set)
-            for r in batch:
-                directions[r['value']].add('remove' if r['op'] == 'remove' else 'establish')
-            relation_commutes = all(len(ops) == 1 for ops in directions.values())
-        collection_commutes = False
-        if many and all(r.get('op') in {'add', 'remove'} and isinstance(r.get('value'), list) for r in batch):
-            additions = {_freeze(v) for r in batch if r['op'] == 'add' for v in r['value']}
-            removals = {_freeze(v) for r in batch if r['op'] == 'remove' for v in r['value']}
-            collection_commutes = not additions.intersection(removals)
-        if len(signatures) > 1 and not relation_commutes and not collection_commutes:
-            diagnostics.append(_issue('STATE_CONFLICT', '同一事件同sequence存在不相容变更，不能按ID或提交顺序猜测', batch[0].get('id')))
-            state, active, partners, baseline = {'kind': 'conflict'}, [r['id'] for r in batch], {}, False
-            continue
-        for row in batch:
-            op, value, identifier = row.get('op'), row.get('value'), row.get('id')
-            if op in {'clear', 'unknown'}:
-                state = {'kind': 'absent' if op == 'clear' else 'unknown'}
-                active, partners, known_members, baseline = [identifier], {}, {}, False
-            elif relation:
-                if relation_target(row, nodes, {row.get('property_id'): definition}) is None:
-                    diagnostics.append(_issue('VALUE', '人物关系须引用单一有效对方', identifier))
-                    continue
-                if op in {'set', 'add'}:
-                    partners[value] = identifier
-                elif op == 'remove':
-                    partners.pop(value, None)
-                state = {'kind': 'known', 'value': list(partners)} if partners else {'kind': 'absent'}
-                active = list(partners.values()) or [identifier]
-            elif many:
-                values = value if isinstance(value, list) else []
-                if op == 'set':
-                    known_members = {_freeze(v): v for v in values}
-                    baseline = True
-                    active = [identifier]
-                elif op == 'add':
-                    known_members.update({_freeze(v): v for v in values})
-                    active.append(identifier)
-                elif op == 'remove':
-                    for v in values:
-                        known_members.pop(_freeze(v), None)
-                    active.append(identifier)
-                state = {'kind': 'known', 'value': list(known_members.values())} if baseline else {'kind': 'unknown'}
-            elif op == 'set':
-                state, active = {'kind': 'known', 'value': value}, [identifier]
-            else:
-                diagnostics.append(_issue('OP', '单值非人物关系只允许set、clear或unknown', identifier))
-    if diagnostics and any(d['code'] in {'STATE_GROUP', 'EVENT_ORDER', 'SEQUENCE'} for d in diagnostics):
-        state = {'kind': 'conflict'}
-    return {'state': state, 'active_change_ids': list(dict.fromkeys(active)), 'record_ids': list(dict.fromkeys(active)),
-            'history_changes': selected, 'diagnostics': diagnostics}
-
-
-def definition_reference_issues(records, nodes):
-    definitions = canonical_definitions(records)
-    return [_issue('PROPERTY', '属性定义不存在', r.get('id')) for r in records
-            if r.get('kind') == 'property_change' and r.get('property_id') not in definitions]
-
-
-def _evidence_error(record, sources, lookups=None):
-    evidence = record.get('evidence')
-    if evidence is None:
-        return None
-    if not isinstance(evidence, dict) or set(evidence) != {'source_id', 'quote'}:
-        return 'evidence必须包含source_id和逐字quote'
-    source = sources.get(evidence.get('source_id')) if isinstance(evidence.get('source_id'), str) else None
-    quote = evidence.get('quote')
-    if source is None or not isinstance(quote, str) or not quote:
-        return '证据来源或引文无效'
-    if lookups is None:
-        lookup = ExactQuoteLookup(source['text'])
-    else:
-        if evidence['source_id'] not in lookups:
-            lookups[evidence['source_id']] = ExactQuoteLookup(source['text'])
-        lookup = lookups[evidence['source_id']]
-    if len(lookup.positions(quote, 2)) != 1:
-        return '证据引文必须逐字唯一匹配原文'
-    return None
-
-
-def validate_records(records, snapshot, existing_records=None, *, sources=None):
+def definition_reference_issues(records: list[dict], nodes: list[dict]) -> list[dict]:
+    """A prospective current value cannot outlive its aspect definition."""
+    active, _ = _active(records)
+    definitions = canonical_definitions(active)
+    retired = {node["id"] for node in nodes if node.get("retracted")}
     issues = []
-    nodes = {n['id']: n for n in snapshot.get('nodes', [])}
-    if not nodes:
-        nodes = {n['id']: n for n in snapshot.get('objects', []) if n.get('kind') == 'node'}
-    all_records = list(existing_records or []) + list(records)
-    definitions = canonical_definitions(all_records)
-    sources = sources if sources is not None else {s['id']: s for s in snapshot.get('sources', [])}
-    ids = {r['id'] for r in existing_records or []}
-    contexts = {c['id'] for c in snapshot.get('contexts', [])} or {'canon'}
-    lookups = {}
-    for row in records:
-        if not isinstance(row, dict):
-            issues.append(_issue('FORMAT', '属性记录必须为对象'))
+    for row in active:
+        if row.get("kind") != "property_value":
             continue
-        rid, kind = row.get('id'), row.get('kind')
-        if not isinstance(kind, str) or kind not in KINDS:
-            issues.append(_issue('KIND', '只支持property_definition与property_change', rid))
+        node_id = row.get("node_id")
+        if isinstance(node_id, str) and node_id in retired:
             continue
-        if not isinstance(rid, str) or not rid or rid in ids:
-            issues.append(_issue('ID', '属性记录ID必须非空且唯一', rid))
-        if isinstance(rid, str):
-            ids.add(rid)
-        allowed = DEFINITION_FIELDS if kind == 'property_definition' else CHANGE_FIELDS
-        if set(row) - allowed:
-            issues.append(_issue('FORMAT', '属性记录含不允许字段：'+','.join(sorted(set(row)-allowed)), rid))
-        error = _evidence_error(row, sources, lookups)
-        if error:
-            issues.append(_issue('EVIDENCE', error, rid))
-        if kind == 'property_definition':
-            if not isinstance(row.get('value_type'), str) or row['value_type'] not in VALUE_TYPES or not isinstance(row.get('cardinality'), str) or row['cardinality'] not in {'one', 'many'}:
-                issues.append(_issue('DEFINITION', '定义须明确value_type与cardinality(one/many)', rid))
-            if 'symmetric' in row and type(row['symmetric']) is not bool:
-                issues.append(_issue('DEFINITION', 'symmetric必须为布尔值', rid))
-            if row.get('target_node_types') and (not isinstance(row['target_node_types'], list) or row.get('value_type') != 'node'):
-                issues.append(_issue('DEFINITION', 'target_node_types只适用于node定义', rid))
-            continue
-        definition = definitions.get(row.get('property_id')) if isinstance(row.get('property_id'), str) else None
-        if not isinstance(row.get('node_id'), str) or row['node_id'] not in nodes or definition is None:
-            issues.append(_issue('TARGET', '属性主体或定义不存在', rid))
-        event = nodes.get(row.get('event_id')) if isinstance(row.get('event_id'), str) else None
-        if not event or event.get('node_type') not in {'event', 'action'}:
-            issues.append(_issue('EVENT_REF', '变更必须锚定有效事件或动作', rid))
-        if type(row.get('sequence')) is not int or row['sequence'] < 0:
-            issues.append(_issue('SEQUENCE', 'sequence须为非负整数', rid))
-        if not isinstance(row.get('context_id', 'canon'), str) or row.get('context_id', 'canon') not in contexts:
-            issues.append(_issue('CONTEXT', '语境不存在', rid))
-        scope, holder = row.get('scope', 'world'), row.get('holder_id')
-        if not isinstance(scope, str) or scope not in {'world', 'claim', 'cognition'} or scope == 'world' and holder is not None or scope != 'world' and (not isinstance(holder, str) or nodes.get(holder, {}).get('node_type') != 'person'):
-            issues.append(_issue('SCOPE', 'world不带holder，claim/cognition须指定人物holder', rid))
-        disclosure = row.get('disclosure')
-        if disclosure is not None:
-            source = sources.get(disclosure.get('source_id')) if isinstance(disclosure, dict) and isinstance(disclosure.get('source_id'), str) else None
-            if not source or type(disclosure.get('start')) is not int or not 0 <= disclosure['start'] <= len(source['text']):
-                issues.append(_issue('DISCLOSURE', '披露位置须为合法原文Unicode坐标', rid))
-            elif row.get('evidence') and (row['evidence']['source_id'] != disclosure['source_id'] or source['text'].find(row['evidence']['quote']) != disclosure['start']):
-                issues.append(_issue('DISCLOSURE', '披露位置须匹配逐字证据起点', rid))
-        spans = row.get('evidence_spans', [])
-        if not isinstance(spans, list):
-            issues.append(_issue('EVIDENCE', 'evidence_spans必须为数组', rid))
-        else:
-            for span in spans:
-                source = sources.get(span.get('source_id')) if isinstance(span, dict) and isinstance(span.get('source_id'), str) else None
-                if not source or type(span.get('start')) is not int or type(span.get('end')) is not int or not 0 <= span['start'] < span['end'] <= len(source['text']) or source['text'][span['start']:span['end']] != span.get('quote'):
-                    issues.append(_issue('EVIDENCE', '证据范围须逐字对应合法原文Unicode位置', rid))
-        if row.get('related_nodes') is not None and (not isinstance(row['related_nodes'], list) or any(not isinstance(v, str) or v not in nodes for v in row['related_nodes'])):
-            issues.append(_issue('NODE_REF', 'related_nodes须引用有效节点', rid))
-        op = row.get('op')
-        if not isinstance(op, str) or op not in OPS:
-            issues.append(_issue('OP', '无效属性变更操作', rid))
-        elif op in {'clear', 'unknown'}:
-            if 'value' in row:
-                issues.append(_issue('VALUE', 'clear和unknown不得携带value', rid))
-        elif definition is not None:
-            value = row.get('value')
-            many = definition.get('cardinality') == 'many'
-            values = value if many and isinstance(value, list) else [value]
-            if many and not isinstance(value, list) or not all(_valid_value(v, definition, nodes) for v in values) or len({_freeze(v) for v in values}) != len(values):
-                issues.append(_issue('VALUE', '值类型、集合唯一性或节点引用无效', rid))
-            if op in {'add', 'remove'} and not many and relation_target(row, nodes, definitions) is None:
-                issues.append(_issue('OP', '单值add/remove仅适用于明确人物对方关系', rid))
+        name = row.get("property_id")
+        if not isinstance(name, str) or name not in definitions:
+            issues.append(_issue("PROPERTY_REF", "当前属性值引用的属性定义不存在", row.get("id")))
     return issues
 
 
-def history(accepted_records, node_id, property_id, scope='world', holder_id=None):
-    return [r for r in accepted_records if r.get('kind') == 'property_definition' and r.get('id') == property_id
-            or r.get('kind') == 'property_change' and r.get('node_id') == node_id and r.get('property_id') == property_id
-            and r.get('scope', 'world') == scope and r.get('holder_id') == holder_id]
+def canonical_definitions(records: list[dict]) -> dict[str, dict]:
+    return {row["id"]: row for row in records if row.get("kind") == "property_definition"}
+
+
+def _definition_map(records: list[dict]) -> dict[str, dict]:
+    return canonical_definitions(records)
+
+
+def _valid_value(value: Any, definition: dict, graph_nodes: dict[str, dict]) -> bool:
+    value_type = definition.get("value_type")
+    if value_type == "any":
+        return True
+    if value_type == "string":
+        return isinstance(value, str)
+    if value_type == "number":
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and value == value
+            and abs(value) != float("inf")
+        )
+    if value_type == "boolean":
+        return isinstance(value, bool)
+    if value_type == "either":
+        # 节点名或普通字符串都行：持有者写「无」「未知」时不是节点。
+        return isinstance(value, str)
+    if value_type == "node":
+        target = graph_nodes.get(value) if isinstance(value, str) else None
+        if not target or target.get("kind") not in {None, "node"}:
+            return False
+        allowed = definition.get("target_node_types")
+        return not allowed or target.get("node_type") in allowed
+    return False
+
+
+def _validate_cell(cell: Any, definition: dict, nodes: dict[str, dict]) -> str | None:
+    if not isinstance(cell, dict) or cell.get("kind") not in _CELL_KINDS:
+        return "state must be a known, unknown, or absent cell"
+    if cell.get("kind") != "known":
+        if set(cell) != {"kind"}:
+            return "unknown and absent cells cannot contain a value"
+        return None
+    if set(cell) != {"kind", "value"}:
+        return "known cell must contain exactly kind and value"
+    value = cell["value"]
+    if definition.get("cardinality") == "many":
+        if not isinstance(value, list):
+            return "many-valued properties require a list"
+        if len(value) != len(set(_freeze(v) for v in value)):
+            return "many-valued property values must be unique"
+        if not all(_valid_value(item, definition, nodes) for item in value):
+            return "known cell contains a value of the wrong type or an invalid node reference"
+    elif not _valid_value(value, definition, nodes):
+        return "known cell contains a value of the wrong type or an invalid node reference"
+    return None
+
+
+def _freeze(value: Any) -> Any:
+    if isinstance(value, dict):
+        return tuple(sorted((k, _freeze(v)) for k, v in value.items()))
+    if isinstance(value, list):
+        return tuple(_freeze(v) for v in value)
+    return value
+
+
+def _valid_ref(ref: Any, nodes: dict[str, dict]) -> bool:
+    if not isinstance(ref, dict) or not isinstance(ref.get("timeline_id", "story"), str):
+        return False
+    form = ref.get("form")
+    if form == "number":
+        v = ref.get("number")
+        return (
+            isinstance(v, (int, float))
+            and not isinstance(v, bool)
+            and v == v
+            and abs(v) != float("inf")
+        )
+    if form == "datetime":
+        raw = ref.get("datetime")
+        if not isinstance(raw, str):
+            return False
+        try:
+            datetime.fromisoformat(raw)
+        except ValueError:
+            return False
+        return True
+    if form == "event_boundary":
+        event_id = ref.get("event_id")
+        event = nodes.get(event_id) if isinstance(event_id, str) else None
+        return bool(
+            event and event.get("node_type") in {"event", "action"} and ref.get("boundary") in {"start", "end"}
+        )
+    return False
+
+
+def _evidence_error(record: dict, sources: dict[str, dict]) -> str | None:
+    evidence = record.get("evidence")
+    if evidence is None:
+        return None
+    if not isinstance(evidence, dict) or set(evidence) != {"source_id", "quote"}:
+        return "evidence must contain source_id and exact quote"
+    if not isinstance(evidence.get("source_id"), str) or not evidence["source_id"]:
+        return "evidence source_id must be a non-empty string"
+    if not isinstance(evidence.get("quote"), str) or not evidence["quote"]:
+        return "evidence quote must be a non-empty exact string"
+    source = sources.get(evidence["source_id"])
+    if source is None:
+        return "evidence source_id does not exist in the graph snapshot"
+    text = source.get("text")
+    if not isinstance(text, str):
+        return "evidence source text is unavailable"
+    quote = evidence["quote"]
+    first = text.find(quote)
+    if first < 0 or text.find(quote, first + 1) >= 0:
+        return "evidence quote must match exactly one source location"
+    return None
+
+
+def validate_records(
+    records: list[dict], graph_snapshot: dict, accepted_records: list[dict]
+) -> list[dict]:
+    """Validate candidate property records without mutating either input."""
+    issues: list[dict] = []
+    if not isinstance(records, list) or not isinstance(accepted_records, list):
+        return [_issue("FORMAT", "records and accepted_records must be lists")]
+    nodes = _all_objects(graph_snapshot if isinstance(graph_snapshot, dict) else {})
+    sources = {
+        s["id"]: s
+        for s in (graph_snapshot.get("sources", []) if isinstance(graph_snapshot, dict) else [])
+        if isinstance(s, dict) and isinstance(s.get("id"), str)
+    }
+    combined = [r for r in accepted_records if isinstance(r, dict)] + [
+        r for r in records if isinstance(r, dict)
+    ]
+    active, _ = _active(combined)
+    defs = _definition_map(active)
+    existing_ids = {r.get("id") for r in accepted_records if isinstance(r, dict)}
+    seen: set[str] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            issues.append(_issue("FORMAT", "each property record must be an object"))
+            continue
+        rid = record.get("id") if isinstance(record.get("id"), str) else None
+        kind = record.get("kind")
+        if kind not in _KINDS:
+            issues.append(_issue("KIND", "unknown property record kind", rid))
+            continue
+        if not rid:
+            issues.append(_issue("ID", "property record requires a stable non-empty id", rid))
+        elif rid in seen or rid in existing_ids:
+            issues.append(_issue("DUPLICATE_ID", "property record id must be new and unique", rid))
+        elif len(rid) > 200:
+            issues.append(_issue("ID", "property record id is too long", rid))
+        if rid:
+            seen.add(rid)
+        extra = set(record) - _FIELDS[kind]
+        missing = {
+            "property_definition": {"value_type", "cardinality"},
+            "property_value": {"node_id", "property_id", "value", "event_id"},
+        }[kind] - set(record)
+        if extra:
+            issues.append(_issue("FORMAT", f"unexpected fields: {', '.join(sorted(extra))}", rid))
+        if missing:
+            issues.append(_issue("FORMAT", f"missing fields: {', '.join(sorted(missing))}", rid))
+        ev_error = _evidence_error(record, sources)
+        if ev_error:
+            issues.append(_issue("EVIDENCE", ev_error, rid))
+        if kind == "property_value":
+            scope = (record.get("scope") or "world")
+            holder_id = record.get("holder_id")
+            if scope not in _SCOPES:
+                issues.append(_issue("SCOPE", "scope must be world, belief, claim, or knowledge", rid))
+            elif scope == "world":
+                if holder_id is not None:
+                    issues.append(_issue("SCOPE", "world records must not have holder_id", rid))
+            else:
+                holder = nodes.get(holder_id) if isinstance(holder_id, str) else None
+                if holder is None or holder.get("node_type") != "person":
+                    issues.append(
+                        _issue("HOLDER", "belief/claim/knowledge records require a person holder", rid)
+                    )
+            disclosure = record.get("disclosure")
+            if disclosure is not None:
+                if not isinstance(disclosure, dict) or set(disclosure) != {"source_id", "start"}:
+                    issues.append(
+                        _issue("DISCLOSURE", "disclosure must contain source_id and start", rid)
+                    )
+                else:
+                    source_id = disclosure.get("source_id")
+                    start = disclosure.get("start")
+                    source = sources.get(source_id) if isinstance(source_id, str) else None
+                    if source is None:
+                        issues.append(
+                            _issue("DISCLOSURE", "disclosure source_id must be an accepted source", rid)
+                        )
+                    elif (
+                        not isinstance(start, int)
+                        or isinstance(start, bool)
+                        or start < 0
+                        or (isinstance(source.get("text"), str) and start > len(source["text"]))
+                    ):
+                        issues.append(
+                            _issue("DISCLOSURE", "disclosure start must be a valid source offset", rid)
+                        )
+        if kind == "property_definition":
+            if "symmetric" in record and type(record["symmetric"]) is not bool:
+                issues.append(_issue("DEFINITION", "symmetric must be a boolean", rid))
+            if record.get("semantic") not in {None, "item_holder"}:
+                issues.append(_issue("DEFINITION", "unknown property semantic", rid))
+            if record.get("value_type") not in _VALUE_TYPES:
+                issues.append(_issue("DEFINITION", "invalid property value_type", rid))
+            if record.get("cardinality") not in _CARDINALITIES:
+                issues.append(_issue("DEFINITION", "invalid property cardinality", rid))
+            for field in ("target_node_types",):
+                values = record.get(field, [])
+                if not isinstance(values, list) or any(
+                    not isinstance(v, str) or not v for v in values
+                ):
+                    issues.append(
+                        _issue("DEFINITION", f"{field} must be a list of node types", rid)
+                    )
+            if record.get("value_type") != "node" and record.get("target_node_types"):
+                issues.append(
+                    _issue("DEFINITION", "target_node_types only applies to node properties", rid)
+                )
+            continue
+
+        node_id = (
+            record.get("node_id") if kind in {"property_initial", "property_observation"} else None
+        )
+        property_id = (
+            record.get("property_id")
+            if kind in {"property_initial", "property_observation"}
+            else None
+        )
+        if kind == "property_value":
+            node_id = record.get("node_id")
+            property_id = record.get("property_id")
+            _validate_target(node_id, property_id, rid, nodes, defs, issues)
+            definition = defs.get(property_id) if isinstance(property_id, str) else None
+            if definition is not None:
+                # Only a node reference is checked: it must point at something that
+                # exists. Scalar shape is not policed — 180 and "变高了" are both
+                # legitimate values of the same property.
+                if definition.get("value_type") == "node" and not _valid_value(
+                    record.get("value"), definition, nodes
+                ):
+                    issues.append(
+                        _issue("VALUE", "node value must reference an existing node", rid)
+                    )
+                if definition.get("cardinality") == "many" and not isinstance(record.get("value"), list):
+                    issues.append(_issue("VALUE", "many-valued properties require a list", rid))
+            event_id = record.get("event_id")
+            if (
+                not isinstance(event_id, str)
+                or not nodes.get(event_id)
+                or nodes[event_id].get("node_type") not in {"event", "action"}
+            ):
+                issues.append(_issue("EVENT_REF", "property_value must reference an event node", rid))
+            # How the information was expressed (narration, speech, thought,
+            # document...). Free text: the ways a story conveys something do not
+            # fit a closed list.
+            source = record.get("source")
+            if source is not None and not isinstance(source, str):
+                issues.append(_issue("SOURCE", "source must be a string", rid))
+            # A display grouping chosen at extraction time. It never has to be
+            # right: an unusable one is audited, not rejected, because the value
+            # itself is still correct.
+            category = record.get("category")
+            if category is not None and (
+                not isinstance(category, str) or not category.strip() or len(category) > 20
+            ):
+                issues.append(_issue("CATEGORY", "category must be a short non-empty string", rid))
+            # Who else the sentence explicitly involves: observer, speaker,
+            # blamed party, carrier document. Not the holder — that is scope.
+            related = record.get("related_nodes")
+            if related is not None:
+                if not isinstance(related, list) or any(
+                    not isinstance(item, str) for item in related
+                ):
+                    issues.append(_issue("RELATED", "related_nodes must be a list of node ids", rid))
+                else:
+                    for target in related:
+                        if not nodes.get(target):
+                            issues.append(
+                                _issue("RELATED", "related_nodes references a missing node", rid)
+                            )
+            # The logical applicability is a separate link and may be absent: a
+            # disclosure anchor does not say the value holds at that story event.
+            applies_to = record.get("applies_to")
+            if applies_to is not None and (
+                not isinstance(applies_to, str)
+                or not nodes.get(applies_to)
+                or nodes[applies_to].get("node_type") not in {"event", "action"}
+            ):
+                issues.append(_issue("EVENT_REF", "applies_to must reference an event node", rid))
+        if kind == "event_change":
+            event_id = record.get("event_id")
+            if (
+                not isinstance(event_id, str)
+                or not nodes.get(event_id)
+                or nodes[event_id].get("node_type") not in {"event", "action"}
+            ):
+                issues.append(_issue("EVENT_REF", "event_change must reference an event node", rid))
+            if record.get("boundary") not in {"start", "end"}:
+                issues.append(_issue("BOUNDARY", "event_change boundary must be start or end", rid))
+            effects = record.get("effects")
+            if not isinstance(effects, list) or not effects:
+                issues.append(
+                    _issue("EFFECTS", "event_change requires a non-empty effects list", rid)
+                )
+                continue
+            pairs: set[tuple] = set()
+            for effect in effects:
+                if not isinstance(effect, dict):
+                    issues.append(_issue("EFFECT", "each effect must be an object", rid))
+                    continue
+                allowed = {"node_id", "property_id", "op", "value", "expected"}
+                if set(effect) - allowed or not {"node_id", "property_id", "op"} <= set(effect):
+                    issues.append(_issue("EFFECT", "effect fields are invalid or incomplete", rid))
+                    continue
+                node_id, property_id = effect["node_id"], effect["property_id"]
+                pair = (node_id, property_id)
+                if pair in pairs:
+                    issues.append(
+                        _issue("EFFECT", "one event batch may affect a property only once", rid)
+                    )
+                pairs.add(pair)
+                _validate_target(node_id, property_id, rid, nodes, defs, issues)
+                definition = defs.get(property_id) if isinstance(property_id, str) else None
+                _validate_effect(effect, definition, nodes, rid, issues)
+            continue
+        if kind == "property_value":
+            continue
+    return issues
+
+
+def _validate_target(
+    node_id: Any,
+    property_id: Any,
+    rid: str | None,
+    nodes: dict[str, dict],
+    definitions: dict[str, dict],
+    issues: list[dict],
+) -> None:
+    node = nodes.get(node_id) if isinstance(node_id, str) else None
+    if not node or node.get("kind") not in {None, "node"}:
+        issues.append(_issue("NODE_REF", "property target must reference a graph node", rid))
+    definition = definitions.get(property_id) if isinstance(property_id, str) else None
+    if not definition:
+        issues.append(_issue("PROPERTY_REF", "property definition does not exist", rid))
+        return
+
+
+def _validate_effect(
+    effect: dict,
+    definition: dict | None,
+    nodes: dict[str, dict],
+    rid: str | None,
+    issues: list[dict],
+) -> None:
+    op = effect.get("op")
+    if op not in _EFFECT_OPS:
+        issues.append(_issue("EFFECT_OP", "invalid event effect operation", rid))
+        return
+    if definition is None:
+        return
+    if op in {"add", "remove"} and definition.get("cardinality") != "many":
+        issues.append(_issue("EFFECT_OP", "add/remove require a many-valued property", rid))
+    if op in {"set", "add", "remove"}:
+        if "value" not in effect:
+            issues.append(_issue("EFFECT_VALUE", "set/add/remove require value", rid))
+        else:
+            value = effect["value"]
+            if op == "set" and definition.get("cardinality") == "many":
+                err = _validate_cell({"kind": "known", "value": value}, definition, nodes)
+            elif not _valid_value(value, definition, nodes):
+                err = "effect value has the wrong type or invalid node reference"
+            else:
+                err = None
+            if err:
+                issues.append(_issue("EFFECT_VALUE", err, rid))
+    elif "value" in effect:
+        issues.append(_issue("EFFECT_VALUE", "unknown/absent effects cannot contain value", rid))
+    if "expected" in effect:
+        err = _validate_cell(effect["expected"], definition, nodes)
+        if err:
+            issues.append(_issue("EXPECTED", err, rid))
+
+
+def history(
+    accepted_records: list[dict],
+    node_id: str,
+    property_id: str,
+    scope: str = "world",
+    holder_id: str | None = None,
+) -> list[dict]:
+    """Return value intervals relevant to one node/property pair."""
+    records = [
+        r for r in accepted_records
+        if isinstance(r, dict) and _scope_matches(r, scope, holder_id)
+    ]
+    return [row for row in records if
+            row.get("kind") == "property_definition" and row.get("id") == property_id or
+            row.get("kind") == "property_value" and row.get("node_id") == node_id
+            and row.get("property_id") == property_id]

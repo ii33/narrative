@@ -3,17 +3,12 @@ import QtQuick.Controls
 import QtQuick.Layouts
 
 // 节点编辑器：改节点字段、补录/更正属性、把属性设为失效。
-// 通过Operations校验保存；录入错误直接更正，新状态在事件处追加变更，由程序重播。
+// 通过Operations校验保存；录入错误直接更正，新状态追加并结束旧值有效期。
 Dialog {
     id: editor
-    SubmissionState{id:contentSubmission;owner:editor;operation:editor.editRecordId?(host.adaptationMode?"set_adaptation_property":"correct_property"):editor.expireKey?(host.adaptationMode?"set_adaptation_property":"record_property_change"):host.adaptationMode?"edit_adaptation_node":"apply_changes";target:editor.editRecordId?({record_id:editor.editRecordId}):({node_id:editor.nodeId||null});onRestoreRequested:function(a){editor.restoreSubmission(a)}}
-
     objectName: "nodeEditor"
-    readonly property var io: host.io
     property var host            // BrowsePage：主题、刷新、类型表
     property string nodeId: ""
-    property bool creating: false
-    property var adaptationNodes: []
     property var node: ({})
     property var properties: []
     property var events: []
@@ -33,18 +28,13 @@ Dialog {
     property string editPendingKey: ""
     property string editPropertyId: ""
     property string editSourceId: ""
-    property string editOriginalEventId:""
     property string editValue: ""
-    property bool editJson: false
-    property int editOpIndex:0
-    property var expireChange:({})
     property int editEventIndex: 0
     property string editQuote: ""
     property var expireTargets: []
     property string expireKey: ""
     property string expireLabel: ""
     property string expireReason: ""
-    property int expireEventIndex: 0
     // 正在改名哪一行：一个方面可能有两个名字，改的是整行。
     property string renameKey: ""
     property var renameNames: []
@@ -61,20 +51,13 @@ Dialog {
     title: "节点编辑器 · " + (node.name || nodeId)
 
     function openFor(id) {
-        creating = false
         nodeId = id
         node = ({})
         properties = []
         events = []
         resetForms()
-        editor.io.loadNodeEditor(id)
+        bridge.loadNodeEditor(id)
         open()
-    }
-
-    function openNew() {
-        creating = true; nodeId = ""; node = ({}); properties = []; resetForms()
-        nameField.text = ""; aliasField.text = ""; noteField.text = ""; typeBox.currentIndex = 0
-        adaptationNodes = host.allAdaptationNodes.filter(function(n) { return !n.suppressed }); parentChoice.currentIndex = 0; holderChoice.currentIndex = 0; open()
     }
 
     function resetForms() {
@@ -85,7 +68,6 @@ Dialog {
         expireKey = ""
         expireLabel = ""
         expireReason = ""
-        expireEventIndex = Math.max(0,eventIndex(host.cutEventId)>=0?eventIndex(host.cutEventId):events.length-1)
         renameKey = ""
         renameNames = []
         renameName = ""
@@ -108,7 +90,6 @@ Dialog {
         expireKey = ""
         expireLabel = ""
         expireReason = ""
-        expireEventIndex = Math.max(0,eventIndex(host.cutEventId)>=0?eventIndex(host.cutEventId):events.length-1)
     }
 
     function startRename(item) {
@@ -126,7 +107,7 @@ Dialog {
             host.app.toast("请填写新的属性名", true)
             return
         }
-        editor.io.renameProperty(renameNames[0], name)
+        bridge.renameProperty(renameNames[0], name)
         renameKey = ""
     }
 
@@ -146,44 +127,25 @@ Dialog {
     }
 
     function reload() {
-        if (nodeId.length > 0) editor.io.loadNodeEditor(nodeId)
+        if (nodeId.length > 0) bridge.loadNodeEditor(nodeId)
     }
 
     function eventIndex(eventId) {
         for (var i = 0; i < events.length; ++i)
             if (events[i].id === eventId) return i
-        return -1
-    }
-
-    function restoreSubmission(a) {
-        if(a.record_id){
-            var item=properties.find(function(p){return (p.records||[]).some(function(r){return r.id===a.record_id})});
-            if(item){var record=(item.records||[]).find(function(r){return r.id===a.record_id});startEdit(item,record)}
-            editRecordId=a.record_id;editPendingId="";var c=a.changes||a;editValue=c.value===undefined?"":typeof c.value==="string"?c.value:JSON.stringify(c.value);editJson=typeof c.value!=="string";editOpIndex=Math.max(0,host.changeOps.findIndex(function(x){return x.key===c.op}));editOriginalEventId=c.event_id;editEventIndex=eventIndex(c.event_id);editQuote=c.quote||"";return
-        }
-        if(a.property_id){
-            var row=properties.find(function(p){return p.property_id===a.property_id});if(row)startExpire(row);
-            expireChange=Object.assign({},a);expireEventIndex=Math.max(0,eventIndex(a.event_id));expireReason=a.reason||"";return
-        }
-        var value=a.changes||(a.graph_objects||[])[0]||{};
-        nameField.text=value.name||"";typeBox.currentIndex=Math.max(0,typeKeys.indexOf(value.node_type));aliasField.text=(value.aliases||[]).join("、");noteField.text=value.identity_note||""
+        return 0
     }
 
     function startEdit(item, record) {
-        if(!contentSubmission.restoring)contentSubmission.begin()
         editRecordId = record.id
-        editOriginalEventId=record.event_id
         editKey = rowKey(item)
         editPropertyId = item.property_id
         editSourceId = record.disclosure ? (record.disclosure.source_id || "") : ""
         editValue = String(record.value === null || record.value === undefined ? "" : record.value)
-        editJson = record.value!==undefined && typeof record.value !== "string"
-        editOpIndex=Math.max(0,host.changeOps.findIndex(function(op){return op.key===record.op}))
-        if (editJson) editValue = JSON.stringify(record.value)
         // 停在某个阅读位置时，改的就是「此刻」：默认披露在这个事件；
         // 没有切点时沿用原记录的事件，改的是它自己那一处说法。
         var here = atCut ? eventIndex(cutEventId) : -1
-        editEventIndex = eventIndex(record.event_id)
+        editEventIndex = here >= 0 ? here : eventIndex(record.event_id)
         editQuote = record.evidence ? record.evidence.quote : ""
         expireTargets = []
         expireKey = ""
@@ -193,32 +155,27 @@ Dialog {
     // 但表单是异步重载的，旧数据还在屏幕上时不能让人点进一个空表单。
     function hasValid(item) {
         for (var i = 0; i < (item.records || []).length; ++i)
-            if (item.records[i].is_current) return true
+            if (item.records[i].valid) return true
         return false
     }
 
     function submitEdit() {
         if (editRecordId.length === 0) return
-        var inputValue = editValue
-        if (editJson && ["set","add","remove"].indexOf(host.changeOps[editOpIndex].key)>=0) {
-            try { inputValue = JSON.parse(editValue) }
-            catch (error) { host.app.toast("JSON 格式错误：" + error.message, true); return }
-        }
         var event = events[editEventIndex] || ({})
         editPendingId = editRecordId
         editPendingKey = editKey
-        var payload={
-            op:host.changeOps[editOpIndex].key,expected_revision:host.revision,
+        bridge.correctPropertyRecord(editRecordId, {
             node_id: nodeId,
             property_id: editPropertyId,
-            value: inputValue,
-            event_id: event.id || editOriginalEventId,
+            value: editValue,
+            event_id: event.id || "",
             quote: editQuote,
             source_id: editSourceId
-        };
-        if(["clear","unknown"].indexOf(payload.op)>=0)delete payload.value;
-        editor.io.correctPropertyRecord(editRecordId,payload)
-        // 校验完成前保留表单；暂存反馈可直接修补同一条内容。
+        })
+        // 提交之后表单就收起：editRecordId 已经清空，留着表单的话再点一次
+        // 就是拿空 id 去更正，只会得到一句看不懂的预检错误。
+        editRecordId = ""
+        editKey = ""
     }
 
     // 预检没过：把表单和原来的记录放回去，值还在，改一处再交。
@@ -232,7 +189,7 @@ Dialog {
     function startExpire(item) {
         var ids = []
         for (var i = 0; i < (item.records || []).length; ++i)
-            if (item.records[i].is_current) ids.push(item.records[i].id)
+            if (item.records[i].valid) ids.push(item.records[i].id)
         if (ids.length === 0) {
             // 没有可失效的记录：不打开一个「0 条记录」的空表单。
             expireKey = ""
@@ -241,8 +198,6 @@ Dialog {
             return
         }
         expireTargets = ids
-        expireChange={node_id:nodeId,property_id:item.property_id,op:"clear",scope:item.scope||"world",holder_id:item.holder_id,context_id:item.context_id||"canon"}
-        expireEventIndex = Math.max(0,eventIndex(host.cutEventId)>=0?eventIndex(host.cutEventId):events.length-1)
         expireKey = rowKey(item)
         expireLabel = item.label || item.property_id
         expireReason = ""
@@ -250,13 +205,9 @@ Dialog {
         editKey = ""
     }
 
-    // 单项记录移除对应值；整行失效明确清除整组。
+    // 只结束这一条的有效期；整行操作会处理该行全部记录。
     function startExpireRecord(item, record) {
         expireTargets = [record.id]
-        var value=item.state?item.state.value:item.value;
-        var collection=value&&typeof value!=="string"&&value.length!==undefined;
-        expireChange={node_id:nodeId,property_id:item.property_id,op:collection?"remove":"clear",value:record.value,scope:item.scope||"world",holder_id:item.holder_id,context_id:item.context_id||"canon"};
-        expireEventIndex = Math.max(0,eventIndex(host.cutEventId)>=0?eventIndex(host.cutEventId):events.length-1)
         expireKey = rowKey(item)
         expireLabel = (item.label || item.property_id)
             + (record.event_name ? " · " + record.event_name : "")
@@ -268,13 +219,13 @@ Dialog {
     // 删除：这条从来不算。和「失效」不是一句话——失效锚在读者站的位置。
     function deleteRecords(ids) {
         if (!ids || ids.length === 0) return
-        editor.io.deletePropertyRecords(JSON.stringify(ids),host.revision)
+        bridge.deletePropertyRecords(JSON.stringify(ids))
     }
 
     function deleteRow(item) {
         var ids = []
         for (var i = 0; i < (item.records || []).length; ++i)
-            if (item.records[i].is_current) ids.push(item.records[i].id)
+            if (item.records[i].valid) ids.push(item.records[i].id)
         if (ids.length === 0) {
             host.app.toast("这条属性现在没有有效记录", true)
             return
@@ -284,26 +235,15 @@ Dialog {
 
     function submitExpire() {
         if (expireTargets.length === 0) return
-        var payload=Object.assign({},expireChange,{event_id:(events[expireEventIndex]||{}).id||"",reason:expireReason,expected_revision:host.revision});
-        if(["clear","unknown"].indexOf(payload.op)>=0)delete payload.value;
-        editor.io.addPropertyRecord(payload);
-
+        bridge.expirePropertyRecords(JSON.stringify(expireTargets), expireReason)
+        expireTargets = []
+        // 同上：收起表单，别让人对着「0 条记录」再点一次。
+        expireKey = ""
+        expireReason = ""
     }
 
     function submitNode() {
-        if (host.adaptationMode) {
-            var fields = {name: nameField.text, node_type: typeKeys[typeBox.currentIndex],
-                aliases: aliasField.text.split(/[、,，]/).filter(function(x) { return x.trim().length > 0 }), identity_note: noteField.text}
-            var args = {node_id: creating ? null : nodeId, changes: fields, expected_revision: host.revision}
-            if (creating) {
-                args.parent_id = parentChoice.model[parentChoice.currentIndex].id || null
-                fields.point_id = host.cutEventId || null
-                if (fields.node_type === "item") fields.initial_holder = holderChoice.model[holderChoice.currentIndex].id
-            }
-            bridge.changeAdaptation("edit", args)
-            return
-        }
-        editor.io.reviseNode(nodeId, {
+        bridge.reviseNode(nodeId, {
             name: nameField.text,
             node_type: typeKeys[typeBox.currentIndex],
             aliases: aliasField.text.split(/[、,，]/).map(function (part) {
@@ -316,11 +256,6 @@ Dialog {
     Connections {
         target: bridge
         function onResultReady(kind, payload) {
-            if (editor.host.adaptationMode) {
-                if (kind === "adaptation") { if (editor.creating) editor.close(); else if (editor.visible) editor.reload(); return }
-                if (kind.indexOf("adaptation_") !== 0) return
-                kind = kind.slice(11)
-            } else if (kind.indexOf("adaptation") === 0) return
             if (kind === "node_editor") {
                 editor.apply(payload)
             } else if (kind === "browse") {
@@ -339,13 +274,13 @@ Dialog {
                     editor.restoreEdit()
                     return
                 }
-                editPendingId = "";editRecordId="";editKey="";expireTargets=[];expireKey="";expireReason=""
+                editPendingId = ""
                 editor.host.notifyEdit(kind === "property_add" ? "补录已生效" : "更正已生效",
                                        payload)
                 editor.reload()
                 editor.host.load()
                 if (editor.nodeId === editor.host.selectedId)
-                    editor.io.loadNodeProperties(editor.nodeId)
+                    bridge.loadNodeProperties(editor.nodeId)
             } else if (kind === "property_delete") {
                 var removed = (payload.record_ids || []).length
                 editor.host.app.toast("已删除 " + removed + " 条记录（错误记录已移除）",
@@ -353,25 +288,23 @@ Dialog {
                 editor.reload()
                 editor.host.load()
                 if (editor.nodeId === editor.host.selectedId)
-                    editor.io.loadNodeProperties(editor.nodeId)
+                    bridge.loadNodeProperties(editor.nodeId)
             } else if (kind === "property_expire") {
                 editor.reload()
                 editor.host.load()
                 if (editor.nodeId === editor.host.selectedId)
-                    editor.io.loadNodeProperties(editor.nodeId)
+                    bridge.loadNodeProperties(editor.nodeId)
             } else if (kind === "property_rename") {
                 editor.host.app.toast("已改名为「" + (payload.to_id || "") + "」", false)
                 editor.reload()
                 editor.host.load()
                 if (editor.nodeId === editor.host.selectedId)
-                    editor.io.loadNodeProperties(editor.nodeId)
+                    bridge.loadNodeProperties(editor.nodeId)
             }
         }
     }
 
     contentItem: ColumnLayout {
-        SubmissionFeedback{state:contentSubmission}
-
         spacing: 8
 
         GridLayout {
@@ -413,15 +346,6 @@ Dialog {
         }
 
         RowLayout {
-            visible: editor.host.adaptationMode && editor.creating
-            Layout.fillWidth: true
-            Label { text: "归属"; color: t.muted }
-            ComboBox { id: parentChoice; objectName: "editorParent"; Layout.fillWidth: true; model: [{id:"",name:"无归属"}].concat(editor.adaptationNodes); textRole: "name" }
-            Label { text: "物品持有者"; color: t.muted }
-            ComboBox { id: holderChoice; Layout.fillWidth: true; model: [{id:"未知",name:"未知"},{id:"无",name:"无"}].concat(editor.adaptationNodes); textRole: "name" }
-        }
-
-        RowLayout {
             Layout.fillWidth: true
             Label {
                 Layout.fillWidth: true
@@ -432,21 +356,9 @@ Dialog {
             Button {
                 objectName: "editorExtractActions"
                 text: "动作提取"
-                visible: !editor.host.adaptationMode && editor.node.node_type === "event"
+                visible: editor.node.node_type === "event"
                 enabled: !editor.host.app.busy
-                onClicked: { editor.close(); editor.host.app.assistantOpen = true; editor.io.extractEventActions(editor.nodeId) }
-            }
-            Button {
-                objectName: "editorSuppressNode"
-                visible: editor.host.adaptationMode && !editor.creating
-                text: editor.node.suppressed ? "恢复节点及子树" : "屏蔽节点及子树"
-                onClicked: { bridge.changeAdaptation("suppress", {node_id: editor.nodeId, suppressed: !editor.node.suppressed, expected_revision: editor.host.revision}); editor.close() }
-            }
-            Button {
-                objectName: "editorCopyNode"
-                visible: editor.host.adaptationMode && !editor.creating
-                text: "复制节点及子树"
-                onClicked: bridge.changeAdaptation("copy", {node_id: editor.nodeId, expected_revision: editor.host.revision})
+                onClicked: { editor.close(); editor.host.app.assistantOpen = true; bridge.extractEventActions(editor.nodeId) }
             }
             Button {
                 objectName: "editorSubmitNode"
@@ -571,7 +483,7 @@ Dialog {
                                     var records = modelData.records || []
                                     var latest = null
                                     for (var i = records.length - 1; i >= 0; --i)
-                                        if (records[i].is_current) { latest = records[i]; break }
+                                        if (records[i].valid) { latest = records[i]; break }
                                     if (latest === null && records.length > 0) latest = records[records.length - 1]
                                     if (latest !== null) editor.startEdit(modelData, latest)
                                 }
@@ -614,7 +526,7 @@ Dialog {
                                 Label {
                                     Layout.fillWidth: true
                                     // 节点值型属性存的是编号，行上要看到名字。
-                                    text: (editor.host.changeOps.find(function(op){return op.key===modelData.op})||{label:""}).label+" · "+editor.host.valueText(modelData)
+                                    text: editor.host.valueText(modelData)
                                         + (modelData.event_name ? " · " + modelData.event_name : "")
                                     color: t.body
                                     font.pixelSize: 10
@@ -668,13 +580,10 @@ Dialog {
                             visible: editor.editKey.length > 0
                                 && editor.editKey === editor.rowKey(modelData)
 
-                            ComboBox{objectName:"editorEditOperation";Layout.fillWidth:true;model:editor.host.changeOps;textRole:"label";currentIndex:editor.editOpIndex;onActivated:editor.editOpIndex=currentIndex}
                             RowLayout {
                                 Layout.fillWidth: true
-                                visible:["set","add","remove"].indexOf(editor.host.changeOps[editor.editOpIndex].key)>=0
                                 spacing: 6
                                 Label { text: "新值"; color: t.muted; font.pixelSize: 10 }
-                                ComboBox { model: ["文本", "JSON"]; currentIndex: editor.editJson ? 1 : 0; onActivated: editor.editJson = currentIndex === 1 }
                                 TextField {
                                     objectName: "editorEditValue"
                                     Layout.fillWidth: true
@@ -689,7 +598,6 @@ Dialog {
                                 Label { text: "事件"; color: t.muted; font.pixelSize: 10 }
                                 ComboBox {
                                     objectName: "editorEditEvent"
-                                    displayText:editor.editEventIndex<0?"保留原前置事件锚点":currentText
                                     Layout.fillWidth: true
                                     model: editor.events.map(function (item) { return item.id + "  " + item.name })
                                     currentIndex: editor.editEventIndex
@@ -802,26 +710,20 @@ Dialog {
                             }
                         }
 
-                        // 失效是新事件变更，不修改任何旧变更。
+                        // 失效表单：设置有效期结束边界，原因必填。
                         ColumnLayout {
                             Layout.fillWidth: true
                             Layout.leftMargin: 18
                             spacing: 4
                             visible: editor.expireKey.length > 0
                                 && editor.expireKey === editor.rowKey(modelData)
-                            ComboBox {
-                                objectName: "editorExpireEvent"
-                                Layout.fillWidth: true
-                                model: editor.events.map(function(event) { return event.id + "  " + event.name })
-                                currentIndex: editor.expireEventIndex
-                                onActivated: editor.expireEventIndex = currentIndex
-                            }
 
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 6
                                 Label {
-                                    text: "在所选事件记录「"+editor.expireLabel+"」"+(editor.expireChange.op==="remove"?"移除所选值":"清除当前状态")
+                                    text: "把「" + editor.expireLabel + "」的 "
+                                        + editor.expireTargets.length + " 条记录设为失效"
                                     color: t.warn
                                     font.pixelSize: 10
                                 }

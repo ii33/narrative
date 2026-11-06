@@ -21,8 +21,6 @@ Item {
     ListModel { id: projectRows }
     // 没有「工程目录」这回事：列表就是打开过的那些工程包。
     property var recentItems: []
-    property bool copyingProject: false
-    property string copySource: ""
     // 新建工程放哪：由人选，默认家目录。
     property string newProjectParent: bridge.homeDirectory()
 
@@ -36,7 +34,6 @@ Item {
                 title: item.title || item.name,
                 revision: 0,
                 openable: item.exists === true,
-                copyable: item.copyable === true,
                 statusText: item.exists ? "工程文件" : "找不到了",
                 external: true
             })
@@ -116,13 +113,7 @@ Item {
     Connections {
         target: bridge
         function onResultReady(kind, payload) {
-            if (kind === "project_copy_destination") {
-                copyDialog.selectedFile = payload.destination
-                copyDialog.open()
-            } else if (kind === "project_duplicated") {
-                copyingProject = false
-                app.toast("副本已创建，可从最近工程打开", false)
-            } else if (kind === "recent_projects") {
+            if (kind === "recent_projects") {
                 recentItems = payload.items || []
                 page.rebuildProjectRows()
                 if (kind === "projects_cleared") {
@@ -155,7 +146,6 @@ Item {
             }
         }
         function onErrorOccurred(kind, message) {
-            if (kind === "project_copy_destination" || kind === "project_duplicated") copyingProject = false;
         }
     }
 
@@ -258,7 +248,6 @@ Item {
                             required property string name
                             required property string title
                             required property int revision
-                            required property bool copyable
                             required property bool openable
                             required property string statusText
                             required property bool external
@@ -322,16 +311,6 @@ Item {
                                         anchors.fill: parent
                                         cursorShape: Qt.PointingHandCursor
                                         onClicked: page.askRemove(path, title || name)
-                                    }
-                                }
-                                Button {
-                                    objectName: "copyRecentProject"
-                                    text: "创建副本"
-                                    enabled: copyable && !app.busy && !page.copyingProject
-                                    onClicked: {
-                                        page.copySource = path
-                                        page.copyingProject = true
-                                        bridge.suggestProjectCopy(path)
                                     }
                                 }
                                 Button {
@@ -617,17 +596,6 @@ Item {
         fileMode: FileDialog.OpenFile
         nameFilters: ["叙事工程 (*.nproj)"]
         onAccepted: bridge.openProjectUrl(selectedFile.toString())
-    }
-
-    FileDialog {
-        id: copyDialog
-        objectName: "projectCopyPicker"
-        title: "创建工程副本"
-        fileMode: FileDialog.SaveFile
-        nameFilters: ["叙事工程 (*.nproj)"]
-        defaultSuffix: "nproj"
-        onAccepted: bridge.duplicateProject(page.copySource, selectedFile.toString())
-        onRejected: page.copyingProject = false
     }
 
     // 移除工程：默认只从列表拿掉；勾了才动磁盘，且删之前把路径写清楚。

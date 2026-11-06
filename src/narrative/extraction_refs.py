@@ -102,14 +102,21 @@ def bind(data: dict, snapshot: dict, records: list[dict]) -> dict:
         row['node'] = ref(row.get('node'), owner)
         value_type = row.get('value_type') or 'string'
         types[row['property']] = value_type
-        if value_type in {'node', 'either'} and 'value' in row:
-            value = row.get('value')
-            row['value'] = ([ref(item, owner, literal=value_type == 'either') for item in value]
-                            if isinstance(value, list) else ref(value, owner, literal=value_type == 'either'))
+        if value_type in {'node', 'either'}:
+            row['value'] = ref(row.get('value'), owner, literal=value_type == 'either')
         row['holder'] = ref(row.get('holder'), owner, allowed={'person'},
                             optional=(row.get('scope') or 'world') == 'world')
-        row['at_event'] = ref(row.get('at_event'), owner, allowed=MOMENT_TYPES)
+        row['at_event'] = ref(row.get('at_event'), owner, allowed=MOMENT_TYPES, optional=True)
         row['related_nodes'] = [ref(value, owner) for value in row.get('related_nodes', [])]
+    for row in result.get('expirations', []):
+        owner = row.get('record_id') or row.get('property') or '失效'
+        if not row.get('record_id'):
+            row['node'] = ref(row.get('node'), owner)
+            if types.get(row.get('property')) in {'node', 'either'}:
+                row['value'] = ref(row.get('value'), owner, literal=types[row['property']] == 'either')
+        row['at_event'] = ref(row.get('at_event'), owner, allowed=MOMENT_TYPES, optional=True)
+        if isinstance(row.get('valid_to'), dict) and row['valid_to'].get('event_id') is not None:
+            row['valid_to']['event_id'] = ref(row['valid_to']['event_id'], owner, allowed=MOMENT_TYPES)
     result['reference_types'] = {**{ref: row['type'] for ref, row in resolver.local.items()},
                                  **{ref: row['node_type'] for ref, row in resolver.current.items()}}
     result['property_reference_types'] = types

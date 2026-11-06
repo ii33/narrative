@@ -9,7 +9,7 @@ from agent_fixtures import project as project
 
 
 def values(ops):
-    return [row for row in ops.property_records() if row["kind"] == "property_change"]
+    return [row for row in ops.property_records() if row["kind"] == "property_value"]
 
 
 def submit_unchanged_input(ops, source_id, payload):
@@ -32,7 +32,7 @@ def test_identical_names_of_different_types_are_bound_to_the_exact_array_slot(pr
         {"type":"location","name":"渡口","quotes":[text]},
         {"type":"scene","name":"渡口等候","quotes":[text]},
         {"type":"event","name":"在渡口等候","scene":"@3","participants":["@1"],"quotes":[text]},
-    ],"properties":[{"node":"@1","op":"set","property":"位置","value":"@2","value_type":"node",
+    ],"properties":[{"node":"@1","property":"位置","value":"@2","value_type":"node",
                       "at_event":"@4","related_nodes":["@2"],"quotes":[text]}]}
     submit_unchanged_input(project,sid,payload)
     nodes=project.graph_snapshot()["nodes"]
@@ -56,8 +56,8 @@ def test_identical_event_names_at_different_occurrences_keep_exact_at_event_slot
         {"type":"event","name":"进门","scene":"@2","participants":["@1"],"quotes":[first]},
         {"type":"event","name":"进门","scene":"@2","participants":["@1"],"new_occurrence":True,"quotes":[second]},
     ],"properties":[
-        {"node":"@1","op":"set","property":"进门时段","value":"上午","at_event":"@3","quotes":[first]},
-        {"node":"@1","op":"set","property":"进门时段","value":"下午","at_event":"@4","quotes":[second]},
+        {"node":"@1","property":"进门时段","value":"上午","at_event":"@3","quotes":[first]},
+        {"node":"@1","property":"进门时段","value":"下午","at_event":"@4","quotes":[second]},
     ]}
     submit_unchanged_input(project,sid,payload)
     nodes=project.graph_snapshot()["nodes"]
@@ -93,9 +93,9 @@ def test_string_and_any_reference_looking_literals_and_original_payload_are_not_
         {"type":"scene","name":"字符说明","quotes":[text]},
         {"type":"event","name":"甲说明字符","scene":"@2","participants":["@1"],"quotes":[text]},
     ],"properties":[
-        {"node":"@1","op":"set","property":"字面文本","value":"@1","value_type":"string","at_event":"@3","quotes":[text]},
-        {"node":"@1","op":"set","property":"字面编号","value":"P1","value_type":"string","at_event":"@3","quotes":[text]},
-        {"node":"@1","op":"set","property":"原始结构","value":literal,"value_type":"any","at_event":"@3","quotes":[text]},
+        {"node":"@1","property":"字面文本","value":"@1","value_type":"string","at_event":"@3","quotes":[text]},
+        {"node":"@1","property":"字面编号","value":"P1","value_type":"string","at_event":"@3","quotes":[text]},
+        {"node":"@1","property":"原始结构","value":literal,"value_type":"any","at_event":"@3","quotes":[text]},
     ]}
     submit_unchanged_input(project,sid,payload)
     records={row["property_id"]:row for row in values(project)}
@@ -108,7 +108,7 @@ def test_string_and_any_reference_looking_literals_and_original_payload_are_not_
 def test_explicit_invalid_at_event_never_falls_back_to_the_quotation(project,invalid):
     sid,text,person,_event=seed(project)
     before=copy.deepcopy((project.graph_snapshot(),project.property_records()))
-    payload={"nodes":[],"properties":[{"node":person,"op":"set","property":"位置","value":"门口","at_event":invalid,"quotes":[text]}]}
+    payload={"nodes":[],"properties":[{"node":person,"property":"位置","value":"门口","at_event":invalid,"quotes":[text]}]}
     original=copy.deepcopy(payload)
     checked=project.preview_extraction(sid,payload)
     assert not checked["valid"], checked
@@ -121,7 +121,7 @@ def test_explicit_invalid_at_event_never_falls_back_to_the_quotation(project,inv
 def test_empty_nodes_can_add_existing_id_property_without_repeating_any_node(project):
     sid,text,person,event=seed(project)
     before=copy.deepcopy(project.graph_snapshot()["nodes"])
-    payload={"nodes":[],"properties":[{"node":person,"op":"set","property":"位置","value":"门口","at_event":event,"quotes":[text]}]}
+    payload={"nodes":[],"properties":[{"node":person,"property":"位置","value":"门口","at_event":event,"quotes":[text]}]}
     committed=submit_unchanged_input(project,sid,payload)
     assert "node_ids" not in committed
     assert project.graph_snapshot()["nodes"] == before
@@ -138,8 +138,8 @@ def test_repeated_same_identity_slots_deduplicate_to_one_formal_node(project):
         {"type":"scene","name":"门口等候","quotes":[text]},
         {"type":"event","name":"甲站在门口","scene":"@3","participants":["@1","@2"],"quotes":[text]},
     ],"properties":[
-        {"node":"@1","op":"set","property":"位置","value":"门口","at_event":"@4","quotes":[text]},
-        {"node":"@2","op":"set","property":"姿态","value":"站着","at_event":"@4","quotes":[text]},
+        {"node":"@1","property":"位置","value":"门口","at_event":"@4","quotes":[text]},
+        {"node":"@2","property":"姿态","value":"站着","at_event":"@4","quotes":[text]},
     ]}
     committed=submit_unchanged_input(project,sid,payload)
     persons=[row for row in project.graph_snapshot()["nodes"] if row["node_type"] == "person"]
@@ -157,22 +157,24 @@ def test_repeated_same_identity_slots_deduplicate_to_one_formal_node(project):
     assert {row["node_id"] for row in records} == {persons[0]["id"]}
 
 
-def test_clear_event_preserves_prior_literal_batch_reference_text(project):
-    first, second = '甲说@1', '随后停止标注'
-    text = first+'，'+second+'。'
-    sid = project.import_source('字面标记结束', text)
-    payload = {'nodes': [
-        {'type': 'person', 'name': '甲', 'quotes': [first]},
-        {'type': 'scene', 'name': '记录后停止', 'quotes': [text]},
-        {'type': 'event', 'name': '甲记录标注', 'scene': '@2', 'participants': ['@1'], 'quotes': [first]},
-        {'type': 'event', 'name': '停止标注', 'scene': '@2', 'participants': ['@1'], 'quotes': [second]}],
-        'properties': [
-            {'node': '@1', 'property': '标注', 'op': 'set', 'value': '@1', 'value_type': 'string', 'at_event': '@3', 'quotes': [first]},
-            {'node': '@1', 'property': '标注', 'op': 'clear', 'at_event': '@4', 'quotes': [second]}]}
-    submit_unchanged_input(project, sid, payload)
-    nodes = project.graph_snapshot()['nodes']
-    person = next(n['id'] for n in nodes if n['node_type'] == 'person')
-    events = {n['name']: n['id'] for n in nodes if n['node_type'] == 'event'}
-    assert next(r for r in values(project) if r['op'] == 'set')['value'] == '@1'
-    assert project.property_state(person, '标注', events['甲记录标注'])['state']['value'] == '@1'
-    assert project.property_state(person, '标注')['state'] == {'kind': 'absent'}
+def test_expiration_string_selector_keeps_literal_batch_reference_text(project):
+    first,second="甲说@1","随后停止标注"
+    text=first+"，"+second+"。"
+    sid=project.import_source("字面标记失效",text)
+    payload={"nodes":[
+        {"type":"person","name":"甲","quotes":[first]},
+        {"type":"scene","name":"记录后停止","quotes":[text]},
+        {"type":"event","name":"甲记录标注","scene":"@2","participants":["@1"],"quotes":[first]},
+        {"type":"event","name":"停止标注","scene":"@2","participants":["@1"],"quotes":[second]},
+    ],"properties":[{"node":"@1","property":"标注","value":"@1","value_type":"string",
+                      "at_event":"@3","quotes":[first]}],
+       "expirations":[{"node":"@1","property":"标注","value":"@1","at_event":"@4","reason":"原文明示停止"}]}
+    submit_unchanged_input(project,sid,payload)
+    nodes=project.graph_snapshot()["nodes"]
+    person=next(row["id"] for row in nodes if row["node_type"] == "person")
+    events={row["name"]:row["id"] for row in nodes if row["node_type"] == "event"}
+    record=values(project)[0]
+    assert record["value"] == "@1"
+    assert record["valid_to"]["event_id"] == events["停止标注"]
+    assert project.property_state(person,"标注",events["甲记录标注"])["state"]["value"] == "@1"
+    assert project.property_state(person,"标注")["state"]["kind"] == "unrecorded"
