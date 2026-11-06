@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .graph_models import Node
 from .state_anchors import StateAnchor
@@ -26,6 +26,13 @@ class Screenplay(CurrentObject):
     format: Literal["single", "series"] = "single"
     language: str = "zh-CN"
     creative_brief: dict = Field(default_factory=dict)
+    creative_agreement_overrides: dict[str, str] | None = None
+
+    @field_validator("creative_agreement_overrides")
+    @classmethod
+    def agreement_fields(cls, value):
+        from .project_style import normalize_overrides
+        return normalize_overrides(value) if value is not None else None
     structure_revision: int = Field(default=1, ge=1)
 
 

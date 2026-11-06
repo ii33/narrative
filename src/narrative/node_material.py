@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
+from .content_errors import ContentValidationError
+
 if TYPE_CHECKING:
     from .graph_store import GraphStore
 
@@ -62,6 +64,8 @@ def _serialized(method):
         except OSError as exc:
             raise ValueError("节点资料正在被其他操作写入，请稍后重试；未覆盖现有资料") from exc
         try:
+            from .material_submission import validate_base
+            validate_base(self, args[0] if args else kwargs['node_id'])
             return method(self, *args, **kwargs)
         finally:
             lease.release()
@@ -130,12 +134,24 @@ class MaterialStore:
             raise ValueError("节点资料卡列表损坏，拒绝覆盖")
         return data
 
-    def _save(self, node_id: str, data: dict) -> dict:
+    def _save(self, node_id: str, data: dict, *, _business_result=None) -> dict:
+        from .material_submission import commit_receipt
+        commit_receipt(node_id, data, _business_result)
         data["node_id"] = node_id
         data["updated_at"] = _now()
         self.root.mkdir(parents=True, exist_ok=True)
         self._atomic_json(self.path_for(node_id), data)
         return data
+
+    @_serialized
+    def stage_content_submission(self, node_id, row, expected=None):
+        data = self.load(node_id)
+        prior = data.get('content_submissions', {}).get(row['submission_id'])
+        if expected is not None and (prior is None or prior['submission_revision'] != expected or prior['submission_status'] != 'staged'):
+            raise ValueError('资料内容暂存已变化或已完成')
+        from copy import deepcopy
+        data.setdefault('content_submissions', {})[row['submission_id']] = deepcopy(row)
+        self._save(node_id, data)
 
     @staticmethod
     def _atomic_json(target: Path, data: dict) -> None:
@@ -236,7 +252,7 @@ class MaterialStore:
     ) -> dict:
         title = (title or "").strip()
         if not title:
-            raise ValueError("资料需要一个标题")
+            raise ContentValidationError("资料需要一个标题")
         self._check_window(valid_from, valid_to, snapshot)
         data = self.load(node_id)
         prefix = f"{node_id}-card-"
@@ -255,7 +271,7 @@ class MaterialStore:
         }
         data["cards"].append(card)
         self._sync_images(node_id, card, images, data)
-        self._save(node_id, data)
+        self._save(node_id, data, _business_result=card)
         self._sweep(node_id, data)
         return card
 
@@ -266,7 +282,7 @@ class MaterialStore:
         if start is None or end is None:
             return
         if start >= end:
-            raise ValueError("失效时间要在生效时间之后")
+            raise ContentValidationError("失效时间要在生效时间之后")
 
     @_serialized
     def update_card(
@@ -285,7 +301,7 @@ class MaterialStore:
         card = self._card(data, card_id)
         if title is not None:
             if not title.strip():
-                raise ValueError("资料标题不能为空")
+                raise ContentValidationError("资料标题不能为空")
             card["title"] = title.strip()
         if detail is not None:
             card["detail"] = str(detail)
@@ -295,7 +311,7 @@ class MaterialStore:
             card["valid_to"] = str(valid_to)
         self._check_window(card["valid_from"], card["valid_to"], snapshot)
         self._sync_images(node_id, card, images, data)
-        self._save(node_id, data)
+        self._save(node_id, data, _business_result=card)
         self._sweep(node_id, data)
         return card
 
@@ -412,7 +428,7 @@ class MaterialStore:
         if image is None:
             raise ValueError(f"图片不存在：{image_id}")
         image["caption"] = str(caption or "")
-        self._save(node_id, data)
+        self._save(node_id, data, _business_result={"id": image_id, "caption": image["caption"]})
         return {"id": image_id, "caption": image["caption"]}
 
     @_serialized

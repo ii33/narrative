@@ -32,19 +32,19 @@ def test_event_owner_event_target_and_existing_definition_type_are_preserved(pro
     sid = project.import_source('事件引用', TEXT)
     payload = draft()
     payload['properties'] = [{'node': '@3', 'property': '对应过程', 'value': '@4', 'value_type': 'node',
-                              'at_event': '@3', 'related_nodes': ['@4'], 'quotes': ['甲先走。']}]
+                              'op': 'set', 'at_event': '@3', 'related_nodes': ['@4'], 'quotes': ['甲先走。']}]
     original = copy.deepcopy(payload)
     result = project.submit_extraction(sid, payload)
     assert result['status'] == 'accepted', result
     assert payload == original
     first, second = result['node_ids']['@3'], result['node_ids']['@4']
-    row = next(row for row in project.property_records() if row['kind'] == 'property_value')
+    row = next(row for row in project.property_records() if row['kind'] == 'property_change')
     assert (row['node_id'], row['value'], row['event_id']) == (first, second, first)
     assert row['related_nodes'] == [second]
     follow = {'nodes': [], 'properties': [{'node': first, 'property': '对应过程', 'value': second,
-                                          'at_event': second, 'quotes': ['甲再停。']}]}
+                                          'op': 'set', 'at_event': second, 'quotes': ['甲再停。']}]}
     assert project.submit_extraction(sid, follow)['status'] == 'accepted'
-    values = [row for row in project.property_records() if row['kind'] == 'property_value']
+    values = [row for row in project.property_records() if row['kind'] == 'property_change']
     assert len(values) == 2 and all(row['value'] == second for row in values)
 
 
@@ -52,12 +52,13 @@ def test_node_selector_expiry_resolves_local_target_to_formal_id(project):
     sid = project.import_source('指向失效', TEXT)
     payload = draft()
     payload['properties'] = [{'node': '@1', 'property': '对应过程', 'value': '@3', 'value_type': 'node',
-                              'at_event': '@3', 'quotes': ['甲先走。']}]
-    payload['expirations'] = [{'node': '@1', 'property': '对应过程', 'value': '@3', 'at_event': '@4'}]
+                              'op': 'set', 'at_event': '@3', 'quotes': ['甲先走。']}]
+    payload['properties'].append({'node': '@1', 'property': '对应过程', 'op': 'clear', 'at_event': '@4', 'quotes': ['甲再停。']})
     result = project.submit_extraction(sid, payload)
     assert result['status'] == 'accepted', result
-    row = next(row for row in project.property_records() if row['kind'] == 'property_value')
-    assert row['valid_to']['event_id'] == result['node_ids']['@4']
+    row = next(row for row in project.property_records() if row['kind'] == 'property_change')
+    assert project.property_state(result['node_ids']['@1'], '对应过程')['state'] == {'kind': 'absent'}
+    assert any(r.get('op') == 'clear' and r['event_id'] == result['node_ids']['@4'] for r in project.property_records())
     assert row['value'] == result['node_ids']['@3']
 
 
@@ -79,7 +80,7 @@ def test_unknown_explicit_reference_never_silently_disappears(project, field):
     if field == 'participants':
         payload['nodes'][2][field] = ['@99']
     else:
-        payload['properties'] = [{'node': '@1', 'property': '状态', 'value': '行走', 'at_event': '@3',
+        payload['properties'] = [{'node': '@1', 'property': '状态', 'value': '行走', 'op': 'set', 'at_event': '@3',
                                   'related_nodes': ['@99'], 'quotes': ['甲先走。']}]
     result = project.preview_extraction(sid, payload)
     assert not result['valid']

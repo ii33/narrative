@@ -14,6 +14,7 @@ import secrets
 import socket
 import threading
 import time
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -170,6 +171,7 @@ class ModelGateway:
     def __init__(self, settings, api_key: str, *, secrets_to_redact: tuple[str, ...] = ()):
         self.settings, self._key = settings, api_key
         self._extra_secrets = secrets_to_redact
+        self.tool_allowlist_provider: Callable[[], Iterable[str]] | None = None
         self.token = secrets.token_urlsafe(32)
         self._closed = threading.Event()
         self._lock = threading.Lock()
@@ -282,6 +284,20 @@ class ModelGateway:
                             raise ValueError(
                                 gateway._compaction_failure + "；已阻止后续模型请求，没有自动重试"
                             )
+                    allowlist_provider = gateway.tool_allowlist_provider
+                    if allowlist_provider is not None and isinstance(payload.get("tools"), list):
+                        selected = allowlist_provider()
+                        allowed = set(selected)
+                        payload["tools"] = [tool for tool in payload["tools"] if isinstance(tool, dict)
+                                            and (tool.get("function") or {}).get("name") in allowed]
+                        if isinstance(selected, (list, tuple)):
+                            # Keep resident schemas first and append newly loaded
+                            # tools, preserving the existing provider cache prefix.
+                            order = {name: index for index, name in enumerate(selected)}
+                            payload["tools"].sort(key=lambda tool: order[str((tool.get("function") or {}).get("name"))])
+                        choice = payload.get("tool_choice")
+                        if isinstance(choice, dict) and (choice.get("function") or {}).get("name") not in allowed:
+                            raise ValueError("当前任务未授权所指定的工具")
                     body = json.dumps(adapt_request(payload, settings), ensure_ascii=False).encode()
                     headers = gateway._upstream_headers()
                     url = urlsplit(settings.base_url)
@@ -299,6 +315,8 @@ class ModelGateway:
                         gateway._connections.add(connection)
                         gateway._connection_epochs[connection] = turn_epoch
                         usage_record = {
+                            "request_id": f"request-{len(gateway._usage_records) + 1}",
+                            "usage_sampled_at": None,
                             "usage": None,
                             "complete": False,
                             "raw": "",
@@ -388,7 +406,15 @@ class ModelGateway:
                                     epoch=turn_epoch,
                                 )
                             with gateway._lock:
+                                if observer.usage is not None and observer.usage != usage_record["usage"]:
+                                    usage_record["usage_sampled_at"] = datetime.now(UTC).isoformat()
                                 usage_record["usage"] = observer.usage
+                                # Completion is visible to live budget/audit
+                                # readers only with stable tool-call identity.
+                                # Otherwise the same response can be counted
+                                # once as text and again after tool enrichment.
+                                if observer.complete:
+                                    usage_record["tool_calls"] = observer.tool_snapshot()
                                 usage_record["complete"] = observer.complete
                                 usage_record["raw"] = "".join(observer.content)
                                 usage_record["finish_reason"] = observer.finish_reason
@@ -417,6 +443,8 @@ class ModelGateway:
                         if gateway._turn_live(turn_epoch):
                             observer.feed(b"\n\n")
                         with gateway._lock:
+                            if observer.usage is not None and observer.usage != usage_record["usage"]:
+                                usage_record["usage_sampled_at"] = datetime.now(UTC).isoformat()
                             usage_record["usage"] = observer.usage
                             usage_record["complete"] = observer.complete
                             usage_record["raw"] = "".join(observer.content)
@@ -569,9 +597,17 @@ class ModelGateway:
         with self._lock:
             return deepcopy([record["usage"] for record in self._usage_records])
 
+    def usage_progress_snapshot(self) -> list[dict]:
+        """Small counter samples, without copying growing text or tool payloads."""
+        with self._lock:
+            return deepcopy([{key: record[key] for key in
+                              ("request_id", "usage_sampled_at", "purpose", "usage", "complete", "finish_reason")}
+                             for record in self._usage_records])
+
     def raw_snapshot(self) -> list[str]:
         with self._lock:
-            return self._redact([record["raw"] for record in self._usage_records])
+            from .assistant_audit import sanitize_host_audit
+            return self._redact([sanitize_host_audit(record)["raw"] for record in self._usage_records])
 
     def request_snapshot(self) -> list[dict]:
         with self._lock:
@@ -580,6 +616,8 @@ class ModelGateway:
                     {
                         key: record[key]
                         for key in (
+                            "request_id",
+                            "usage_sampled_at",
                             "purpose",
                             "max_tokens",
                             "usage",
@@ -602,6 +640,8 @@ class ModelGateway:
         if isinstance(value, list):
             return [self._redact(item) for item in value]
         if isinstance(value, dict):
+            from .assistant_audit import sanitize_host_audit
+            value = sanitize_host_audit(value)
             result = {key: self._redact(item) for key, item in value.items()}
             arguments = value.get("arguments")
             if isinstance(arguments, str) and any(secret in arguments for secret in secrets_to_hide):

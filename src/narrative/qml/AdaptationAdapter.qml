@@ -9,11 +9,11 @@ QtObject {
     function loadMaterial(id) { bridge.loadAdaptationMaterial(id, host.cutEventId) }
     function change(action, args) { args.expected_revision = host.revision; bridge.changeAdaptation(action, args) }
     function reviseNode(id, fields) { change("edit", {node_id: id, changes: fields}) }
-    function addPropertyRecord(fields) { change("property", {node_id: fields.node_id, property_id: fields.property_id, value: fields.value, event_id: fields.event_id || null}) }
-    function correctPropertyRecord(id, fields) { change("property", {node_id: fields.node_id, property_id: fields.property_id, value: fields.value, event_id: fields.event_id || null, record_id: id}) }
-    function expirePropertyRecords(ids, reason) { bridge.expireAdaptationProperties(JSON.parse(ids), host.cutEventId, host.revision, reason) }
+    function propertyArgs(fields){var args={node_id:fields.node_id,property_id:fields.property_id,event_id:fields.event_id,op:fields.op};if(["set","add","remove"].indexOf(fields.op)>=0)args.value=fields.value;["scope","holder_id","context_id","reason"].forEach(function(key){if(fields[key]!==undefined&&fields[key]!==null)args[key]=fields[key]});return args}
+    function addPropertyRecord(fields) { change("property", propertyArgs(fields)) }
+    function correctPropertyRecord(id, fields) { var args=propertyArgs(fields);args.record_id=id;change("property",args) }
     function unavailable() { host.app.toast("请在资产页面管理改编视觉设定；此项提取数据操作不适用于改编", true) }
-    function deletePropertyRecords(ids) { unavailable() }
+    function deletePropertyRecords(ids) { change("delete_property_changes",{record_ids:JSON.parse(ids)}) }
     function renameProperty(a,b) { unavailable() }
     function categorizeProperties(a,b) { unavailable() }
     function mergeProperties(a,b) { unavailable() }

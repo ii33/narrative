@@ -25,12 +25,12 @@ def test_sources_and_slices_have_stable_short_ids_and_public_outputs_do_not_expo
     assert second == "SRC2"
     slices = project.create_source_slices(
         first, [{"title": "完整", "start": 0, "end": len("😀甲出门。")}]
-    )
+    )['result']
     assert [row["id"] for row in slices] == ["SRC1-SL1"]
     assert (
         project.create_source_slices(
             first, [{"title": "完整", "start": 0, "end": len("😀甲出门。")}]
-        )
+        )['result']
         == slices
     )
     outputs = [

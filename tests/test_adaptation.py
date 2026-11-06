@@ -55,15 +55,15 @@ def test_properties_and_concurrency_are_atomic(project):
     person = named(state, "甲")["id"]
     first = named(state, "甲约好接乙")["id"]
     last = named(state, "甲接到乙后离开")["id"]
-    state = project.set_adaptation_property(person, "服装", "青衣", event_id=first)
+    state = project.set_adaptation_property(person, "服装", first, "set", value="青衣")
     record = next(p for p in state["properties"] if p.get("property_id") == "服装")
-    state = project.set_adaptation_property(person, "服装", "白衣", event_id=last, record_id=record["id"])
-    assert next(p for p in state["properties"] if p["id"] == record["id"])["end_event_id"] == last
+    state = project.set_adaptation_property(person, "服装", last, "set", value="白衣")
+    assert next(p for p in state["properties"] if p["id"] == record["id"])["value"] == "青衣"
     before = project.adaptation_snapshot()
     with pytest.raises(ValueError, match="修订"):
         project.edit_adaptation_node(person, {"name": "过期写入"}, expected_revision=0)
-    with pytest.raises(ValueError, match="失效时点"):
-        project.set_adaptation_property(person, "服装", event_id=first, record_id=record["id"], expire=True)
+    with pytest.raises(ValueError, match="操作"):
+        project.set_adaptation_property(person, "服装", first, "invalid")
     with pytest.raises(ValueError):
         project.edit_adaptation_node(person, {"participants": ["missing"]})
     assert project.adaptation_snapshot() == before
@@ -90,11 +90,11 @@ def test_invalid_structure_items_and_values_cannot_leak_partial_edits(project):
     with pytest.raises(ValueError, match="持有者"):
         project.edit_adaptation_node(changes={"node_type": "item", "name": "刀"})
     assert project.adaptation_snapshot() == before
-    state = project.edit_adaptation_node(changes={"node_type": "item", "name": "刀", "initial_holder": "未知"})
+    state = project.edit_adaptation_node(changes={"node_type": "item", "name": "刀", "initial_holder": "未知", "point_id": named(state, "甲约好接乙")["id"]})
     item = named(state, "刀")
     before = project.adaptation_snapshot()
     with pytest.raises(ValueError, match="持有者"):
-        project.set_adaptation_property(item["id"], "持有者", "missing")
+        project.set_adaptation_property(item["id"], "持有者", named(state,"甲约好接乙")["id"], "set", value="missing")
     assert project.adaptation_snapshot() == before
     person = named(state, "甲")
     event = named(state, "甲约好接乙")
@@ -133,33 +133,27 @@ def test_suppress_and_restore_container_cover_subtree(project):
     assert all(not n["suppressed"] for n in state["nodes"] if n["id"] in subtree)
     assert project.check_adaptation()["ok"]
 
-def test_source_expiration_uses_adaptation_order_after_sync(project):
+def test_source_changes_replay_after_local_order_change(project):
     state = seed(project)
     first = named(state, "甲约好接乙")
     last = named(state, "甲接到乙后离开")
-    expired = next(p for p in state["properties"] if p.get("property_id") == "计划")
-    assert expired["event_id"] == first["id"]
-    assert expired["end_event_id"] == last["id"]
-    assert expired["source_valid_to"]
-    assert "valid_to" not in expired
-    before = project.adaptation_snapshot()
-    with pytest.raises(ValueError, match="失效时点"):
-        project.move_adaptation_node(first["id"], after_id=last["id"])
-    assert project.adaptation_snapshot() == before
+    changes = [p for p in state["properties"] if p.get("property_id") == "计划"]
+    assert {row["op"] for row in changes} == {"set", "clear"}
+    assert all(not (set(row) & {"valid_from", "valid_to", "end_event_id"}) for row in changes)
+    project.move_adaptation_node(first["id"], after_id=last["id"])
+    person = named(state, "甲")["id"]
+    item = next(row for row in project.adaptation_node_properties(person)["properties"] if row["property_id"] == "计划")
+    assert item["value"] == "接乙"
 
 
-def test_source_boundary_without_event_anchor_is_mapped_with_diagnostic(project):
-    seed(project)
-    row = copy.deepcopy(next(p for p in project.property_records() if p.get("property_id") == "计划"))
-    row["valid_to"].pop("event_id", None)
-    result = project.apply_changes([], [row], project.graph_project_info()["revision"], reason="合成坐标失效边界")
-    assert result["status"] == "accepted"
-    state = project.sync_adaptation()
-    last = named(state, "甲接到乙后离开")
-    expired = next(p for p in state["properties"] if p["id"] == row["id"])
-    assert expired["end_event_id"] == last["id"]
-    assert any(d["field"] == "valid_to" and d["event_id"] == last["id"] for d in state["sync_diagnostics"])
-    assert project.sync_adaptation()["properties"] == state["properties"]
+def test_correct_change_preserves_identity_and_sequence(project):
+    state = seed(project)
+    row = next(p for p in state["properties"] if p.get("property_id") == "朋友")
+    state = project.set_adaptation_property(row["node_id"], row["property_id"], row["event_id"], "unknown", record_id=row["id"])
+    corrected = next(p for p in state["properties"] if p["id"] == row["id"])
+    assert corrected["sequence"] == row["sequence"]
+    assert corrected["op"] == "unknown" and "value" not in corrected
+
 
 def test_insert_without_reference_is_first_and_explicit_last_reference_is_last(project):
     state = seed(project)

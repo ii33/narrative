@@ -7,6 +7,7 @@ import re
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib.metadata import version
 from pathlib import Path
@@ -223,6 +224,14 @@ class HarnessReply:
     raw: str
     metadata: dict
 
+    @property
+    def commit_summary(self) -> dict | None:
+        return self.metadata.get("commit_summary")
+
+    @property
+    def commit_summary_text(self) -> str:
+        return self.metadata.get("commit_summary_text", "")
+
 
 def _sdk_error_diagnostics(events: list[dict], secrets_to_redact: tuple[str, ...]) -> list[dict]:
     """Keep only short error fields from SDK events, never event payloads or prompts."""
@@ -295,8 +304,12 @@ def credential_status(env_name: str = "DEEPSEEK_API_KEY") -> dict:
     return {"available": bool(value), "source": source}
 
 
-def resolve_key(settings: HarnessSettings, supplied: str | None) -> str:
-    key = supplied.strip() if supplied and supplied.strip() else configured_key(settings.key_env)[0]
+def resolve_key(settings: HarnessSettings, supplied: str | None, *, ops=None) -> str:
+    key = supplied.strip() if supplied and supplied.strip() else ""
+    if not key and ops is not None:
+        key = ops._saved_provider_api_key(settings.model_dump()) or ""
+    if not key:
+        key = configured_key(settings.key_env)[0]
     if not key and urlsplit(settings.base_url).hostname not in {"localhost", "127.0.0.1", "::1"}:
         raise ValueError(f"请在密码框输入密钥，或为所选服务设置 {settings.key_env}")
     return key or "local-no-auth"
@@ -309,9 +322,7 @@ def harness_env(ops) -> tuple[HarnessSettings, str, Path]:
     timeout_seconds仅限制网络连接和流空闲，不是任务总时限。
     """
     settings = HarnessSettings.model_validate(ops.harness_settings())
-    api_key = os.environ.get(settings.key_env) or os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise ValueError(f"缺少 {settings.key_env} 或 DEEPSEEK_API_KEY，无法调用模型")
+    api_key = resolve_key(settings, None, ops=ops)
     from .project_package import layout
 
     return settings, api_key, layout(ops.path).extraction
@@ -337,6 +348,9 @@ class HarnessRunner:
         self.turn_settled = True
         self.interrupt_barrier: threading.Event | None = None
         self._compaction_events: list[dict] = []
+        self._usage_listener = None
+        self._steering_listener = None
+        self._live_contexts: dict[str, dict] = {}
         directory.mkdir(parents=True, exist_ok=True)
         self._gateway = ModelGateway(
             settings, api_key, secrets_to_redact=(str((task_tools or {}).get("token") or ""),),
@@ -422,9 +436,9 @@ class HarnessRunner:
             if force or not self._closed:
                 self._closed = True
                 try:
-                    self._harness.close()
-                finally:
                     self._gateway.close()
+                finally:
+                    self._harness.close()
 
     def redact(self, message: str) -> str:
         return message.replace(self._secret, "[REDACTED]") if self._secret else message
@@ -444,6 +458,53 @@ class HarnessRunner:
             **self._gateway.compaction_failure_snapshot(),
         }
 
+    @contextmanager
+    def usage_events(self, callback):
+        """Observe the active real SDK turn without polling logs or raw text."""
+        previous = self._usage_listener
+        self._usage_listener = callback
+        try:
+            yield
+        finally:
+            self._usage_listener = previous
+
+    def _publish_usage_progress(self, session_id, event):
+        if self._usage_listener is None:
+            return
+        context = self._live_contexts.setdefault(session_id, {
+            "latest_input_tokens": None, "latest_input_source": "unknown",
+            "current_estimate_tokens": None, "current_estimate_source": "unknown",
+            "state": "waiting", "stale": True,
+            "context_window": self.settings.context_window,
+            "compaction_threshold_tokens": self.settings.compaction_threshold,
+        })
+        kind = event.get("type", "turn/start")
+        if kind == "request/context":
+            window = (event.get("data") or {}).get("contextWindow")
+            if type(window) is int and window > 0:
+                context["context_window"] = window
+        if kind == "compaction/start":
+            context["state"] = "compacting"
+        elif kind in {"turn/start", "step/start"}:
+            context["state"] = "waiting"
+        else:
+            context["state"] = "stale"
+        # The installed SDK exposes no public Python tokenMeter projection.
+        # Its request usage is actual, but output/tools and compaction already
+        # changed the surface. Do not invent a current-size estimate from a sum.
+        context.update(stale=True, current_estimate_tokens=None, current_estimate_source="unknown")
+        requests = self._gateway.usage_progress_snapshot()
+        latest = next((row.get("usage") for row in reversed(requests)
+                       if row["purpose"] == "generation" and isinstance(row.get("usage"), dict)), None)
+        if isinstance(latest, dict) and type(latest.get("prompt_tokens")) is int:
+            context.update(latest_input_tokens=latest["prompt_tokens"], latest_input_source="provider_last_request")
+        self._usage_listener({
+            "provider": self.settings.provider, "model": self.settings.model,
+            "context_policy": effective_runtime_config(self.settings),
+            "model_requests": requests, "native_context": dict(context),
+            "compaction_request_count": sum(row["purpose"] == "compaction" for row in requests),
+        }, kind.replace("/", "_"))
+
     def partial_raw(self) -> list[str]:
         """Provider content observed before an interrupted SDK turn, if any."""
         return self._gateway.raw_snapshot()
@@ -451,6 +512,13 @@ class HarnessRunner:
     def upstream_activity_snapshot(self) -> dict:
         """ModelGateway last upstream response-byte activity for live progress."""
         return self._gateway.upstream_activity_snapshot()
+
+    def set_steering_listener(self, callback):
+        self._steering_listener = callback
+
+    def set_tool_allowlist(self, provider):
+        """Filter provider-visible tools per task without rebuilding SDK history."""
+        self._gateway.tool_allowlist_provider = provider
 
     def agent_turn(self, instruction: str, session_id: str, *, on_message=None) -> HarnessReply:
         """Run one agent turn in a persistent SDK session; the caller dispatches safe tools."""
@@ -461,6 +529,11 @@ class HarnessRunner:
                 try:
                     return self._run(instruction, session_id, on_message=on_message)
                 finally:
+                    # The SDK call is already settled. Publish that fact before
+                    # waiting for a concurrent stop controller: it may itself be
+                    # waiting for this turn to cease being active.
+                    self.turn_settled = True
+                    self.active_session = None
                     if self.interrupt_barrier is not None:
                         self.interrupt_barrier.wait()
         finally:
@@ -495,11 +568,14 @@ class HarnessRunner:
                        and block.get("type") not in {"reasoning", "thinking", "redacted_thinking"}]
             if not visible:
                 return
-            visible = json.loads(self.redact(json.dumps(visible, ensure_ascii=False)))
+            from .assistant_audit import sanitize_host_audit
+            visible = sanitize_host_audit(json.loads(self.redact(json.dumps(visible, ensure_ascii=False))))
             text = "".join(str(block.get("text") or "") for block in visible if block.get("type") == "text")
             record = {"message_id": message_id, "session_id": session_id, "seq": seq,
                       "text": text, "content": visible,
                       "full_output": json.dumps(visible, ensure_ascii=False)}
+            from .output_presentation import present_message
+            record = present_message(record)
             seen_messages.add(message_id)
             model_messages.append(record)
             if on_message is not None:
@@ -511,6 +587,11 @@ class HarnessRunner:
                     and notification.payload.get("sessionId") == session_id):
                 event = notification.payload.get("event")
                 if isinstance(event, dict):
+                    if event.get("type") == "user/message" and self._steering_listener is not None:
+                        self._steering_listener(session_id, (event.get("data") or {}).get("id"))
+                    if event.get("type") in {"turn/start", "step/start", "request/context", "assistant/message",
+                                              "tool/result", "compaction/start", "compaction/end", "turn/end"}:
+                        self._publish_usage_progress(session_id, event)
                     observe_message(event)
 
         from deepseek_harness import Session

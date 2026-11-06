@@ -24,7 +24,9 @@ def test_style_persistence_isolation_revision_and_audit(project, tmp_path):
     style = project.save_project_style("克制对白，以空间、动作和画面组织场面。", 0)
     other = Operations.create_graph_project(tmp_path / "other.nproj")
     assert other.load_project_style() == {"revision": 0, "text": ""}
-    assert Operations.open(tmp_path / "unified.nproj").load_project_style() == style
+    persisted = Operations.open(tmp_path / "unified.nproj").load_project_style()
+    assert style["status"] == "accepted" and {key: style[key] for key in persisted} == persisted
+    style = persisted
     with pytest.raises(ValueError, match="已变化"):
         project.save_project_style("过期", 0)
     assert project.load_project_style() == style
@@ -99,4 +101,5 @@ def test_style_cli_mcp_contract(project, tmp_path, capsys):
     saved = json.loads(capsys.readouterr().out)
     reply = mcp_server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "load_project_style", "arguments": {}}}, default_project=str(entry))
     assert not reply["result"]["isError"]
-    assert json.loads(reply["result"]["content"][0]["text"]) == saved
+    persisted = json.loads(reply["result"]["content"][0]["text"])
+    assert saved["status"] == "accepted" and {key: saved[key] for key in persisted} == persisted

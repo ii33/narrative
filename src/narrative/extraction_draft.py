@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import re
 
-DRAFT_VERSION = "conversation-draft/13"
+DRAFT_VERSION = "conversation-draft/16"
 
 RESULT_SCHEMA = {
     "type": "object", "required": ["nodes", "properties"],
@@ -14,7 +13,8 @@ RESULT_SCHEMA = {
         "nodes": {"type": "array", "items": {"type": "object", "required": ["name", "type"],
             "properties": {
                 "name": {"type": "string"},
-                "type": {"type": "string", "enum": ["person", "group", "item", "location", "storyline", "big_event", "scene", "event", "action"]},
+                "type": {"type": "string", "enum": ["person", "group", "item", "location", "storyline", "big_event", "scene", "event", "action"],
+                    "description": "event记录完整发生，通常包含同一叙事目标下的过程与直接结果；不把准备、动作链或收尾单独改标event。真正独立的新展开才另分事件。action仅在明确请求动作提取时使用。"},
                 "quotes": {"type": "array", "items": {"type": "string"}},
                 "closing_quote": {"type": "string", "description": "storyline完整结束后总结时须给出逐字唯一闭合证据，程序计算completion"},
                 "aliases": {"type": "array", "items": {"type": "string"}},
@@ -29,28 +29,47 @@ RESULT_SCHEMA = {
                 "big_event": {"type": "string", "description": "scene所属阶段性大事件的B编号或本批@序号"},
                 "storyline": {"type": "string", "description": "big_event所属已结束主要故事的T编号或本批@序号；未总结篇章可省略"},
             }, "additionalProperties": False}},
-        "properties": {"type": "array", "items": {"type": "object", "required": ["node", "property", "value", "quotes"],
+        "properties": {"type": "array", "items": {"type": "object", "required": ["node", "property", "at_event", "op", "quotes"],
             "properties": {
                 "node": {"type": "string", "description": "属性主体；身份、关系或作用角色中为参照方A"}, "property": {"type": "string", "description": "关系描述对方相对node的身份、关系或作用中的角色；node=A,property=父亲,value=B表示B是A的父亲；事件地点使用属性名‘地点’并引用地点节点"},
+                "op": {"type": "string", "enum": ["set", "add", "remove", "clear", "unknown"], "description": "在at_event处建立/设置、增添、移除、明确清空或变为未知；不填写有效期"},
                 "value": {"description": "node/either节点引用表示被指向的对方ID；普通string/any值保持字面内容；事件地点的value引用location节点"}, "value_type": {"type": "string", "enum": ["string", "number", "boolean", "node", "either", "any"], "description": "节点引用用node/either；事件地点使用node，string/any即使内容像P编号也是字面值"},
                 "quotes": {"type": "array", "items": {"type": "string"}},
+                "cardinality": {"type": "string", "enum": ["one", "many"], "description": "新定义默认one；多值状态显式many且value为数组。已有定义省略沿用，显式冲突拒绝，须显式修改定义"},
                 "symmetric": {"type": "boolean", "description": "该关系性质对称时显式true；单向false，不按名称猜测"},
                 "category": {"type": "string"}, "scope": {"type": "string", "enum": ["world", "cognition", "claim"], "description": "world为原文支持的客观事实；事件地点为world；cognition为某人物所知所信/主观判断，claim为人物言说主张，二者须给holder；对白可有客观事实依据，不机械全记claim"},
                 "holder": {"type": ["string", "null"], "description": "cognition的认知者或claim的说话人ID/@引用；node仍是被认知/被谈论的主体，可与holder不同；例如甲以为乙是教师：node乙、scope=cognition、holder甲；world不填"}, "source": {"type": "string"},
                 "related_nodes": {"type": "array", "items": {"type": "string"}},
-                "at_event": {"type": "string", "description": "属性披露锚点事件；事件地点须锚到支持地点证据的同一事件"},
+                "at_event": {"type": "string", "description": "必须给本次建立/变更/失效所在事件ID或@引用；程序按事件顺序推状态，sequence由已定位引文生成"},
             }, "additionalProperties": False}},
-        "expirations": {"type": "array", "items": {"type": "object",
-            "properties": {"record_id": {"type": "string"}, "node": {"type": "string"},
-                           "property": {"type": "string"}, "value": {}, "at_event": {"type": "string"},
-                           "valid_to": {"type": "object", "properties": {
-                               "source_id": {"type": "string"}, "start": {"type": "integer"},
-                               "event_id": {"type": "string"}}, "additionalProperties": False},
-                           "reason": {"type": "string"}}, "additionalProperties": False}},
         "uncertainties": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
         "exclusions": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
     }, "additionalProperties": False,
 }
+
+_PROPERTY_DRAFT_SCHEMA = RESULT_SCHEMA['properties']['properties']['items']
+_PROPERTY_DRAFT_SCHEMA['oneOf'] = [
+    {'properties': {'op': {'enum': ['set', 'add', 'remove']}}, 'required': ['value']},
+    {'properties': {'op': {'enum': ['clear', 'unknown']}}, 'not': {'required': ['value']}},
+]
+
+
+def submission_input_schema() -> dict:
+    """The exact public draft-call schema; no storage-layer fields or tool import."""
+    from copy import deepcopy
+    return {"type": "object", "additionalProperties": False, "required": ["source_id", "result"],
+        "properties": {
+            "source_id": {"type": "string", "description": "当前工程原文ID，放在外层，不能写进result"},
+            "result": deepcopy(RESULT_SCHEMA),
+            "start": {"type": "integer", "description": "本批实际原文范围的全局Unicode起点，放外层；默认0"},
+            "end": {"type": "integer", "description": "本批实际原文范围的全局Unicode终点，不包含；放外层，默认原文末尾"}}}
+
+
+def submission_parameters() -> dict:
+    """Tool binding metadata derives from that same authoritative JSON schema."""
+    schema = submission_input_schema()
+    return {key: {**value, "required": key in schema["required"]}
+            for key, value in schema["properties"].items()}
 
 
 def _source_range(ops, source_id: str, start: int, end: int | None):
@@ -88,6 +107,14 @@ def _prepare(ops, source_id: str, result: dict, start: int, end: int | None):
         unknown_node = set(row) - allowed_node_fields
         if unknown_node:
             raise ValueError(f"nodes[{index}]未知字段：" + "、".join(sorted(unknown_node)))
+    fields = set(_PROPERTY_DRAFT_SCHEMA['properties'])
+    for index, row in enumerate(result['properties']):
+        if not isinstance(row, dict) or set(row)-fields:
+            raise ValueError(f'properties[{index}]字段无效；只使用事件变更合同，不接受有效期或模型sequence')
+        if not isinstance(row.get('at_event'), str) or not row['at_event'].strip() or not isinstance(row.get('op'), str) or row.get('op') not in {'set', 'add', 'remove', 'clear', 'unknown'}:
+            raise ValueError(f'properties[{index}]必须明确at_event与有效op')
+        if ('value' in row) != (row['op'] in {'set', 'add', 'remove'}):
+            raise ValueError(f'properties[{index}]set/add/remove须有value，clear/unknown不能有value')
     unknown = set(result) - set(RESULT_SCHEMA["properties"])
     if unknown:
         raise ValueError("未知草稿字段：" + "、".join(sorted(unknown)))
@@ -98,11 +125,18 @@ def _prepare(ops, source_id: str, result: dict, start: int, end: int | None):
     current_graph = reader.graph_snapshot()
     current_records = reader.property_records()
     definitions = {row['id']: row for row in current_records if row.get('kind') == 'property_definition'}
+    # Resolve omitted type information from explicit definitions anywhere in this batch.
+    # A later clear/unknown must not turn an earlier node reference into a string.
+    for row in original['properties']:
+        if isinstance(row, dict) and row.get('property') not in definitions and row.get('value_type'):
+            definitions[row['property']] = row
     for row in original['properties']:
         if isinstance(row, dict) and 'value_type' not in row and row.get('property') in definitions:
             row['value_type'] = definitions[row['property']]['value_type']
+        if isinstance(row, dict) and 'cardinality' not in row and row.get('property') in definitions:
+            row['cardinality'] = definitions[row['property']].get('cardinality', 'one')
     data = parse_nodes(original, selected)
-    for key in ("expirations", "uncertainties", "exclusions"):
+    for key in ("uncertainties", "exclusions"):
         rows = result.get(key) or []
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise ValueError(f"{key}必须是对象数组")
@@ -154,30 +188,8 @@ def preview(ops, source_id: str, result: dict, start: int = 0, end: int | None =
 
 
 def submit(ops, source_id: str, result: dict, start: int = 0, end: int | None = None) -> dict:
-    from .conversation_session import record_business_action, use_chat
-
-    with use_chat(ops) as chat:
-        data, built, prepared, outcome = _prepare(ops, source_id, result, start, end)
-        outcome["status"] = "rejected"
-        if not outcome["valid"]:
-            return _compact(outcome)
-        if built.get("empty"):
-            outcome["status"] = "unchanged"
-            if built.get("node_ids"):
-                outcome["node_ids"] = built["node_ids"]
-            return _compact(outcome)
-        note = {"purpose": "统一提取自动入库", "uncertainties": result.get("uncertainties") or [],
-                "exclusions": result.get("exclusions") or [], "expirations": result.get("expirations") or []}
-        committed = ops.commit_changes(prepared, json.dumps(note, ensure_ascii=False))
-        outcome.update(status=committed["status"], revision=committed["revision"])
-        if built.get("node_ids"):
-            outcome["node_ids"] = built["node_ids"]
-        try:
-            record_business_action(ops, {"action": "automatic_extraction", "chat_id": chat["id"],
-                                       "source_id": source_id, "result": outcome})
-        except Exception as exc:
-            outcome["feedback_error"] = {"type": type(exc).__name__, "message": str(exc)}
-        return _compact(outcome)
+    from .extraction_staging import submit as stage_submit
+    return stage_submit(ops, source_id, result, start, end)
 
 
 def _organization_headings(text: str, title: str = "") -> list[dict]:

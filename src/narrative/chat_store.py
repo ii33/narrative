@@ -98,6 +98,12 @@ class ChatStore:
         data.setdefault("id", chat_id)
         data.setdefault("session", f"chat-{chat_id}")
         data.setdefault("title", "新会话")
+        data.setdefault("access_mode", "standard")
+        data.setdefault("access_revision", 0)
+        if not isinstance(data["access_mode"], str) or data["access_mode"] not in {"standard", "full"}:
+            raise ValueError("会话访问模式无效")
+        if type(data["access_revision"]) is not int or data["access_revision"] < 0:
+            raise ValueError("会话访问设置修订无效")
         data["messages"] = data.get("messages") if isinstance(data.get("messages"), list) else []
         return data
 
@@ -154,6 +160,8 @@ class ChatStore:
             "session": f"chat-{chat_id}",
             "title": (title or "").strip() or "新会话",
             "created_at": _now(),
+            "access_mode": "standard",
+            "access_revision": 0,
             "messages": [],
         })
         self.set_active(chat_id)
@@ -193,6 +201,21 @@ class ChatStore:
         return self._save(data)
 
     @_locked_chat
+    def set_access_mode(self, chat_id: str, access_mode: str, reason: str) -> dict:
+        if not isinstance(access_mode, str) or access_mode not in {"standard", "full"}:
+            raise ValueError("访问模式须为standard或full")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("修改访问模式须提供理由")
+        data = self.load(chat_id)
+        if data["access_mode"] == access_mode:
+            return data
+        data["access_mode"] = access_mode
+        data["access_revision"] += 1
+        data["access_mode_changed_at"] = _now()
+        data["access_mode_reason"] = reason
+        return self._save(data)
+
+    @_locked_chat
     def delete(self, chat_id: str) -> None:
         path = self.path_for(chat_id)
         if path.is_file():
@@ -220,6 +243,21 @@ class ChatStore:
                 message.update(extra)
                 return self._save(data)
         raise ValueError("模型消息不存在")
+
+    @_locked_chat
+    def annotate_steering(self, chat_id, message_id, status, **extra):
+        ranks = {'sending': 0, 'queued': 1, 'not_delivered': 2, 'delivered': 3}
+        if status not in ranks:
+            raise ValueError('插话状态无效')
+        data = self.load(chat_id)
+        for message in data['messages']:
+            if message.get('message_id') == message_id and message.get('role') == 'user':
+                previous = message.get('steering_status', 'sending')
+                if ranks[status] >= ranks.get(previous, 0):
+                    message.update(extra, steering_status=status)
+                    self._save(data)
+                return message
+        raise ValueError('插话用户消息不存在')
 
     def latest(self) -> dict | None:
         rows = self.list()

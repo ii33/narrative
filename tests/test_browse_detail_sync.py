@@ -120,8 +120,8 @@ def test_public_display_map_covers_every_schema_node_type(tmp_path):
                        "name": kind, "disclosure": {"source_id": sid, "start": 0},
                        "evidence": {"source_id": sid, "quote": TEXT}}).model_dump())
     item = next(row for row in objects if row["node_type"] == "item")
-    base = next(row for row in ops.property_records() if row.get("kind") == "property_value")
-    record = dict(base, node_id=item["id"], property_id="持有者", value="未知", scope="world", holder_id=None, valid_to=None)
+    base = next(row for row in ops.property_records() if row.get("kind") == "property_change")
+    record = dict(base, node_id=item["id"], property_id="持有者", value="未知", scope="world", holder_id=None, op="set")
     record.pop("id")
     records = [{"kind": "property_definition", "id": "持有者", "value_type": "either", "cardinality": "one", "semantic": "item_holder"}, record]
     result = ops.apply_changes(objects, records, ops.graph_project_info()["revision"], "覆盖全部合法节点类型显示")

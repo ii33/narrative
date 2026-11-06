@@ -1,4 +1,4 @@
-"""Interval-only metadata supports local state without importing narrative."""
+"""Prior event-change anchors support state without importing unselected plot."""
 from __future__ import annotations
 
 import copy
@@ -20,13 +20,13 @@ def snapshot():
     return {'timeline_id': 'local-test', 'nodes': [copy.deepcopy(source['nodes'][1]), copy.deepcopy(source['nodes'][3])],
         'state_anchors': selection_anchors(source, {'E1'}, {'E0', 'E2'}),
         'properties': [
-            {'kind': 'property_definition', 'id': 'clothes', 'value_type': 'string'},
-            {'kind': 'property_value', 'id': 'current', 'node_id': 'P', 'property_id': 'clothes',
-             'value': '青衣', 'event_id': 'E0', 'end_event_id': 'E2'},
-            {'kind': 'property_value', 'id': 'past', 'node_id': 'P', 'property_id': 'clothes',
-             'value': '过期衣服', 'end_event_id': 'E0'},
-            {'kind': 'property_value', 'id': 'future', 'node_id': 'P', 'property_id': 'clothes',
-             'value': '未来衣服', 'event_id': 'E2'}]}
+            {'kind': 'property_definition', 'id': 'clothes', 'value_type': 'string', 'cardinality': 'one'},
+            {'kind': 'property_change', 'id': 'current', 'node_id': 'P', 'property_id': 'clothes',
+             'value': '青衣', 'event_id': 'E0', 'op': 'set', 'sequence': 1},
+            {'kind': 'property_change', 'id': 'past', 'node_id': 'P', 'property_id': 'clothes',
+             'value': '过期衣服', 'event_id': 'E0', 'op': 'set', 'sequence': 0},
+            {'kind': 'property_change', 'id': 'future', 'node_id': 'P', 'property_id': 'clothes',
+             'value': '未来衣服', 'event_id': 'E2', 'op': 'set', 'sequence': 0}]}
 
 
 def test_metadata_bounds_support_latest_and_explicit_cut_without_visible_plot():
@@ -45,7 +45,7 @@ def test_metadata_bounds_support_latest_and_explicit_cut_without_visible_plot():
     current, past, future = view.records
     assert view.record_visible(current) and view.record_visible(current, view.rank('E1'))
     assert not view.record_visible(past) and not view.record_visible(future)
-    assert view.record_key(current) == view.rank('E0')
+    assert view.record_key(current) == (view.rank('E0'),1)
     assert view.record_visible(current, view.rank('E0'))
     assert not view.record_visible(current, view.rank('E2'))
 
@@ -80,3 +80,25 @@ def test_metadata_ranks_follow_local_moves_and_upgrade_to_real_imported_point():
     assert upgraded.record_visible(upgraded.records[0], upgraded.rank('E1'))
     assert generation_state_visible(state, upgraded.records[0], 'E1')
     assert not generation_state_visible(state, upgraded.records[0], 'E2')
+
+
+def test_local_collection_projection_is_set_and_keeps_original_change_provenance():
+    from narrative.adaptation_state import current_rows
+
+    state=snapshot()
+    state['properties']=[
+        {'kind':'property_definition','id':'stock','value_type':'string','cardinality':'many'},
+        {'kind':'property_change','id':'stock-set','node_id':'P','property_id':'stock','event_id':'E0','sequence':0,'op':'set','value':['纸','笔']},
+        {'kind':'property_change','id':'stock-remove','node_id':'P','property_id':'stock','event_id':'E1','sequence':0,'op':'remove','value':['纸']},
+        {'kind':'property_definition','id':'持有者','value_type':'either','cardinality':'one','semantic':'item_holder'},
+        {'kind':'property_change','id':'holder-unknown','node_id':'P','property_id':'持有者','event_id':'E1','sequence':1,'op':'unknown'},
+    ]
+    before=copy.deepcopy(state)
+    rows=current_rows(state)
+    stock=next(row for row in rows if row['property_id']=='stock')
+    assert stock['op']=='set' and stock['derived'] and stock['value']==['笔']
+    assert [change['op'] for change in stock['provenance']]==['set','remove']
+    unknown=next(row for row in rows if row['property_id']=='持有者')
+    assert unknown['state_kind']=='unknown' and unknown['active_change_ids']==['holder-unknown']
+    assert 'value' not in unknown
+    assert state==before

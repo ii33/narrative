@@ -27,7 +27,8 @@ def test_defaults_plain_text_override_reset_stale_and_project_isolation(project,
     assert other.load_prompt_settings() == original
     with pytest.raises(ValueError, match="已变化"):
         project.save_prompt_override("extraction", "过期写入", 0)
-    assert project.load_prompt_settings() == changed
+    persisted = project.load_prompt_settings()
+    assert changed["status"] == "accepted" and {key: changed[key] for key in persisted} == persisted
     restored = save(project, "extraction", None)
     entry = next(row for row in restored["prompts"] if row["id"] == "extraction")
     assert not entry["overridden"] and entry["effective"] == entry["default"]
@@ -69,7 +70,8 @@ def test_cli_mcp_share_override_read_and_restore(project, tmp_path, capsys):
     reply = mcp_server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
         "name": "load_prompt_settings", "arguments": {}}}, default_project=str(entry))
     assert not reply["result"]["isError"]
-    assert json.loads(reply["result"]["content"][0]["text"]) == cli
+    persisted = json.loads(reply["result"]["content"][0]["text"])
+    assert cli["status"] == "accepted" and {key: cli[key] for key in persisted} == persisted
     assert effective_prompt(project, "system") == "CLI自定工作流"
 
 

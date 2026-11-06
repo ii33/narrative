@@ -34,11 +34,11 @@ def seed_event_duplicates(ops):
         {'kind': 'property_definition', 'id': '结构信息', 'value_type': 'any', 'cardinality': 'one'},
     ]
     disclosure = {'source_id': sid, 'start': TEXT.index(Q1)}
-    base = {'kind': 'property_value', 'event_id': source['id'], 'disclosure': disclosure,
+    base = {'kind': 'property_change', 'op': 'set', 'event_id': source['id'], 'disclosure': disclosure,
             'evidence': {'source_id': sid, 'quote': Q1 + Q2 + Q3}}
     records = [
         base | {'id': 'v_anchor', 'node_id': person_a, 'property_id': '经历', 'value': '与乙握手',
-                'applies_to': source['id'], 'related_nodes': [person_b, source['id']]},
+                'related_nodes': [person_b, source['id']]},
         base | {'id': 'v_subject', 'node_id': source['id'], 'property_id': '标注', 'value': '同一事件旧副本'},
         base | {'id': 'v_target', 'node_id': person_a, 'property_id': '事件指向', 'value': source['id']},
         base | {'id': 'v_literal', 'node_id': person_a, 'property_id': '原编号文字', 'value': source['id']},

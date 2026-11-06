@@ -147,8 +147,8 @@ class GraphProfileFacade:
     def catalog(self) -> list[dict]:
         return self.profile.catalog()
 
-    def save(self, settings: dict) -> dict:
-        return self.profile.save(settings)
+    def save(self, settings: dict, *, api_key=None, clear_api_key=False) -> dict:
+        return self.profile.save(settings, api_key=api_key, clear_api_key=clear_api_key)
 
     def set_title(self, title: str) -> None:
         self.profile.set_title(title)

@@ -4,6 +4,8 @@ import QtQuick.Layouts
 
 Dialog {
     id:editor
+    SubmissionState{id:contentSubmission;identityKey:editor.childKind+":"+(editor.object.id||"new");owner:editor;operation:"apply_screenplay_structure";target:({screenplay_id:editor.host.screenplay.id||null});onRestoreRequested:function(a){var c=a.actions[0]||{},v=c.changes||c;titleField.text=v.title||"";number.text=v.number||"1";brief.text=JSON.stringify(v.brief||{},null,2);duration.text=v.target_duration_seconds?String(v.target_duration_seconds):"";editor.childKind=c.op.indexOf("episode")>=0?"episode":"act";editor.object=Object.assign({},editor.object,{id:c.op.indexOf("create_")===0?"":c.episode_id||c.act_id||"",revision:c.expected_revision});if(c.op==="create_act")parentChoice.currentIndex=Math.max(0,editor.parentChoices.findIndex(function(x){return x.id===c.episode_id}))}}
+
     objectName:"scriptStructureEditor"
     property var host
     property string childKind:"act"
@@ -19,7 +21,8 @@ Dialog {
     }
     title:object.id?"编辑 / 移动结构对象":"新建结构对象"
     modal:true;anchors.centerIn:parent;width:Math.min(650,host.width-40)
-    function openFor(kind,value){childKind=kind;object=value||({});titleField.text=object.title || "";number.text=object.number||"1";brief.text=JSON.stringify(object.brief||{},null,2);duration.text=object.target_duration_seconds?String(object.target_duration_seconds):"";errorText="";var entry=host.entries.find(function(e){return e.child_kind===kind&&e.child_id===editor.object.id});parentChoice.currentIndex=entry?Math.max(0,parentChoices.findIndex(function(p){return p.kind===entry.parent_kind&&p.id===entry.parent_id})):0;open()}
+    function openFor(kind,value){
+        if(visible&&!contentSubmission.restoring)contentSubmission.begin();childKind=kind;object=value||({});titleField.text=object.title || "";number.text=object.number||"1";brief.text=JSON.stringify(object.brief||{},null,2);duration.text=object.target_duration_seconds?String(object.target_duration_seconds):"";errorText="";var entry=host.entries.find(function(e){return e.child_kind===kind&&e.child_id===editor.object.id});parentChoice.currentIndex=entry?Math.max(0,parentChoices.findIndex(function(p){return p.kind===entry.parent_kind&&p.id===entry.parent_id})):0;open()}
     function save(){
         try{
             var actions=[],parent=parentChoice.model[parentChoice.currentIndex]
@@ -41,6 +44,8 @@ Dialog {
     function remove(){var parent=parentChoice.model[parentChoice.currentIndex];var action={op:childKind==="episode"?"delete_episode":"delete_act",expected_revision:object.revision,move_to:parent?{parent_kind:parent.kind,parent_id:parent.id}:null};action[childKind+"_id"]=object.id;host.structure([action])}
     function moveSibling(entry,delta){var siblings=host.entries.filter(function(e){return e.parent_kind===entry.parent_kind&&e.parent_id===entry.parent_id}).sort(function(a,b){return a.position-b.position});var index=siblings.findIndex(function(e){return e.id===entry.id}),target=index+delta;if(target<0||target>=siblings.length)return;var after=delta<0?(target>0?siblings[target-1].id:null):siblings[target].id;host.structure([{op:"move",child_kind:entry.child_kind,child_id:entry.child_id,parent_kind:entry.parent_kind,parent_id:entry.parent_id,after_entry_id:after}])}
     contentItem:ColumnLayout{
+        SubmissionFeedback{state:contentSubmission}
+
         enabled:!editor.host.structureBusy
         Label{visible:!!editor.errorText;text:editor.errorText;color:t.bad;wrapMode:Text.Wrap;Layout.fillWidth:true}
         Label{text:({episode:"集",act:"幕",segment:"段落"}[editor.childKind] || "结构")+" · "+(editor.object.title||"新建");color:t.muted}

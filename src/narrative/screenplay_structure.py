@@ -1,6 +1,7 @@
 """The single authoritative strict screenplay / episode / act / segment tree."""
 from __future__ import annotations
 
+from .content_errors import ContentGuardError
 from .screenplay_store import new_id, now, object_fields
 
 KIND_TABLE = {"screenplay": "screenplays", "episode": "script_episodes", "act": "script_acts", "segment": "script_segments"}
@@ -9,7 +10,7 @@ KIND_TABLE = {"screenplay": "screenplays", "episode": "script_episodes", "act": 
 def require(state, kind, identifier):
     row = state[KIND_TABLE[kind]].get(identifier)
     if not row:
-        raise ValueError(f"{kind}对象不存在")
+        raise ContentGuardError(f"{kind}对象不存在")
     return row
 
 

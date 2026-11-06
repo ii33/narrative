@@ -77,8 +77,8 @@ def test_general_prompt_declares_user_workflow_and_reading_separate_from_writing
         SCREENPLAY_WRITING_PROMPT_VERSION,
     )
 
-    assert ASSISTANT_VERSION == 'conversation-agent/26'
-    assert SCREENPLAY_WRITING_PROMPT_VERSION == 'screenplay-writing-ui/8'
+    assert ASSISTANT_VERSION == 'conversation-agent/35'
+    assert SCREENPLAY_WRITING_PROMPT_VERSION == 'screenplay-writing-ui/9'
     for phrase in ('固定创作阶段', '全部原文', '考据', '参考', '设定', '备注', '只修改用户明确指定'):
         assert phrase in CONVERSATION_SYSTEM_PROMPT
     assert '可查阅参考' in SCREENPLAY_SCENE_TABLE_RULES

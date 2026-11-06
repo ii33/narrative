@@ -23,14 +23,19 @@ def test_deleted_local_event_is_reference_despite_old_outcome_and_draft(tmp_path
     assert "辞职录音" in context["unit"]["blocks"][0]["payload"]["text"]
     assert {"original", "source_adaptation", "previous_chat", "old_drafts"} <= set(scope["reference_only"])
     assert scope["plot_authority"] == ["specified_screenplay_timeline_and_bound_range", "consistent_current_scene_plan"]
-    assert context["project_style"] == fixture["project_style"] == context["reference_context"]["project_style"]
+    assert context["project_style"] == ops.load_effective_creative_style(fixture["screenplay_id"])
+    assert context["project_style"] == context["reference_context"]["project_style"]
+    assert fixture["project_style"]["text"] in context["project_style"]["text"]
+    assert context["creative_agreement"]["sources"]["tone"] == "script"
     assert context["reference_context"]["creation_scope"] == scope
     assert "本剧本当前独立事件线" in context["reference_policy"]["guidance"]
 
 
 def test_writing_defaults_distinguish_plot_scope_from_artistic_expression():
+    versions = {"system": "5", "writing": "4", "batch_writing": "4",
+                "unit_writing_shortcut": "3", "batch_writing_shortcut": "3"}
     for key in ("system", "scene_table", "writing", "scene_policy", "batch_writing", "scene_table_shortcut", "unit_writing_shortcut", "batch_writing_shortcut", "reference_policy"):
-        assert DEFAULT_PROMPTS[key]["version"] == "2"
+        assert DEFAULT_PROMPTS[key]["version"] == versions.get(key, "2")
         assert "事件线" in DEFAULT_PROMPTS[key]["text"]
     writing = DEFAULT_PROMPTS["writing"]["text"]
     assert "大胆重构对白、动作与场景细节" in writing

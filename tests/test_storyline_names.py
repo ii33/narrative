@@ -8,7 +8,7 @@ import pytest
 from agent_fixtures import project as project
 from pydantic import ValidationError
 
-from narrative.assistant import ASSISTANT_VERSION, _first_prompt
+from narrative.assistant import _first_prompt
 from narrative.extraction_draft import RESULT_SCHEMA
 from narrative.graph_models import Node
 from narrative.graph_store import GRAPH_SCHEMA_VERSION
@@ -34,8 +34,7 @@ def test_current_node_and_tool_contracts_have_no_provisional_field(project):
     schema=project.get_schema()
     assert "provisional_name" not in json.dumps(schema)
     assert schema["contract_version"] == "graph-nesting/11"
-    assert schema["schema_version"] == GRAPH_SCHEMA_VERSION == 10
-    assert ASSISTANT_VERSION == "conversation-agent/26"
+    assert schema["schema_version"] == GRAPH_SCHEMA_VERSION == 11
     assert "直接用清晰概括名，未完也不加暂称" in _first_prompt("提取")
 
 
@@ -81,5 +80,5 @@ def test_new_project_persists_only_one_unchanged_name_per_node(project):
     assert next(row["name"] for row in nodes if row["node_type"] == "big_event") == "甲进出屋"
     with project.project.store.connect() as db:
         stored=[json.loads(row[0]) for row in db.execute("SELECT data FROM objects WHERE kind='node'")]
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 11
     assert all("provisional_name" not in row for row in stored)

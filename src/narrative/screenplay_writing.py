@@ -7,7 +7,16 @@ import json
 
 from pydantic import TypeAdapter
 
+from .content_errors import (
+    ContentConflictError,
+    ContentGuardError,
+    content_guard,
+    content_item,
+    content_write,
+    validate_content,
+)
 from .screenplay_writing_models import (
+    PAYLOADS,
     BlockChange,
     BlockDraft,
     EntityUsage,
@@ -37,7 +46,7 @@ def _fingerprint(value):
 def _get(state, table, identifier):
     result = state[table].get(identifier)
     if result is None:
-        raise ValueError(f"对象不存在：{table}/{identifier}")
+        raise ContentGuardError(f"对象不存在：{table}/{identifier}")
     return result
 
 
@@ -83,6 +92,27 @@ def _entity(adaptation, identifier, types=None):
         raise ValueError(f"剧本实体引用不存在或类型错误：{identifier}")
     return node
 
+
+
+def _plan_content_refs(plan, timeline, path):
+    if plan.get('location_id'):
+        with content_item([*path, 'location_id']):
+            _entity(timeline, plan['location_id'], {'location'})
+    for index, identifier in enumerate(plan.get('cast_ids', [])):
+        with content_item([*path, 'cast_ids', index]):
+            _entity(timeline, identifier, {'person', 'group'})
+    for index, requirement in enumerate(plan.get('continuity_requirements', [])):
+        if requirement.get('entity_id'):
+            with content_item([*path, 'continuity_requirements', index, 'entity_id']):
+                _entity(timeline, requirement['entity_id'])
+
+
+def _block_content_refs(block, timeline, path):
+    payload = block.get('payload', {})
+    field = 'speaker_id' if block.get('type') == 'dialogue' else 'entity_id' if block.get('type') == 'sound' else None
+    if field and payload.get(field):
+        with content_item([*path, 'payload', field]):
+            _entity(timeline, payload[field], {'person', 'group'} if field == 'speaker_id' else None)
 
 def _segment_timeline(state, source_adaptation, segment_id):
     from .screenplay_timeline import screenplay_timeline
@@ -214,7 +244,8 @@ def _dependencies(state, adaptation, refs, screenplay_id, effective_node_ids=Non
             elif kind == "unit_body":
                 value = {"blocks": _normalized(_blocks(state, identifier)), "enabled": obj["enabled"]}
             elif kind == "screenplay":
-                value = {key: obj.get(key) for key in ("creative_brief", "language", "target_duration_seconds")}
+                from .project_style import agreement_context
+                value = {"creative_agreement": agreement_context(adaptation, obj), "language": obj.get("language"), "target_duration_seconds": obj.get("target_duration_seconds")}
             else:
                 value = {key: obj.get(key) for key in ("brief", "role", "target_duration_seconds", "enabled")}
         result.append({"kind": kind, "id": identifier, "input": value}
@@ -225,10 +256,15 @@ def _dependencies(state, adaptation, refs, screenplay_id, effective_node_ids=Non
 def _context(state, adaptation, segment_id, unit_id=None, dependency_refs=None, *, allow_unusable=False):
     from .screenplay_spans import resolve_span
     segment = _get(state, "script_segments", segment_id)
+    from .project_style import agreement_context, effective_style
     from .prompt_defaults import DEFAULT_PROMPTS
-    project_style = copy.deepcopy(adaptation.get("_project_style", {"revision": 0, "text": ""}))
+    screenplay = state["screenplays"][segment["screenplay_id"]]
+    project_style = effective_style(adaptation, screenplay)
+    creative_agreement = agreement_context(adaptation, screenplay)
+    creative_defaults = copy.deepcopy(adaptation.get("_creative_defaults", {"fields": {"other": adaptation.get("_project_style", {}).get("text", "")}}))
     prompt_texts = adaptation.get("_prompt_config", {}).get("texts") or {key: row["text"] for key, row in DEFAULT_PROMPTS.items()}
     adaptation = _segment_timeline(state, adaptation, segment_id)
+    adaptation["_creative_defaults"] = creative_defaults
     resolved = resolve_span(adaptation, _get(state, "adaptation_spans", segment["span_id"]))
     unit = _get(state, "script_units", unit_id) if unit_id else None
     refs = _default_dependencies(state, segment, unit) if dependency_refs is None else (
@@ -244,7 +280,7 @@ def _context(state, adaptation, segment_id, unit_id=None, dependency_refs=None, 
             from .screenplay_spans import generation_node
             projected = generation_node(adaptation, _entity(adaptation, identifier), resolved["effective_node_ids"])
             if projected is None or projected.get("reference_only"):
-                raise ValueError("本场实体已屏蔽或不属于可用生成内容")
+                raise ContentConflictError("本场实体已屏蔽或不属于可用生成内容")
             entities.append(projected)
         except ValueError:
             if not allow_unusable:
@@ -255,23 +291,23 @@ def _context(state, adaptation, segment_id, unit_id=None, dependency_refs=None, 
     bound_events = list(unit["plan"].get("source_event_ids", [])) if unit else []
     invalid_events = [identifier for identifier in bound_events if identifier not in effective_events]
     if invalid_events and not allow_unusable:
-        raise ValueError("本场场表引用的剧本事件已删除、屏蔽或不在指定范围，请先修正本场场表；旧正文已保留")
+        raise ContentConflictError("本场场表引用的剧本事件已删除、屏蔽或不在指定范围，请先修正本场场表；旧正文已保留")
     creation_scope = {"screenplay_id": segment["screenplay_id"], "timeline_id": adaptation["timeline_id"],
         "segment_id": segment_id, "unit_id": unit_id,
         "effective_event_ids": [identifier for identifier in (bound_events or effective_events) if identifier in effective_events],
         "plan_event_binding": "explicit" if bound_events else "plan_and_range", "current_scene_plan": plan_input,
         "plot_authority": ["specified_screenplay_timeline_and_bound_range", "consistent_current_scene_plan"],
-        "expression_authority": ["current_user_request", "project_style", "screenplay_creative_brief", "segment_and_scene_creative_requirements"],
+        "expression_authority": ["current_user_request", "creative_agreement", "segment_and_scene_creative_requirements"],
         "invalid_event_ids": invalid_events,
         "reference_only": ["original", "extraction", "source_adaptation", "other_screenplay_timelines", "previous_chat", "old_drafts"]}
-    context_input = {"fingerprint_version": 3, "timeline_id": adaptation["timeline_id"],
-                     "dependencies": inputs, "plan_entities": entities, "project_style": project_style,
+    context_input = {"fingerprint_version": 4, "timeline_id": adaptation["timeline_id"],
+                     "dependencies": inputs, "plan_entities": entities, "project_style": project_style, "creative_agreement": creative_agreement,
                      "creation_scope": creation_scope}
     return {"segment_id": segment_id, "unit_id": unit_id, "timeline_id": adaptation["timeline_id"], "span": resolved,
             "span_fingerprint": resolved["span_fingerprint"], "context_fingerprint": _fingerprint(context_input),
             "plan_fingerprint": _fingerprint(plan_input) if unit else None, "dependency_refs": refs,
             "reference_context": context_input, "plan_input": plan_input,
-            "project_style": project_style, "creation_scope": creation_scope,
+            "project_style": project_style, "creative_agreement": creative_agreement, "creation_scope": creation_scope,
             "generation_allowed": resolved["status"] == "valid" and not invalid_events and (not unit or bool(unit["plan"]["summary"].strip())),
             "reference_policy": {"guidance": prompt_texts["reference_policy"]}}
 
@@ -329,13 +365,13 @@ def _touch_outline(segment):
 
 def _check_context(context, *, span_fingerprint, context_fingerprint, plan_fingerprint=None):
     if not context["generation_allowed"]:
-        raise ValueError("绑定范围invalid/empty或场次概要为空，不能提交新的生成结果；旧正文已保留")
+        raise ContentConflictError("绑定范围invalid/empty或场次概要为空，不能提交新的生成结果；旧正文已保留")
     if context["span_fingerprint"] != span_fingerprint:
-        raise ValueError("写作范围输入已变化，拒绝过期结果")
+        raise ContentConflictError("写作范围输入已变化，拒绝过期结果")
     if context["context_fingerprint"] != context_fingerprint:
-        raise ValueError("写作实际上下文依赖已变化，拒绝过期结果")
+        raise ContentConflictError("写作实际上下文依赖已变化，拒绝过期结果")
     if plan_fingerprint is not None and context["plan_fingerprint"] != plan_fingerprint:
-        raise ValueError("本场plan输入已变化，拒绝过期结果")
+        raise ContentConflictError("本场plan输入已变化，拒绝过期结果")
 
 
 def _save_basis(state, target_kind, target_id, context, reason, manifest_ref=None, task_id=None):
@@ -349,7 +385,7 @@ def _save_basis(state, target_kind, target_id, context, reason, manifest_ref=Non
         stage="body" if target_kind == "unit" else "scene_table", span_fingerprint=context["span_fingerprint"],
         context_fingerprint=context["context_fingerprint"], plan_fingerprint=context["plan_fingerprint"],
         fingerprint_version=context["reference_context"]["fingerprint_version"],
-        dependency_refs=context["dependency_refs"], project_style=context["project_style"], creation_scope=context["creation_scope"],
+        dependency_refs=context["dependency_refs"], project_style=context["project_style"], creative_agreement=context["creative_agreement"], creation_scope=context["creation_scope"],
         manifest_ref=manifest_ref, task_id=task_id, reason=reason).model_dump(mode="json")
     target = state["script_units" if target_kind == "unit" else "script_segments"][target_id]
     target["body_basis_id" if target_kind == "unit" else "outline_basis_id"] = identifier
@@ -360,7 +396,7 @@ def _place(state, table, parent_key, parent_id, identifier, after_id):
     rows = sorted((row for row in state[table].values() if row[parent_key] == parent_id and row["id"] != identifier), key=lambda row: row["position"])
     index = 0 if after_id is None else next((index + 1 for index, row in enumerate(rows) if row["id"] == after_id), -1)
     if index < 0 or after_id == identifier:
-        raise ValueError("排序参照不存在、跨所属对象或指向自身")
+        raise ContentGuardError("排序参照不存在、跨所属对象或指向自身")
     rows.insert(index, state[table][identifier])
     for index, row in enumerate(rows, 1):
         row["position"] = index * 1024
@@ -448,7 +484,7 @@ def _target_blocks(state, unit_id, target_block_ids):
         raise ValueError("target_block_ids须为明确唯一ID清单")
     for identifier in target_block_ids:
         if _get(state, "script_blocks", identifier)["unit_id"] != unit_id:
-            raise ValueError("正文目标块不属于当前场")
+            raise ContentGuardError("正文目标块不属于当前场")
     return set(target_block_ids)
 
 
@@ -470,15 +506,24 @@ class WritingOperationsMixin:
         return context | {"segment": segment, "expected_outline_revision": segment["outline_revision"],
                           "scene_table_policy": scene_table_policy(context["span"], prompt_snapshot(self))}
 
+    @content_write
     def submit_scene_table(self, segment_id, units, expected_outline_revision, span_fingerprint,
                            context_fingerprint, *, dependency_refs=None, manifest_ref=None, task_id=None, reason):
         from .screenplay_store import expect_revision, write_transaction
-        drafts = TypeAdapter(list[UnitDraft]).validate_python(units)
         def mutate(state, adaptation, _db):
             segment = _get(state, "script_segments", segment_id)
             expect_revision(segment, expected_outline_revision, "outline_revision")
             context = _context(state, adaptation, segment_id, dependency_refs=dependency_refs)
             _check_context(context, span_fingerprint=span_fingerprint, context_fingerprint=context_fingerprint)
+            if isinstance(units, list):
+                for row in units:
+                    old = state['script_units'].get(row.get('id')) if isinstance(row, dict) and isinstance(row.get('id'), str) else None
+                    if old and old['segment_id'] != segment_id:
+                        raise ContentGuardError('场次不能跨段更新')
+            drafts = validate_content(TypeAdapter(list[UnitDraft]), units, 'units')
+            timeline = _segment_timeline(state, adaptation, segment_id)
+            for index, draft in enumerate(drafts):
+                _plan_content_refs(draft.plan.model_dump(), timeline, ['units', index, 'plan'])
             from .screenplay_scene_policy import prepare_generated_scene_table
             prepared = prepare_generated_scene_table([draft.model_dump(mode="json") for draft in drafts], context["span"])
             old_ids = {unit["id"] for unit in _units(state, segment_id)}
@@ -489,7 +534,7 @@ class WritingOperationsMixin:
                 if draft["id"]:
                     unit = _get(state, "script_units", draft.pop("id"))
                     if unit["segment_id"] != segment_id:
-                        raise ValueError("场次不能跨段更新")
+                        raise ContentGuardError("场次不能跨段更新")
                     _update_unit(unit, draft)
                     unit["position"] = index * 1024
                 else:
@@ -499,27 +544,38 @@ class WritingOperationsMixin:
             return writing_segment_view(state, adaptation, segment_id) | {"status": "accepted"}
         return write_transaction(self, reason, mutate)
 
+    @content_write
     def apply_scene_table_changes(self, segment_id, changes, expected_outline_revision, *, reason):
         from .screenplay_store import expect_revision, write_transaction
-        edits = TypeAdapter(list[UnitChange]).validate_python(changes)
         def mutate(state, adaptation, _db):
             segment = _get(state, "script_segments", segment_id)
             expect_revision(segment, expected_outline_revision, "outline_revision")
-            for model in edits:
+            if isinstance(changes, list):
+                for row in changes:
+                    old = state['script_units'].get(row.get('unit_id')) if isinstance(row, dict) and isinstance(row.get('unit_id'), str) else None
+                    if old and old['segment_id'] != segment_id:
+                        raise ContentGuardError('场表操作不能扩大到别段')
+            edits = validate_content(TypeAdapter(list[UnitChange]), changes, 'changes')
+            timeline = _segment_timeline(state, adaptation, segment_id)
+            for index, model in enumerate(edits):
                 action = model.model_dump(mode="json", exclude_unset=True)
                 op = action["op"]
                 if op == "insert":
+                    _plan_content_refs(action['unit']['plan'], timeline, ['changes', index, 'unit', 'plan'])
                     identifier = _create_unit(state, segment_id, action["unit"], 0)
                     _place(state, "script_units", "segment_id", segment_id, identifier, action.get("after_id"))
                 else:
                     unit = _get(state, "script_units", action["unit_id"])
                     if unit["segment_id"] != segment_id:
-                        raise ValueError("场表操作不能扩大到别段")
+                        raise ContentGuardError("场表操作不能扩大到别段")
                     if op == "update":
                         patch = action["changes"]
                         if any(value is None for key, value in patch.items() if key != "scene_number"):
                             raise ValueError("场次字段不可设为null（scene_number除外）")
-                        _update_unit(unit, patch)
+                        if 'plan' in patch:
+                            _plan_content_refs(patch['plan'], timeline, ['changes', index, 'changes', 'plan'])
+                        with content_item(['changes', index, 'changes'], patch):
+                            _update_unit(unit, patch)
                     elif op == "move":
                         _place(state, "script_units", "segment_id", segment_id, unit["id"], action.get("after_id"))
                         unit["revision"] += 1
@@ -553,27 +609,38 @@ class WritingOperationsMixin:
             "unit": writing_unit_view(state, adaptation, unit_id), "expected_plan_revision": unit["plan_revision"],
             "expected_body_revision": unit["body_revision"], "target_block_ids": target_block_ids}
 
+    @content_write
     def submit_script_unit(self, unit_id, blocks, expected_plan_revision, expected_body_revision,
                            span_fingerprint, context_fingerprint, plan_fingerprint, *, dependency_refs=None,
                            manifest_ref=None, task_id=None, entity_usages=None, reason):
         from .screenplay_store import expect_revision, new_id, now, write_transaction
-        drafts = TypeAdapter(list[BlockDraft]).validate_python(blocks)
-        if not drafts:
-            raise ValueError("清空正文须使用显式正文块删除操作；生成提交不得为空")
         def mutate(state, adaptation, _db):
             unit = _get(state, "script_units", unit_id)
             expect_revision(unit, expected_plan_revision, "plan_revision")
             expect_revision(unit, expected_body_revision, "body_revision")
             context = _context(state, adaptation, unit["segment_id"], unit_id, dependency_refs)
             _check_context(context, span_fingerprint=span_fingerprint, context_fingerprint=context_fingerprint, plan_fingerprint=plan_fingerprint)
+            if isinstance(blocks, list):
+                for row in blocks:
+                    old = state['script_blocks'].get(row.get('id')) if isinstance(row, dict) and isinstance(row.get('id'), str) else None
+                    if old and old['unit_id'] != unit_id:
+                        raise ContentGuardError('正文块属于别场')
+            drafts = validate_content(TypeAdapter(list[BlockDraft]), blocks, 'blocks', payload_fields={kind: set(model.model_fields) for kind, model in PAYLOADS.items()})
+            if not drafts:
+                raise ValueError("清空正文须使用显式正文块删除操作；生成提交不得为空")
+            timeline = _segment_timeline(state, adaptation, unit['segment_id'])
+            for index, draft in enumerate(drafts):
+                _block_content_refs(draft.model_dump(), timeline, ['blocks', index])
             old_blocks = copy.deepcopy(_blocks(state, unit_id))
             old_ids = {block["id"] for block in old_blocks}
             seen = set()
             for index, model in enumerate(drafts, 1):
                 draft = model.model_dump(mode="json")
                 identifier = draft.pop("id") or new_id("block")
-                if identifier in seen or identifier in state["script_blocks"] and identifier not in old_ids:
-                    raise ValueError("正文块ID重复或属于别场")
+                if identifier in seen:
+                    raise ValueError("正文块ID重复")
+                if identifier in state["script_blocks"] and identifier not in old_ids:
+                    raise ContentGuardError("正文块属于别场")
                 if model.id and identifier not in old_ids:
                     raise ValueError("新正文块ID由程序分配")
                 seen.add(identifier)
@@ -588,19 +655,27 @@ class WritingOperationsMixin:
             return writing_unit_view(state, adaptation, unit_id) | {"status": "accepted"}
         return write_transaction(self, reason, mutate)
 
+    @content_write
     def apply_script_block_changes(self, unit_id, changes, target_block_ids, expected_body_revision, *, reason):
         from .screenplay_store import expect_revision, new_id, now, write_transaction
-        edits = TypeAdapter(list[BlockChange]).validate_python(changes)
         def mutate(state, adaptation, _db):
             unit = _get(state, "script_units", unit_id)
             expect_revision(unit, expected_body_revision, "body_revision")
             targets = _target_blocks(state, unit_id, target_block_ids)
+            if isinstance(changes, list):
+                for row in changes:
+                    if isinstance(row, dict) and row.get('op') in ('update', 'move', 'delete') and isinstance(row.get('block_id'), str) and row['block_id'] not in targets:
+                        raise ContentGuardError('局部正文修改不得覆盖非目标块')
+            edits = validate_content(TypeAdapter(list[BlockChange]), changes, 'changes', payload_fields={kind: set(model.model_fields) for kind, model in PAYLOADS.items()})
             if not edits:
                 return writing_unit_view(state, adaptation, unit_id) | {"status": "accepted"}
             old_blocks = copy.deepcopy(_blocks(state, unit_id))
-            for model in edits:
+            timeline = _segment_timeline(state, adaptation, unit["segment_id"])
+            for index, model in enumerate(edits):
                 action = model.model_dump(mode="json", exclude_unset=True)
                 op = action["op"]
+                if op in ('insert', 'update'):
+                    _block_content_refs(action['block'], timeline, ['changes', index, 'block'])
                 if op == "insert":
                     draft = BlockDraft.model_validate(action["block"]).model_dump(mode="json")
                     if draft.pop("id"):
@@ -611,7 +686,7 @@ class WritingOperationsMixin:
                 else:
                     identifier = action["block_id"]
                     if identifier not in targets:
-                        raise ValueError("局部正文修改不得覆盖非目标块")
+                        raise ContentGuardError("局部正文修改不得覆盖非目标块")
                     block = _get(state, "script_blocks", identifier)
                     if op == "update":
                         draft = BlockDraft.model_validate(action["block"]).model_dump(mode="json")
@@ -701,7 +776,7 @@ class WritingOperationsMixin:
     def prepare_script_writing_task(self, target, prompt=""):
         from .screenplay_store import read_context
         state, _adaptation = read_context(self)
-        if not isinstance(target, dict) or target.get("kind") not in {"screenplay", "episode", "act", "segment", "scene_table", "unit", "blocks"}:
+        if not isinstance(target, dict) or target.get("kind") not in {"screenplay", "episode", "act", "segment", "scene_table", "unit", "blocks", "storyboard"}:
             raise ValueError("写作任务须显式指定目标kind及ids")
         ids = target.get("ids")
         if not isinstance(ids, list) or not ids or any(not isinstance(identifier, str) for identifier in ids) or len(set(ids)) != len(ids):
@@ -716,7 +791,9 @@ class WritingOperationsMixin:
             if option in target and not isinstance(target[option], bool):
                 raise ValueError("写作任务选项须为boolean")
         segment_ids, unit_ids, block_ids = [], [], []
-        if kind in {"unit", "blocks"}:
+        if kind == "storyboard" and len(ids) != 1:
+            raise ValueError("分镜任务须指定一个场次")
+        if kind in {"unit", "blocks", "storyboard"}:
             if kind == "blocks":
                 block_ids = list(ids)
                 unit_ids = list(dict.fromkeys(_get(state, "script_blocks", identifier)["unit_id"] for identifier in ids))
@@ -746,21 +823,24 @@ class WritingOperationsMixin:
         screenplay = _get(state, "screenplays", screenplays[0])
         if manifest is not None and manifest.get("timeline_id", screenplay["timeline_id"]) != screenplay["timeline_id"]:
             raise ValueError("批量清单不属于目标剧本时间线")
+        from .project_style import agreement_context, effective_style
         result = {"target": copy.deepcopy(target), "screenplay_id": screenplays[0], "segment_ids": segment_ids,
-                  "timeline_id": screenplay["timeline_id"], "project_style": copy.deepcopy(_adaptation["_project_style"]),
+                  "timeline_id": screenplay["timeline_id"], "project_style": effective_style(_adaptation, screenplay),
+                  "creative_agreement": agreement_context(_adaptation, screenplay),
                   "unit_ids": unit_ids, "block_ids": block_ids, "prompt": str(prompt),
                   "include_existing": manifest["include_existing"] if manifest else bool(target.get("include_existing", False))}
         if manifest is not None:
             result["target_manifest"] = copy.deepcopy(manifest)
-        if kind not in {"blocks", "unit", "scene_table"}:
+        if kind not in {"blocks", "unit", "scene_table", "storyboard"}:
             result["target_manifest"] = self.prepare_script_writing_targets(screenplays[0], unit_ids,
                 include_existing=bool(target.get("include_existing", False)), include_screen_segments=bool(target.get("include_screen_segments", False)))
         from .prompt_settings import effective_prompt
         key = "scene_table" if kind == "scene_table" else "writing" if kind in {"unit", "blocks"} else "batch_writing"
-        result["instruction"] = effective_prompt(self, key)
+        result["instruction"] = effective_prompt(self, "storyboard" if kind == "storyboard" else key)
         return result
 
 
+@content_guard
 def _validate_target_manifest(manifest):
     if not isinstance(manifest, dict) or not isinstance(manifest.get("screenplay_id"), str):
         raise ValueError("批量目标manifest须含screenplay_id")
@@ -774,6 +854,7 @@ def _validate_target_manifest(manifest):
         raise ValueError("批量目标选项须为boolean")
 
 
+@content_guard
 def validate_script_writing_tool_call(task, name, args, ops=None):
     """Host guard over an immutable captured target, never mutable UI state."""
     from .tool_api import TOOLS
@@ -783,10 +864,18 @@ def validate_script_writing_tool_call(task, name, args, ops=None):
     if "project_style" in task:
         if ops is None:
             raise ValueError("写作提交须核对工程风格约定修订")
-        if ops.load_project_style() != task["project_style"]:
+        if ops.load_effective_creative_style(task["screenplay_id"]) != task["project_style"]:
             raise ValueError("项目风格约定已变化，本次写作依据已过期；请按新约定重新开始任务，旧正文未改动")
     segments, units, blocks = set(task["segment_ids"]), set(task["unit_ids"]), set(task["block_ids"])
     kind = task["target"]["kind"]
+    if kind == "storyboard":
+        if name not in {"apply_storyboard_changes", "generate_storyboard_sketch", "render_storyboard_style",
+                        "export_storyboard_script", "export_storyboard_panel", "generate_storyboard_panel", "generate_storyboard_panels",
+                        "export_storyboard_style_package", "set_storyboard_animation", "render_storyboard_animatic",
+                        "attach_storyboard_video", "detach_storyboard_video", "prepare_storyboard_video",
+                        "submit_storyboard_video", "refresh_storyboard_video"} or args.get("unit_id") not in units:
+            raise ValueError("分镜任务只能编辑当前场的镜头与关键帧")
+        return
     if name in {"submit_scene_table", "apply_scene_table_changes", "adopt_scene_table"}:
         if kind in {"blocks", "unit"} or args.get("segment_id") not in segments:
             raise ValueError("写作任务无权修改非目标场表")

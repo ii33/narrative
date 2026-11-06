@@ -24,7 +24,7 @@ def project(tmp_path, monkeypatch):
     draft["nodes"].append({"type": "location", "name": "门口", "quotes": ["甲在门口约好接乙。"]})
     draft["properties"].append({"node": "甲约好接乙", "property": "发生地点", "value": "门口",
         "value_type": "node", "scope": "world", "category": "空间与位置", "quotes": ["甲在门口约好接乙。"],
-        "at_event": "甲约好接乙"})
+        "at_event": "甲约好接乙", "op": "set"})
     source = ops.import_source("合成投影", text)
     assert ops.submit_extraction(source, draft)["status"] == "accepted"
     ops.sync_adaptation()
@@ -83,19 +83,18 @@ def test_property_intervals_false_zero_and_editor_shape(project):
     person = named(state, "甲")["id"]
     first = named(state, "甲约好接乙")["id"]
     last = named(state, "甲接到乙后离开")["id"]
-    state = project.set_adaptation_property(person, "开关", False, event_id=first)
-    row = next(row for row in state["properties"] if row.get("property_id") == "开关")
-    state = project.set_adaptation_property(person, "开关", 0, event_id=last, record_id=row["id"])
+    state = project.set_adaptation_property(person, "开关", first, "set", value=False)
+    state = project.set_adaptation_property(person, "开关", last, "set", value=0)
     old = next(row for row in project.adaptation_node_properties(person, cut=first)["properties"] if row["property_id"] == "开关")
     assert old["value"] is False
     new = next(row for row in project.adaptation_node_properties(person, cut=last)["properties"] if row["property_id"] == "开关")
     assert type(new["value"]) is int and new["value"] == 0
-    assert len(new["records"]) == 1
+    assert len(new["records"]) == 2
     editor = project.adaptation_node_editor(person, cut=first)
     assert editor["at_cut"] and editor["cut_name"] == "甲约好接乙"
     assert editor["later_count"] == 1
     assert editor["anchor_steps"] and editor["categories"]
-    assert next(row for row in editor["properties"] if row["property_id"] == "开关")["records"][0]["valid"]
+    assert next(row for row in editor["properties"] if row["property_id"] == "开关")["records"][0]["is_current"]
 
 
 def test_suppressed_nodes_are_manageable_but_never_contribute_effective_state(project):

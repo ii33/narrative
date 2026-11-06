@@ -30,13 +30,31 @@ def read_settings(store: ProviderStore, scope: str) -> dict:
     return HarnessSettings.model_validate_json(raw).model_dump()
 
 
-def write_settings(store: ProviderStore, scope: str, settings: dict) -> dict:
-    config = HarnessSettings.model_validate(settings)
-    profiles = _profiles(store, scope)
-    profiles.setdefault(read_settings(store, scope)["provider"], read_settings(store, scope))
+def write_profile_in_transaction(db, scope, config, namespace='main'):
+    table = namespace+'.provider_settings'
+    db.execute(f'CREATE TABLE IF NOT EXISTS {table} (project_id TEXT NOT NULL,key TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(project_id,key))')
+    def read(key):
+        row = db.execute(f'SELECT value FROM {table} WHERE project_id=? AND key=?', (scope, key)).fetchone()
+        if row is None and scope != GLOBAL_SCOPE:
+            row = db.execute(f'SELECT value FROM {table} WHERE project_id=? AND key=?', (GLOBAL_SCOPE, key)).fetchone()
+        return row[0] if row else None
+    profiles = json.loads(read('harness_profiles') or '{}')
+    raw_active = read('harness_settings')
+    active = HarnessSettings.model_validate_json(raw_active) if raw_active else HarnessSettings()
+    profiles.setdefault(active.provider, active.model_dump())
     profiles[config.provider] = config.model_dump()
-    store.put(scope, "harness_profiles", json.dumps(profiles, ensure_ascii=False))
-    store.put(scope, "harness_settings", config.model_dump_json())
+    for key, value in [('harness_profiles', json.dumps(profiles, ensure_ascii=False)), ('harness_settings', config.model_dump_json())]:
+        db.execute(f'INSERT INTO {table} VALUES(?,?,?) ON CONFLICT(project_id,key) DO UPDATE SET value=excluded.value', (scope, key, value))
+
+
+def write_settings(store: ProviderStore, scope: str, settings: dict, *, api_key=None, clear_api_key=False) -> dict:
+    from .provider_credentials import apply_credential, prepare_credential
+    config = HarnessSettings.model_validate(settings)
+    prepared = prepare_credential(scope, config.model_dump(), api_key, clear_api_key)
+    with store._connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        write_profile_in_transaction(db, scope, config)
+        apply_credential(db, scope, config.model_dump(), prepared)
     return config.model_dump()
 
 
@@ -82,8 +100,21 @@ class ProfileService:
     def settings(self, provider: str | None = None) -> dict:
         return settings_for(self.provider_store, self.project_id, provider)
 
-    def save(self, settings: dict) -> dict:
-        return write_settings(self.provider_store, self.project_id, settings)
+    def save(self, settings: dict, *, api_key=None, clear_api_key=False) -> dict:
+        return write_settings(self.provider_store, self.project_id, settings, api_key=api_key, clear_api_key=clear_api_key)
+
+    def credential_status(self, profile=None):
+        from .provider_credentials import public_status
+        source = profile if profile is not None else self.settings()
+        # Credential status depends on endpoint identity, not an unfinished model draft.
+        selected = {key: source[key] for key in ('provider', 'base_url', 'key_env') if key in source}
+        config = HarnessSettings.model_validate(selected | {'model': '__credential_status__'}).model_dump()
+        return public_status(self.provider_store, self.project_id, config)
+
+    def saved_api_key(self, profile):
+        from .provider_credentials import saved_key
+        config = HarnessSettings.model_validate(profile).model_dump()
+        return saved_key(self.provider_store, self.project_id, config)
 
     def catalog(self) -> list[dict]:
         from . import providers

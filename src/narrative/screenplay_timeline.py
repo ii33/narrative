@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 
 from .adaptation_operations import AdaptationOperationsMixin, _issues, _merge_source, _public
+from .content_errors import ContentGuardError, content_write
 from .screenplay_models import ScriptTimeline
 from .screenplay_store import expect_revision, new_id, now, read_context, write_transaction
 from .state_anchors import anchor_nodes, merge_anchors, selection_anchors
@@ -20,10 +21,10 @@ def new_script_timeline(screenplay_id, source):
 def _timeline_row(state, screenplay_id):
     screenplay = state["screenplays"].get(screenplay_id)
     if not screenplay:
-        raise ValueError("剧本不存在")
+        raise ContentGuardError("剧本不存在")
     row = state["script_timelines"].get(screenplay["timeline_id"])
     if not row or row["screenplay_id"] != screenplay_id:
-        raise ValueError("剧本独立时间线不存在或归属错误")
+        raise ContentGuardError("剧本独立时间线不存在或归属错误")
     return row
 
 
@@ -37,7 +38,7 @@ def screenplay_timeline(state, source_adaptation, screenplay_id):
 def timeline_owner(state, identifier):
     row = state["script_timelines"].get(identifier)
     if not row:
-        raise ValueError("剧本时间线不存在")
+        raise ContentGuardError("剧本时间线不存在")
     return row["screenplay_id"]
 
 
@@ -93,7 +94,7 @@ def _selection(source, moment_ids, local):
     boundary_ids = set()
     source_points = {**anchor_nodes(source), **nodes}
     cuts = [nodes[key]["sort_id"] for key in primary]
-    values = [r for r in source["properties"] if r.get("kind") == "property_value"]
+    values = [r for r in source["properties"] if r.get("kind") == "property_change"]
     definitions = {r["id"]: r for r in source["properties"] if r.get("kind") == "property_definition"}
     selected_values = set()
     def add(identifier):
@@ -102,20 +103,19 @@ def _selection(source, moment_ids, local):
                 boundary_ids.add(identifier)
             else:
                 included.add(identifier)
-    def start(row):
-        return source_points.get(row.get("event_id"), {}).get("sort_id", -1)
-    def end(row):
-        return source_points.get(row.get("end_event_id"), {}).get("sort_id", float("inf"))
     def relevant(row):
-        return row.get("event_id") in primary or any(start(row) <= cut < end(row) for cut in cuts)
+        point = source_points.get(row.get("event_id"))
+        return point is not None and bool(cuts) and point["sort_id"] <= max(cuts)
     def include_value(row):
         selected_values.add(row["id"])
-        for field in ("node_id", "event_id", "end_event_id", "holder_id", "applies_to"):
+        for field in ("node_id", "event_id", "holder_id", "applies_to"):
             add(row.get(field))
         for identifier in row.get("related_nodes", []):
             add(identifier)
         if definitions.get(row.get("property_id"), {}).get("value_type") in {"node", "either"}:
-            add(row.get("value"))
+            value = row.get("value")
+            for target in value if isinstance(value, list) else [value]:
+                add(target)
     while True:
         before = len(included), len(selected_values)
         for identifier in list(included):
@@ -137,14 +137,6 @@ def _selection(source, moment_ids, local):
             if row.get("event_id") in primary or (owner in included and
                 (owner in primary or nodes[owner]["node_type"] not in MOMENTS) and relevant(row)):
                 include_value(row)
-        for identifier in list(included):
-            if nodes[identifier]["node_type"] != "item" or nodes[identifier].get("retracted") or nodes[identifier].get("suppressed"):
-                continue
-            holders = [r for r in values if r.get("node_id") == identifier and r.get("scope", "world") == "world"
-                       and not r.get("holder_id") and not r.get("end_event_id")
-                       and (r.get("property_id") == "持有者" or definitions.get(r.get("property_id"), {}).get("semantic") == "item_holder")]
-            if holders:
-                include_value(max(holders, key=start))
         if before == (len(included), len(selected_values)):
             break
     existing = {n["id"] for n in local["nodes"]}
@@ -172,54 +164,7 @@ def _selection(source, moment_ids, local):
     return incoming, records, summary
 
 
-def source_points_for_intervals(source):
-    return {**anchor_nodes(source), **{node["id"]: node for node in source["nodes"]}}
-
-
-def _append_interval_check(local, added_property_ids, source_nodes, source_records):
-    """Reject new single-value interval overlap; never close authored values."""
-    nodes = {**anchor_nodes(local), **{node["id"]: node for node in local["nodes"]}}
-    definitions = {row["id"]: row for row in local["properties"] if row.get("kind") == "property_definition"}
-    source_values = {row["id"]: row for row in source_records if row.get("kind") == "property_value"}
-    source_by_id = {node["id"]: node for node in source_nodes}
-    diagnostics = []
-    groups = {}
-    for row in local["properties"]:
-        if row.get("kind") != "property_value" or definitions.get(row.get("property_id"), {}).get("cardinality", "one") != "one":
-            continue
-        key = row.get("node_id"), row.get("property_id"), row.get("scope") or "world", row.get("holder_id")
-        groups.setdefault(key, []).append(row)
-    def start(row):
-        return nodes.get(row.get("event_id"), {}).get("sort_id", float("-inf"))
-    def end(row):
-        return nodes.get(row.get("end_event_id"), {}).get("sort_id", float("inf"))
-    for rows in groups.values():
-        for row in (item for item in rows if item["id"] in added_property_ids):
-            for previous in rows:
-                if previous["id"] == row["id"] or (previous["id"] in added_property_ids and previous["id"] > row["id"]):
-                    continue
-                if max(start(row), start(previous)) < min(end(row), end(previous)):
-                    source_row, source_previous = source_values.get(row["id"]), source_values.get(previous["id"])
-                    def source_bound(value, field, fallback):
-                        return source_by_id.get(value.get(field), {}).get("sort_id", fallback)
-                    if (row == source_row and previous == source_previous and
-                        max(source_bound(source_row, "event_id", float("-inf")),
-                            source_bound(source_previous, "event_id", float("-inf"))) <
-                        min(source_bound(source_row, "end_event_id", float("inf")),
-                            source_bound(source_previous, "end_event_id", float("inf")))):
-                        diagnostics.append({"code": "source_interval_conflict", "severity": "warning",
-                            "record_ids": sorted([row["id"], previous["id"]]),
-                            "node_id": row.get("node_id"), "property_id": row.get("property_id"),
-                            "message": "来源“" + source_by_id.get(row.get("node_id"), {}).get("name", str(row.get("node_id")))
-                                + "”的“" + str(row.get("property_id")) + "”已有并列有效记录，按来源保留；未改写属性定义或区间"})
-                        continue
-                    raise ValueError("追加属性有效区间与已有单值状态重叠，未关闭或改写本地值；请先显式调整区间："
-                                     + previous["id"] + " / " + row["id"])
-
-    return diagnostics
-
-
-def _append_selection(local, incoming_nodes, incoming_records, summary, source_revision, source_records, source_nodes):
+def _append_selection(local, incoming_nodes, incoming_records, summary, source_revision):
     """Append new identities at the tail; existing authored objects stay intact."""
     existing_nodes = {node["id"]: node for node in local["nodes"]}
     existing_properties = {row["id"]: row for row in local["properties"]}
@@ -248,29 +193,10 @@ def _append_selection(local, incoming_nodes, incoming_records, summary, source_r
         row["events"] = [child for child in row.get("events", []) if child in new_ids]
         local["nodes"].append(row)
         local["baseline_nodes"][identifier] = copy.deepcopy(source)
-    boundary_updates = []
-    for source in source_records:
-        if source.get("kind") != "property_value" or source.get("end_event_id") not in new_ids:
-            continue
-        previous = existing_properties.get(source["id"])
-        baseline = local["baseline_properties"].get(source["id"])
-        if not previous or previous != baseline or previous.get("end_event_id") is not None:
-            continue
-        boundary_fields = {"end_event_id", "source_valid_to"}
-        if ({key: value for key, value in previous.items() if key not in boundary_fields} !=
-            {key: value for key, value in source.items() if key not in boundary_fields}):
-            continue
-        previous["end_event_id"] = source["end_event_id"]
-        baseline["end_event_id"] = source["end_event_id"]
-        if "source_valid_to" in source:
-            previous["source_valid_to"] = copy.deepcopy(source["source_valid_to"])
-            baseline["source_valid_to"] = copy.deepcopy(source["source_valid_to"])
-        boundary_updates.append({"record_id": source["id"], "previous_end_event_id": None,
-                                 "end_event_id": source["end_event_id"]})
     incoming_definitions = {row["id"]: row for row in incoming_records if row.get("kind") == "property_definition"}
     for source in incoming_records:
         if source["id"] not in existing_properties:
-            if source.get("kind") == "property_value" and source.get("property_id") in existing_properties:
+            if source.get("kind") == "property_change" and source.get("property_id") in existing_properties:
                 previous_definition = existing_properties[source["property_id"]]
                 source_definition = incoming_definitions.get(source["property_id"], {})
                 if any(previous_definition.get(key) != source_definition.get(key)
@@ -279,11 +205,10 @@ def _append_selection(local, incoming_nodes, incoming_records, summary, source_r
             local["properties"].append(copy.deepcopy(source))
             local["baseline_properties"][source["id"]] = copy.deepcopy(source)
     merge_anchors(local, summary.pop("state_anchors", []))
-    diagnostics = _append_interval_check(local, set(added_properties), source_nodes, source_records)
     local["source_revision"] = source_revision
     local["import_summary"] = {**summary, "mode": "append", "added_node_ids": added_nodes,
                                "added_property_ids": added_properties, "structural_updates": structural_updates,
-                               "boundary_updates": boundary_updates, "diagnostics": diagnostics,
+                               "diagnostics": [],
                                "skipped_existing_node_ids": [row["id"] for row in incoming_nodes if row["id"] in existing_nodes],
                                "skipped_existing_property_ids": [row["id"] for row in incoming_records if row["id"] in existing_properties]}
 
@@ -330,9 +255,7 @@ class ScreenplayTimelineOperationsMixin:
             expect_revision(local, expected_timeline_revision)
             expect_revision(source, expected_adaptation_revision)
             nodes, records, summary = _selection(source, moment_ids, local)
-            summary["diagnostics"] = _append_interval_check(
-                {"nodes": source["nodes"], "state_anchors": source.get("state_anchors", []), "properties": records},
-                {row["id"] for row in records}, list(source_points_for_intervals(source).values()), source["properties"])
+            summary["diagnostics"] = []
             source_ids = {n["id"] for n in source["nodes"]} | {r["id"] for r in source["properties"]}
             current = {n["id"]: n for n in local["nodes"] + local["properties"]}
             for identifier in set(local["baseline_nodes"]) | set(local["baseline_properties"]):
@@ -356,12 +279,13 @@ class ScreenplayTimelineOperationsMixin:
             expect_revision(local, expected_timeline_revision)
             expect_revision(source, expected_adaptation_revision)
             nodes, records, summary = _selection(source, moment_ids, local)
-            _append_selection(local, nodes, records, summary, source["revision"], source["properties"], list(source_points_for_intervals(source).values()))
+            _append_selection(local, nodes, records, summary, source["revision"])
             local["revision"] += 1
             local["updated_at"] = now()
             return screenplay_timeline(state, source, screenplay_id) | {"status": "accepted"}
         return write_transaction(self, reason, mutate)
 
+    @content_write
     def edit_screenplay_timeline_node(self, screenplay_id, node_id=None, changes=None, after_id=None,
                                       parent_id=None, expected_timeline_revision=None, reason=""):
         return _TimelineEditor(self, screenplay_id).edit_adaptation_node(node_id, changes, after_id, parent_id,
@@ -377,10 +301,14 @@ class ScreenplayTimelineOperationsMixin:
         return _TimelineEditor(self, screenplay_id).suppress_adaptation_node(node_id, suppressed,
                                                                            expected_timeline_revision, reason)
 
-    def set_screenplay_timeline_property(self, screenplay_id, node_id, property_id, value=None, event_id=None,
-                                         record_id=None, expire=False, expected_timeline_revision=None, reason=""):
-        return _TimelineEditor(self, screenplay_id).set_adaptation_property(node_id, property_id, value, event_id,
-                                                                          record_id, expire, expected_timeline_revision, reason)
+    @content_write
+    def set_screenplay_timeline_property(self, screenplay_id, node_id, property_id, event_id, op, value=None,
+                                         record_id=None, expected_timeline_revision=None, reason="",
+                                         scope=None, holder_id=None, context_id=None):
+        return _TimelineEditor(self, screenplay_id).set_adaptation_property(
+            node_id, property_id, event_id, op, value=value, record_id=record_id,
+            expected_revision=expected_timeline_revision, reason=reason,
+            scope=scope, holder_id=holder_id, context_id=context_id)
 
     def copy_screenplay_timeline_node(self, screenplay_id, node_id, after_id=None, parent_id=None,
                                       expected_timeline_revision=None, reason=""):

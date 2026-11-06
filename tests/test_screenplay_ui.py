@@ -365,7 +365,7 @@ def test_writing_shortcut_freezes_target_and_current_chat_before_background_prep
             assert release.wait(5)
             return result
 
-        def capture(text, image, chat, *, writing_task=None):
+        def capture(text, image, chat, *, writing_task=None, access_mode_override=None):
             captured.append({"text": text, "chat": chat, "task": writing_task})
 
         monkeypatch.setattr(GraphOperations, "prepare_script_writing_task", blocked_prepare)

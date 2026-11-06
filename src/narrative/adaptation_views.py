@@ -1,7 +1,7 @@
 """Read-only BrowsePage projections on the independent adaptation order.
 
 Source disclosure/evidence remain provenance. They never determine adaptation
-visibility, temporal validity, related membership or ordering.
+visibility, property change replay, related membership or ordering.
 """
 from __future__ import annotations
 
@@ -30,7 +30,8 @@ class _View:
         self.latest_cutoff = max((node["sort_id"] for node in active_points), default=None)
         self.definitions = {row["id"]: row for row in snapshot["properties"]
                             if row.get("kind") == "property_definition"}
-        self.records = [row for row in snapshot["properties"] if row.get("kind") == "property_value"]
+        self.records = [row for row in snapshot["properties"] if row.get("kind") == "property_change"]
+        self._state_cache = {}
         self.parents = {}
         for node in self.ordered:
             for child in node.get("events", []):
@@ -129,44 +130,32 @@ class _View:
             refs.extend(value if isinstance(value, list) else [value])
         return list(dict.fromkeys(ref for ref in refs if isinstance(ref, str) and ref in self.nodes))
 
+    def current_records(self, cutoff=None):
+        from .adaptation_state import current_rows
+        cutoff = self.latest_cutoff if cutoff is None else cutoff
+        if cutoff not in self._state_cache:
+            records = [row for row in self.snapshot["properties"] if row.get("kind") == "property_definition" or
+                       (self.visible(row.get("node_id"), cutoff) and all(self.visible(target, cutoff) for target in self.targets(row)))]
+            self._state_cache[cutoff] = current_rows(self.snapshot | {"properties": records}, cutoff)
+        return self._state_cache[cutoff]
+
     def record_visible(self, row, cutoff=None):
-        # Metadata bounds locate state in the local timeline; they do not make
-        # unimported future narrative the user's latest reading position.
-        if cutoff is None:
-            cutoff = self.latest_cutoff
+        cutoff = self.latest_cutoff if cutoff is None else cutoff
         owner = self.nodes.get(row.get("node_id"))
         if not owner or not self.visible(owner["id"], cutoff):
             return False
         context = owner.get("context_id", "canon")
         if row.get("holder_id") and not self.visible(row["holder_id"], cutoff, context):
             return False
-        start, end = row.get("event_id"), row.get("end_event_id")
-        if start:
-            if start in self.anchors:
-                if self.anchors[start].get("context_id", "canon") != context or (cutoff is not None and self.rank(start) > cutoff):
-                    return False
-            elif not self.visible(start, cutoff, context):
-                return False
-        if end:
-            endpoint = self.boundary(end)
-            if endpoint is None or not self.active(end) or endpoint.get("context_id", "canon") != context:
-                return False
-        if cutoff is None:
-            if end:
-                return False
-        elif end and self.rank(end) <= cutoff:
+        if row.get("context_id", context) != context or not self.active(row.get("event_id")):
             return False
-        value = row.get("value")
-        typed = self.definitions.get(row.get("property_id"), {}).get("value_type") in {"node", "either"}
-        if typed:
-            values = value if isinstance(value, list) else [value]
-            if any(isinstance(ref, str) and ref in self.nodes and not self.visible(ref, cutoff, context) for ref in values):
-                return False
-        return True
+        active = {key for current in self.current_records(cutoff) for key in current.get("active_change_ids", [])}
+        if row.get("id") not in active:
+            return False
+        return all(self.visible(target, cutoff, context) for target in self.targets(row))
 
     def record_key(self, row):
-        # Stable list order handles simultaneous values; IDs have no temporal meaning.
-        return self.rank(row["event_id"]) if self.boundary(row.get("event_id")) is not None else -1
+        return (self.rank(row["event_id"]) if self.boundary(row.get("event_id")) else -1, row.get("sequence", -1))
 
     def steps(self, kind):
         return [{"id": node["id"], "label_id": node["id"], "name": node["name"],
@@ -248,7 +237,7 @@ class _View:
         for event in members:
             for target in self.nodes[event].get("participants", []):
                 add(target, event)
-        for row in self.records:
+        for row in self.current_records(cutoff):
             if row.get("node_id") not in members or row.get("scope", "world") != "world" or not self.record_visible(row, cutoff):
                 continue
             for target in self.targets(row):
@@ -273,7 +262,7 @@ class _View:
             if self.visible(child, cutoff, context):
                 found.update(self.nodes[child].get("participants", []))
         structural = {child for child in found if self.nodes.get(child, {}).get("node_type") != "person"}
-        for row in self.records:
+        for row in self.current_records(cutoff):
             if row.get("node_id") in structural and row.get("scope", "world") == "world" and self.record_visible(row, cutoff):
                 found.update(self.targets(row))
         return {child for child in found if self.visible(child, cutoff, context)}
@@ -285,7 +274,7 @@ class _View:
         value = row.get("value")
         value_node = self.ref(value, cutoff, context) if isinstance(value, str) and definition.get("value_type") in {"node", "either"} else None
         return copy.deepcopy(row) | {
-            "valid": True, "is_latest": False, "value_node": value_node,
+            "is_current": True, "is_latest": False, "value_node": value_node,
             "event_name": self.nodes.get(row.get("event_id"), {}).get("name", ""),
             "holder_name": self.nodes.get(row.get("holder_id"), {}).get("name", ""),
             "scope": row.get("scope", "world"), "category": row.get("category") or "其他",
@@ -294,44 +283,55 @@ class _View:
         }
 
     def properties(self, identifier, cut=None, *, derived=False):
+        from .adaptation_state import event_order, group_key
+        from .property_core import reduce_changes
         owner = self.node(identifier)
         boundary = self.cut(cut)
-        cutoff = boundary["sort_id"] if boundary else None
+        cutoff = boundary["sort_id"] if boundary else self.latest_cutoff
         records = [row for row in self.records if row.get("node_id") == identifier and not (
             row.get("scope", "world") != "world" and row.get("holder_id") not in (None, identifier))]
-        if derived and owner["node_type"] in {"storyline", "big_event"}:
-            progress = {"storyline": ("big_event", "storyline_progress"), "big_event": ("scene", "big_event_progress")}[owner["node_type"]]
-            borrowed = [row for row in self.records if row.get("node_id") in self.descendants(identifier)
-                        and self.nodes[row["node_id"]]["node_type"] == progress[0]
-                        and row.get("property_id") == progress[1] and self.record_visible(row, cutoff)]
-            if borrowed:
-                source = max(borrowed, key=self.record_key)
-                records.append(source | {"derived": True, "derived_from": source["node_id"]})
-        later = sum(1 for row in records if cutoff is not None and self.record_key(row) > cutoff)
+        later = sum(1 for row in records if cutoff is not None and self.rank(row["event_id"]) > cutoff)
         groups = {}
         for row in sorted(records, key=self.record_key):
-            if not self.visible(identifier, cutoff) or not self.record_visible(row, cutoff):
+            if not self.visible(identifier, cutoff) or not self.active(row.get("event_id")) or (cutoff is not None and self.rank(row["event_id"]) > cutoff):
                 continue
-            key = row["property_id"], row.get("category") or "其他", row.get("scope", "world"), row.get("holder_id")
-            groups.setdefault(key, []).append(self.decorate_record(row, cutoff))
+            if any(not self.visible(target, cutoff) for target in self.targets(row)):
+                continue
+            groups.setdefault(group_key(row), []).append(row)
         items = []
-        for (property_id, category, scope, holder_id), values in groups.items():
-            latest = values[-1]
-            latest["is_latest"] = True
-            definition = self.definitions.get(property_id, {})
-            item = {"property_id": property_id, "property_ids": [property_id], "aspect": property_id,
-                    "label": label_for(property_id), "category": category, "category_source": "explicit",
-                    "other_categories": [], "scope": scope, "scopes": [scope], "holder_id": holder_id,
-                    "holder_name": latest["holder_name"], "value_type": definition.get("value_type", "any"),
-                    "value": latest.get("value"), "value_node": latest["value_node"], "event_id": latest.get("event_id"),
-                    "start": None, "disclosed_at": latest["event_name"], "is_current": True,
-                    "record_count": len(values), "later_count": 0, "records": values}
-            if latest.get("derived"):
-                item.update(derived=True, from_scene=self.ref(latest["derived_from"], cutoff))
+        for key, history in groups.items():
+            reduction = reduce_changes(history, self.definitions.get(key[1], {}), self.nodes, event_order=event_order(self.snapshot))
+            state, active = reduction["state"], set(reduction.get("active_change_ids", []))
+            latest = history[-1]
+            definition = self.definitions.get(key[1], {})
+            values = []
+            for row in history:
+                decorated = self.decorate_record(row, cutoff)
+                decorated.update(is_current=row["id"] in active, is_latest=row is latest)
+                values.append(decorated)
+            value = state.get("value")
+            item = {"property_id": key[1], "property_ids": [key[1]], "aspect": key[1], "label": label_for(key[1]),
+                    "category": latest.get("category") or "其他", "category_source": "explicit", "other_categories": [],
+                    "scope": key[3], "scopes": [key[3]], "context_id": key[2], "holder_id": key[4], "holder_name": self.nodes.get(key[4], {}).get("name", ""),
+                    "value_type": definition.get("value_type", "any"), "cardinality": definition.get("cardinality", "one"),
+                    "value": value, "value_node": self.ref(value, cutoff) if isinstance(value, str) and value in self.nodes else None,
+                    "event_id": latest["event_id"], "disclosed_at": self.nodes.get(latest["event_id"], {}).get("name", "前置状态"),
+                    "is_current": state["kind"] != "unrecorded", "state": state, "state_kind": state["kind"], "active_change_ids": list(active),
+                    "history_changes": history, "diagnostics": reduction.get("diagnostics", []),
+                    "record_count": len(history), "later_count": 0, "records": values}
             items.append(item)
+        if derived and owner["node_type"] in {"storyline", "big_event"}:
+            progress = {"storyline": ("big_event", "storyline_progress"), "big_event": ("scene", "big_event_progress")}[owner["node_type"]]
+            candidates = [row for row in self.current_records(cutoff) if row.get("node_id") in self.descendants(identifier)
+                          and self.nodes[row["node_id"]]["node_type"] == progress[0] and row.get("property_id") == progress[1]]
+            if candidates:
+                source = max(candidates, key=self.record_key)
+                items.append({"property_id": progress[1], "property_ids": [progress[1]], "label": label_for(progress[1]),
+                              "category": "其他", "records": [], "value": source["value"], "derived": True,
+                              "from_scene": self.ref(source["node_id"], cutoff), "is_current": True, "scope": "world"})
         categories = list(dict.fromkeys(item["category"] for item in items))
         inbound, claims, heard = [], [], []
-        for row in sorted(self.records, key=self.record_key):
+        for row in sorted(self.current_records(cutoff), key=self.record_key):
             if not self.visible(identifier, cutoff) or not self.record_visible(row, cutoff):
                 continue
             subject = row["node_id"]
@@ -405,7 +405,7 @@ class AdaptationViewsMixin:
         boundary = view.cut(cut)
         cutoff = boundary["sort_id"] if boundary else None
         related = view.related(node_id, cutoff) if node["node_type"] in MOMENTS else {
-            target for row in view.records if row.get("node_id") == node_id and view.record_visible(row, cutoff)
+            target for row in view.current_records(cutoff) if row.get("node_id") == node_id and view.record_visible(row, cutoff)
             for target in view.targets(row) if view.visible(target, cutoff)}
         if not view.visible(node_id, cutoff):
             related = set()

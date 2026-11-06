@@ -8,7 +8,7 @@ from typing import Any
 
 from .adaptation_views import _View
 
-FINGERPRINT_VERSION = 2
+FINGERPRINT_VERSION = 3
 _TIME_TYPES = {"event", "action"}
 _CONTAINER_TYPES = {"storyline", "big_event", "scene"}
 _EXCLUDED = {"sort_id", "revision", "created_at", "updated_at", "accepted_revision"}
@@ -128,22 +128,16 @@ def _state_visible(view, row, identifier):
         return False
     if row.get("holder_id") and not view.visible(row["holder_id"], cutoff, context):
         return False
-    for field in ("event_id", "end_event_id"):
-        anchor_id = row.get(field)
-        if not anchor_id:
-            continue
-        anchor = view.boundary(anchor_id)
-        if not anchor or anchor.get("context_id", "canon") != context:
-            return False
-        # A suppressed endpoint still locates a legitimate property's interval.
-        if field == "event_id" and anchor["sort_id"] > cutoff:
-            return False
-        if field == "end_event_id" and anchor["sort_id"] <= cutoff:
-            return False
+    anchor = view.boundary(row.get("event_id"))
+    if not anchor or not view.active(row.get("event_id")) or anchor.get("context_id", "canon") != context or anchor["sort_id"] > cutoff:
+        return False
+    current = view.current_records(cutoff)
+    if not any(row["id"] in value.get("active_change_ids", []) for value in current):
+        return False
     if row.get("applies_to") and row["applies_to"] not in {identifier, _parent_event(view, identifier)}:
         return False
     definition = view.definitions.get(row.get("property_id"), {})
-    if definition.get("value_type") in {"node", "either"}:
+    if row.get("state_kind", "known") == "known" and definition.get("value_type") in {"node", "either"}:
         value = row.get("value")
         values = value if isinstance(value, list) else [value]
         for ref in values:
@@ -205,7 +199,7 @@ def generation_node(adaptation, node_or_id, effective_node_ids=None):
 def _state_projection(view, row, effective, event_id):
     cutoff = view.rank(event_id)
     context = view.nodes[event_id].get("context_id", "canon")
-    result = {key: copy.deepcopy(row[key]) for key in ("id", "node_id", "property_id", "value", "scope", "holder_id", "category") if key in row}
+    result = {key: copy.deepcopy(row[key]) for key in ("id", "node_id", "property_id", "value", "scope", "holder_id", "category", "state_kind", "active_change_ids") if key in row}
     result["related_nodes"] = [key for key in row.get("related_nodes", [])
                                if view.visible(key, cutoff, context)
                                and (view.nodes[key]["node_type"] not in MOMENT_TYPES or key in effective)]
@@ -223,7 +217,7 @@ def _location_record(view, row, event_id):
 
 def _input(adaptation, members, effective):
     view = _GenerationView(adaptation)
-    nodes, rows, definitions = view.nodes, view.records, view.definitions
+    nodes, definitions = view.nodes, view.definitions
     targets = set(effective)
     source_event_ids = list(dict.fromkeys(event for key in effective if (event := _parent_event(view, key))))
     folded = {key: _parent_event(view, key) for key in effective}
@@ -235,7 +229,7 @@ def _input(adaptation, members, effective):
     # Parent event place facts may ground a selected action, without importing
     # that parent's prose or its unselected sibling actions.
     for identifier in effective:
-        for row in rows:
+        for row in view.current_records(view.rank(identifier)):
             if _location_record(view, row, folded[identifier]) and _state_visible(view, row, identifier):
                 related.update(key for key in view.targets(row) if view.nodes[key]["node_type"] not in MOMENT_TYPES)
     selected_values, state_rows = {}, {}
@@ -243,7 +237,7 @@ def _input(adaptation, members, effective):
         before = len(related), len(selected_values)
         for identifier in effective:
             values = []
-            for row in rows:
+            for row in view.current_records(view.rank(identifier)):
                 eligible = row.get("node_id") == identifier or row.get("node_id") in related or _location_record(view, row, folded[identifier])
                 if not eligible or not _state_visible(view, row, identifier):
                     continue

@@ -29,7 +29,7 @@ def install(ops):
         {"type": "action", "name": "同行停下", "event": "@10", "participants": ["@2"], "quotes": [QUOTES[0]]},
         {"type": "storyline", "name": "会合篇章", "closing_quote": "篇章完。", "children": ["@7"]},
     ]
-    props = [{"node": f"@{10+i}", "property": "地点", "value": f"@{4+i}", "value_type": "node", "scope": "world", "at_event": f"@{10+i}", "quotes": [quote]} for i, quote in enumerate(QUOTES)]
+    props = [{"node": f"@{10+i}", "property": "地点", "op": "set", "value": f"@{4+i}", "value_type": "node", "scope": "world", "at_event": f"@{10+i}", "quotes": [quote]} for i, quote in enumerate(QUOTES)]
     payload = {"nodes": nodes, "properties": props}
     result = ops.submit_extraction(sid, payload)
     assert result["status"] == "accepted", result
@@ -60,7 +60,7 @@ def test_all_five_levels_aggregate_explicit_people_and_event_locations_without_w
     assert (project.graph_snapshot(), project.property_records()) == before
 
 
-def test_cut_expiration_context_and_subjective_or_literal_references_do_not_leak(project):
+def test_cut_event_change_context_and_subjective_or_literal_references_do_not_leak(project):
     sid, mapping = install(project)
     early = project.property_node_summary(mapping["@7"], cut=mapping["@10"])
     assert ids(early, "people") == {mapping["@1"], mapping["@2"]}
@@ -68,7 +68,10 @@ def test_cut_expiration_context_and_subjective_or_literal_references_do_not_leak
     snapshot, records = project.graph_snapshot(), project.property_records()
     record = next(row for row in records if row.get("node_id") == mapping["@10"])
     altered = deepcopy(records)
-    next(row for row in altered if row.get("id") == record["id"])["valid_to"] = {"source_id": sid, "start": TEXT.index(QUOTES[1])}
+    clear = dict(record, id="clear-location", op="clear", event_id=mapping["@11"], sequence=TEXT.index(QUOTES[1]),
+                 disclosure={"source_id": sid, "start": TEXT.index(QUOTES[1])})
+    clear.pop("value")
+    altered.append(clear)
     assert not involvement(snapshot, altered, mapping["@10"])["locations"]
     assert involvement(snapshot, altered, mapping["@10"], mapping["@10"])["locations"]
     # Read projection must not turn a subjective location or a literal ID into occurrence membership.
@@ -133,7 +136,7 @@ def test_related_view_keeps_item_holder_one_hop_but_never_follows_person_dossier
     event = dict(next(row for row in snapshot["nodes"] if row["id"] == names[SENTENCES[2]]), participants=[item["id"]])
     records = record(sid, names, names["甲"], event_index=1)
     records += [{"kind": "property_definition", "id": "朋友", "value_type": "node", "cardinality": "one"},
-                {"kind": "property_value", "node_id": names["甲"], "property_id": "朋友", "value": names["乙"], "scope": "world",
+                {"kind": "property_change", "op": "set", "node_id": names["甲"], "property_id": "朋友", "value": names["乙"], "scope": "world",
                  "event_id": event["id"], "disclosure": event["disclosure"], "evidence": event["evidence"]}]
     result = project.apply_changes([item, event], records, snapshot["revision"], "一跳物品持有者读取fixture")
     assert result["status"] == "accepted", result

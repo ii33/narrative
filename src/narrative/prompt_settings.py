@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from uuid import uuid4
 
+from .content_errors import ContentConflictError, ContentGuardError, ContentValidationError
 from .graph_store import GraphStore
 
 _KEY = "project_prompt_overrides_v1"
@@ -78,15 +79,15 @@ class PromptSettingsOperationsMixin:
 
     def save_prompt_override(self, prompt_id, text, expected_revision, reason="编辑工程提示词"):
         if prompt_id not in _defaults():
-            raise ValueError("提示词项目不存在")
-        if text is not None and not isinstance(text, str):
-            raise ValueError("提示词须为文本（可为空）；恢复默认请使用null")
-        if not isinstance(reason, str) or not reason.strip():
-            raise ValueError("请说明修改提示词的原因")
+            raise ContentGuardError("提示词项目不存在")
         with self._store.connect(write=True) as db:
             state = _load(db)
             if type(expected_revision) is not int or expected_revision != state["revision"]:
-                raise ValueError("提示词设置已变化，请刷新后重试")
+                raise ContentConflictError("提示词设置已变化，请刷新后重试")
+            if text is not None and not isinstance(text, str):
+                raise ContentValidationError("提示词须为文本（可为空）；恢复默认请使用null", problems=[{"code": "CONTENT_VALIDATION", "message": "提示词须为文本", "path": ["text"]}])
+            if not isinstance(reason, str) or not reason.strip():
+                raise ContentValidationError("请说明修改提示词的原因", problems=[{"code": "CONTENT_VALIDATION", "message": "请说明修改提示词的原因", "path": ["reason"]}])
             if text is None:
                 state["overrides"].pop(prompt_id, None)
             else:

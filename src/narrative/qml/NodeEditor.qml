@@ -3,9 +3,11 @@ import QtQuick.Controls
 import QtQuick.Layouts
 
 // 节点编辑器：改节点字段、补录/更正属性、把属性设为失效。
-// 通过Operations校验保存；录入错误直接更正，新状态追加并结束旧值有效期。
+// 通过Operations校验保存；录入错误直接更正，新状态在事件处追加变更，由程序重播。
 Dialog {
     id: editor
+    SubmissionState{id:contentSubmission;owner:editor;operation:editor.editRecordId?(host.adaptationMode?"set_adaptation_property":"correct_property"):editor.expireKey?(host.adaptationMode?"set_adaptation_property":"record_property_change"):host.adaptationMode?"edit_adaptation_node":"apply_changes";target:editor.editRecordId?({record_id:editor.editRecordId}):({node_id:editor.nodeId||null});onRestoreRequested:function(a){editor.restoreSubmission(a)}}
+
     objectName: "nodeEditor"
     readonly property var io: host.io
     property var host            // BrowsePage：主题、刷新、类型表
@@ -31,8 +33,11 @@ Dialog {
     property string editPendingKey: ""
     property string editPropertyId: ""
     property string editSourceId: ""
+    property string editOriginalEventId:""
     property string editValue: ""
     property bool editJson: false
+    property int editOpIndex:0
+    property var expireChange:({})
     property int editEventIndex: 0
     property string editQuote: ""
     property var expireTargets: []
@@ -80,7 +85,7 @@ Dialog {
         expireKey = ""
         expireLabel = ""
         expireReason = ""
-        expireEventIndex = eventIndex(host.cutEventId)
+        expireEventIndex = Math.max(0,eventIndex(host.cutEventId)>=0?eventIndex(host.cutEventId):events.length-1)
         renameKey = ""
         renameNames = []
         renameName = ""
@@ -103,7 +108,7 @@ Dialog {
         expireKey = ""
         expireLabel = ""
         expireReason = ""
-        expireEventIndex = eventIndex(host.cutEventId)
+        expireEventIndex = Math.max(0,eventIndex(host.cutEventId)>=0?eventIndex(host.cutEventId):events.length-1)
     }
 
     function startRename(item) {
@@ -147,21 +152,38 @@ Dialog {
     function eventIndex(eventId) {
         for (var i = 0; i < events.length; ++i)
             if (events[i].id === eventId) return i
-        return 0
+        return -1
+    }
+
+    function restoreSubmission(a) {
+        if(a.record_id){
+            var item=properties.find(function(p){return (p.records||[]).some(function(r){return r.id===a.record_id})});
+            if(item){var record=(item.records||[]).find(function(r){return r.id===a.record_id});startEdit(item,record)}
+            editRecordId=a.record_id;editPendingId="";var c=a.changes||a;editValue=c.value===undefined?"":typeof c.value==="string"?c.value:JSON.stringify(c.value);editJson=typeof c.value!=="string";editOpIndex=Math.max(0,host.changeOps.findIndex(function(x){return x.key===c.op}));editOriginalEventId=c.event_id;editEventIndex=eventIndex(c.event_id);editQuote=c.quote||"";return
+        }
+        if(a.property_id){
+            var row=properties.find(function(p){return p.property_id===a.property_id});if(row)startExpire(row);
+            expireChange=Object.assign({},a);expireEventIndex=Math.max(0,eventIndex(a.event_id));expireReason=a.reason||"";return
+        }
+        var value=a.changes||(a.graph_objects||[])[0]||{};
+        nameField.text=value.name||"";typeBox.currentIndex=Math.max(0,typeKeys.indexOf(value.node_type));aliasField.text=(value.aliases||[]).join("、");noteField.text=value.identity_note||""
     }
 
     function startEdit(item, record) {
+        if(!contentSubmission.restoring)contentSubmission.begin()
         editRecordId = record.id
+        editOriginalEventId=record.event_id
         editKey = rowKey(item)
         editPropertyId = item.property_id
         editSourceId = record.disclosure ? (record.disclosure.source_id || "") : ""
         editValue = String(record.value === null || record.value === undefined ? "" : record.value)
-        editJson = host.adaptationMode && typeof record.value !== "string"
+        editJson = record.value!==undefined && typeof record.value !== "string"
+        editOpIndex=Math.max(0,host.changeOps.findIndex(function(op){return op.key===record.op}))
         if (editJson) editValue = JSON.stringify(record.value)
         // 停在某个阅读位置时，改的就是「此刻」：默认披露在这个事件；
         // 没有切点时沿用原记录的事件，改的是它自己那一处说法。
         var here = atCut ? eventIndex(cutEventId) : -1
-        editEventIndex = here >= 0 ? here : eventIndex(record.event_id)
+        editEventIndex = eventIndex(record.event_id)
         editQuote = record.evidence ? record.evidence.quote : ""
         expireTargets = []
         expireKey = ""
@@ -171,32 +193,32 @@ Dialog {
     // 但表单是异步重载的，旧数据还在屏幕上时不能让人点进一个空表单。
     function hasValid(item) {
         for (var i = 0; i < (item.records || []).length; ++i)
-            if (item.records[i].valid) return true
+            if (item.records[i].is_current) return true
         return false
     }
 
     function submitEdit() {
         if (editRecordId.length === 0) return
         var inputValue = editValue
-        if (host.adaptationMode && editJson) {
+        if (editJson && ["set","add","remove"].indexOf(host.changeOps[editOpIndex].key)>=0) {
             try { inputValue = JSON.parse(editValue) }
             catch (error) { host.app.toast("JSON 格式错误：" + error.message, true); return }
         }
         var event = events[editEventIndex] || ({})
         editPendingId = editRecordId
         editPendingKey = editKey
-        editor.io.correctPropertyRecord(editRecordId, {
+        var payload={
+            op:host.changeOps[editOpIndex].key,expected_revision:host.revision,
             node_id: nodeId,
             property_id: editPropertyId,
             value: inputValue,
-            event_id: event.id || "",
+            event_id: event.id || editOriginalEventId,
             quote: editQuote,
             source_id: editSourceId
-        })
-        // 提交之后表单就收起：editRecordId 已经清空，留着表单的话再点一次
-        // 就是拿空 id 去更正，只会得到一句看不懂的预检错误。
-        editRecordId = ""
-        editKey = ""
+        };
+        if(["clear","unknown"].indexOf(payload.op)>=0)delete payload.value;
+        editor.io.correctPropertyRecord(editRecordId,payload)
+        // 校验完成前保留表单；暂存反馈可直接修补同一条内容。
     }
 
     // 预检没过：把表单和原来的记录放回去，值还在，改一处再交。
@@ -210,7 +232,7 @@ Dialog {
     function startExpire(item) {
         var ids = []
         for (var i = 0; i < (item.records || []).length; ++i)
-            if (item.records[i].valid) ids.push(item.records[i].id)
+            if (item.records[i].is_current) ids.push(item.records[i].id)
         if (ids.length === 0) {
             // 没有可失效的记录：不打开一个「0 条记录」的空表单。
             expireKey = ""
@@ -219,7 +241,8 @@ Dialog {
             return
         }
         expireTargets = ids
-        expireEventIndex = eventIndex(host.cutEventId)
+        expireChange={node_id:nodeId,property_id:item.property_id,op:"clear",scope:item.scope||"world",holder_id:item.holder_id,context_id:item.context_id||"canon"}
+        expireEventIndex = Math.max(0,eventIndex(host.cutEventId)>=0?eventIndex(host.cutEventId):events.length-1)
         expireKey = rowKey(item)
         expireLabel = item.label || item.property_id
         expireReason = ""
@@ -227,10 +250,13 @@ Dialog {
         editKey = ""
     }
 
-    // 只结束这一条的有效期；整行操作会处理该行全部记录。
+    // 单项记录移除对应值；整行失效明确清除整组。
     function startExpireRecord(item, record) {
         expireTargets = [record.id]
-        expireEventIndex = eventIndex(host.cutEventId)
+        var value=item.state?item.state.value:item.value;
+        var collection=value&&typeof value!=="string"&&value.length!==undefined;
+        expireChange={node_id:nodeId,property_id:item.property_id,op:collection?"remove":"clear",value:record.value,scope:item.scope||"world",holder_id:item.holder_id,context_id:item.context_id||"canon"};
+        expireEventIndex = Math.max(0,eventIndex(host.cutEventId)>=0?eventIndex(host.cutEventId):events.length-1)
         expireKey = rowKey(item)
         expireLabel = (item.label || item.property_id)
             + (record.event_name ? " · " + record.event_name : "")
@@ -242,13 +268,13 @@ Dialog {
     // 删除：这条从来不算。和「失效」不是一句话——失效锚在读者站的位置。
     function deleteRecords(ids) {
         if (!ids || ids.length === 0) return
-        editor.io.deletePropertyRecords(JSON.stringify(ids))
+        editor.io.deletePropertyRecords(JSON.stringify(ids),host.revision)
     }
 
     function deleteRow(item) {
         var ids = []
         for (var i = 0; i < (item.records || []).length; ++i)
-            if (item.records[i].valid) ids.push(item.records[i].id)
+            if (item.records[i].is_current) ids.push(item.records[i].id)
         if (ids.length === 0) {
             host.app.toast("这条属性现在没有有效记录", true)
             return
@@ -258,13 +284,10 @@ Dialog {
 
     function submitExpire() {
         if (expireTargets.length === 0) return
-        if (host.adaptationMode) bridge.expireAdaptationProperties(expireTargets,
-            (events[expireEventIndex] || {}).id || "", host.revision, expireReason)
-        else editor.io.expirePropertyRecords(JSON.stringify(expireTargets), expireReason)
-        expireTargets = []
-        // 同上：收起表单，别让人对着「0 条记录」再点一次。
-        expireKey = ""
-        expireReason = ""
+        var payload=Object.assign({},expireChange,{event_id:(events[expireEventIndex]||{}).id||"",reason:expireReason,expected_revision:host.revision});
+        if(["clear","unknown"].indexOf(payload.op)>=0)delete payload.value;
+        editor.io.addPropertyRecord(payload);
+
     }
 
     function submitNode() {
@@ -316,7 +339,7 @@ Dialog {
                     editor.restoreEdit()
                     return
                 }
-                editPendingId = ""
+                editPendingId = "";editRecordId="";editKey="";expireTargets=[];expireKey="";expireReason=""
                 editor.host.notifyEdit(kind === "property_add" ? "补录已生效" : "更正已生效",
                                        payload)
                 editor.reload()
@@ -347,6 +370,8 @@ Dialog {
     }
 
     contentItem: ColumnLayout {
+        SubmissionFeedback{state:contentSubmission}
+
         spacing: 8
 
         GridLayout {
@@ -546,7 +571,7 @@ Dialog {
                                     var records = modelData.records || []
                                     var latest = null
                                     for (var i = records.length - 1; i >= 0; --i)
-                                        if (records[i].valid) { latest = records[i]; break }
+                                        if (records[i].is_current) { latest = records[i]; break }
                                     if (latest === null && records.length > 0) latest = records[records.length - 1]
                                     if (latest !== null) editor.startEdit(modelData, latest)
                                 }
@@ -589,7 +614,7 @@ Dialog {
                                 Label {
                                     Layout.fillWidth: true
                                     // 节点值型属性存的是编号，行上要看到名字。
-                                    text: editor.host.valueText(modelData)
+                                    text: (editor.host.changeOps.find(function(op){return op.key===modelData.op})||{label:""}).label+" · "+editor.host.valueText(modelData)
                                         + (modelData.event_name ? " · " + modelData.event_name : "")
                                     color: t.body
                                     font.pixelSize: 10
@@ -643,11 +668,13 @@ Dialog {
                             visible: editor.editKey.length > 0
                                 && editor.editKey === editor.rowKey(modelData)
 
+                            ComboBox{objectName:"editorEditOperation";Layout.fillWidth:true;model:editor.host.changeOps;textRole:"label";currentIndex:editor.editOpIndex;onActivated:editor.editOpIndex=currentIndex}
                             RowLayout {
                                 Layout.fillWidth: true
+                                visible:["set","add","remove"].indexOf(editor.host.changeOps[editor.editOpIndex].key)>=0
                                 spacing: 6
                                 Label { text: "新值"; color: t.muted; font.pixelSize: 10 }
-                                ComboBox { visible: editor.host.adaptationMode; model: ["文本", "JSON"]; currentIndex: editor.editJson ? 1 : 0; onActivated: editor.editJson = currentIndex === 1 }
+                                ComboBox { model: ["文本", "JSON"]; currentIndex: editor.editJson ? 1 : 0; onActivated: editor.editJson = currentIndex === 1 }
                                 TextField {
                                     objectName: "editorEditValue"
                                     Layout.fillWidth: true
@@ -662,6 +689,7 @@ Dialog {
                                 Label { text: "事件"; color: t.muted; font.pixelSize: 10 }
                                 ComboBox {
                                     objectName: "editorEditEvent"
+                                    displayText:editor.editEventIndex<0?"保留原前置事件锚点":currentText
                                     Layout.fillWidth: true
                                     model: editor.events.map(function (item) { return item.id + "  " + item.name })
                                     currentIndex: editor.editEventIndex
@@ -774,7 +802,7 @@ Dialog {
                             }
                         }
 
-                        // 失效表单：设置有效期结束边界，原因必填。
+                        // 失效是新事件变更，不修改任何旧变更。
                         ColumnLayout {
                             Layout.fillWidth: true
                             Layout.leftMargin: 18
@@ -782,7 +810,6 @@ Dialog {
                             visible: editor.expireKey.length > 0
                                 && editor.expireKey === editor.rowKey(modelData)
                             ComboBox {
-                                visible: editor.host.adaptationMode
                                 objectName: "editorExpireEvent"
                                 Layout.fillWidth: true
                                 model: editor.events.map(function(event) { return event.id + "  " + event.name })
@@ -794,8 +821,7 @@ Dialog {
                                 Layout.fillWidth: true
                                 spacing: 6
                                 Label {
-                                    text: "把「" + editor.expireLabel + "」的 "
-                                        + editor.expireTargets.length + " 条记录设为失效"
+                                    text: "在所选事件记录「"+editor.expireLabel+"」"+(editor.expireChange.op==="remove"?"移除所选值":"清除当前状态")
                                     color: t.warn
                                     font.pixelSize: 10
                                 }

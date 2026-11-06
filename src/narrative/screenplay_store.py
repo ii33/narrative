@@ -10,7 +10,15 @@ from datetime import UTC, datetime
 from sqlite3 import Connection
 from uuid import uuid4
 
+from pydantic import ValidationError
+
 from .adaptation_operations import _read as read_adaptation
+from .content_errors import (
+    ContentConflictError,
+    ContentGuardError,
+    ContentValidationError,
+    content_validation,
+)
 from .screenplay_models import MODEL_BY_TABLE
 
 TABLES = ("screenplays", "script_timelines", "adaptation_spans", "script_episodes", "script_acts",
@@ -71,7 +79,7 @@ def object_fields(prefix, identifier=None):
 
 def expect_revision(obj, expected, field="revision"):
     if not isinstance(expected, int) or isinstance(expected, bool) or obj[field] != expected:
-        raise ValueError(f"{field}已变化，请刷新后重试")
+        raise ContentConflictError(f"{field}已变化，请刷新后重试")
 
 
 def timeline_id(db):
@@ -145,6 +153,7 @@ def inspect_storage(db):
 def _rebuild_tables(db, inspection):
     if inspection["external_references"]:
         raise ValueError("域外数据表引用剧本对象，不能重建剧本存储或级联删除")
+    db.execute("DELETE FROM meta WHERE key LIKE 'storyboard:%'")
     db.execute("PRAGMA defer_foreign_keys=ON")
     for table in reversed(TABLES):
         row = db.execute("SELECT name,type FROM sqlite_master WHERE name=? COLLATE NOCASE AND type IN ('table','view')", (table,)).fetchone()
@@ -156,7 +165,8 @@ def _rebuild_tables(db, inspection):
 
 def inspect_screenplay_storage(ops):
     with ops._store.connect() as db:
-        db.execute("BEGIN")
+        if not db.in_transaction:
+            db.execute("BEGIN")
         return inspect_storage(db)
 
 
@@ -183,7 +193,7 @@ def reset_screenplay_storage(ops, reason, scope, expected_storage_fingerprint, c
 def load_state(db):
     exists = {r[0].casefold() for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if set(TABLES) & exists and not set(TABLES) <= exists:
-        raise ValueError("剧本业务表不完整；请先检查存储，非空旧剧本须显式重建后再新建，不会自动迁移或丢弃")
+        raise ContentConflictError("剧本业务表不完整；请先检查存储，非空旧剧本须显式重建后再新建，不会自动迁移或丢弃")
     state = empty_state()
     for table in TABLES:
         if table in exists:
@@ -193,13 +203,15 @@ def load_state(db):
 
 def read_context(ops):
     with ops._store.connect() as db:
-        db.execute("BEGIN")
+        if not db.in_transaction:
+            db.execute("BEGIN")
         state, adaptation = load_state(db), read_adaptation(db)
         adaptation["timeline_id"] = timeline_id(db)
         from .prompt_settings import snapshot_from_db
         adaptation["_prompt_config"] = snapshot_from_db(db)
-        from .project_style import read_style
+        from .project_style import read_defaults, read_style
         adaptation["_project_style"] = read_style(db)
+        adaptation["_creative_defaults"] = read_defaults(db)
         return state, adaptation
 
 
@@ -239,7 +251,13 @@ def validate_state(state, adaptation):
             if identifier in identities:
                 raise ValueError("剧本对象ID重复")
             identities.add(identifier)
-            rows[identifier] = models[table].model_validate(row).model_dump(mode="json")
+            try:
+                rows[identifier] = models[table].model_validate(row).model_dump(mode="json")
+            except ValidationError as error:
+                problems = [{'code': 'CONTENT_VALIDATION', 'message': issue['msg'], 'path': [],
+                             'object_id': identifier, 'table': table, 'stored_fields': list(issue['loc'])}
+                            for issue in error.errors(include_url=False, include_context=False, include_input=False)]
+                raise ContentValidationError(str(error), problems=problems) from error
     from .adaptation_operations import _issues
     for screenplay in state["screenplays"].values():
         local = state["script_timelines"].get(screenplay["timeline_id"])
@@ -267,22 +285,23 @@ def validate_state(state, adaptation):
 
 def write_transaction(ops, reason, mutate, initialize=False):
     if not isinstance(reason, str) or not reason.strip():
-        raise ValueError("剧本写入须提供原因")
-    with ops._store.connect(write=True) as db:
+        raise ContentGuardError("剧本写入须提供原因")
+    with content_validation(), ops._store.connect(write=True) as db:
         if initialize:
             inspection = inspect_storage(db)
             if inspection["status"] == "incomplete":
                 if inspection["external_references"]:
-                    raise ValueError("域外数据表引用剧本对象，不能自动重建空旧域")
+                    raise ContentGuardError("域外数据表引用剧本对象，不能自动重建空旧域")
                 if not inspection["can_initialize_on_create"]:
-                    raise ValueError("剧本业务表不完整且含已有数据；请先检查行数，再显式重建剧本存储后新建，旧剧本未改动")
+                    raise ContentConflictError("剧本业务表不完整且含已有数据；请先检查行数，再显式重建剧本存储后新建，旧剧本未改动")
                 _rebuild_tables(db, inspection)
         state, adaptation = load_state(db), read_adaptation(db)
         adaptation["timeline_id"] = timeline_id(db)
         from .prompt_settings import snapshot_from_db
         adaptation["_prompt_config"] = snapshot_from_db(db)
-        from .project_style import read_style
+        from .project_style import read_defaults, read_style
         adaptation["_project_style"] = read_style(db)
+        adaptation["_creative_defaults"] = read_defaults(db)
         before = copy.deepcopy(state)
         token = _id_context.set((db, state, {identifier for table in state.values() for identifier in table}))
         try:
@@ -291,11 +310,13 @@ def write_transaction(ops, reason, mutate, initialize=False):
             _id_context.reset(token)
         validate_state(state, adaptation)
         if not initialize and not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='screenplays' COLLATE NOCASE").fetchone():
-            raise ValueError("请先显式创建剧本或时间段")
+            raise ContentConflictError("请先显式创建剧本或时间段")
         if initialize:
             initialize_tables(db)
         # Rewrite only the independent current-object domain, within this one
         # transaction. This permits position swaps without transient collisions.
+        for removed_unit in before["script_units"].keys() - state["script_units"].keys():
+            db.execute("DELETE FROM meta WHERE key=?", ("storyboard:" + removed_unit,))
         for table in reversed(TABLES):
             db.execute(f"DELETE FROM {table}")
         for table in TABLES:

@@ -28,7 +28,7 @@ def draft(quotes=None, *, name='甲乙握手', new_occurrence=False, existing_id
     if extra_event:
         nodes.append({'type': 'event', 'name': '甲向乙点头', 'scene': '会面',
                       'participants': ['甲', '乙'], 'quotes': [Q3]})
-    return {'nodes': nodes, 'properties': [], 'expirations': [], 'uncertainties': [], 'exclusions': []}
+    return {'nodes': nodes, 'properties': [], 'uncertainties': [], 'exclusions': []}
 
 
 def node(ops, name):
@@ -91,7 +91,7 @@ def test_same_name_at_a_later_occurrence_needs_explicit_new_occurrence(project):
     before = copy.deepcopy(project.graph_snapshot())
     payload = draft(['翌日' + Q1, Q2])
     assert not project.preview_extraction(sid, payload, start=begin)['valid']
-    assert project.submit_extraction(sid, payload, start=begin)['status'] == 'rejected'
+    assert project.submit_extraction(sid, payload, start=begin)['status'] == 'staged'
     assert project.graph_snapshot() == before
     payload['nodes'][-1]['new_occurrence'] = True
     assert project.submit_extraction(sid, payload, start=begin)['status'] == 'accepted'
@@ -122,7 +122,7 @@ def test_ambiguous_exact_evidence_requires_an_explicit_existing_id_without_writi
     payload = draft([Q2, '乙的手'])
     preview = preview_first_day(project, sid, payload)
     assert not preview['valid'] and preview['diagnostics']
-    assert submit_first_day(project, sid, payload)['status'] == 'rejected'
+    assert submit_first_day(project, sid, payload)['status'] == 'staged'
     assert project.graph_snapshot() == before
     target = events(project)[0]['id']
     payload['nodes'][-1]['existing_id'] = target
@@ -143,7 +143,7 @@ def test_old_nodes_without_full_spans_do_not_read_or_backfill_historical_raw(pro
     content = json.dumps(draft([Q1, Q2, '乙的手']), ensure_ascii=False).encode()
     raw.write_bytes(content)
     before = copy.deepcopy(project.graph_snapshot())
-    assert submit_first_day(project, sid, draft([Q2]))['status'] == 'rejected'
+    assert submit_first_day(project, sid, draft([Q2]))['status'] == 'staged'
     assert project.graph_snapshot() == before and raw.read_bytes() == content
     assert submit_first_day(project, sid, draft([Q2], existing_id=legacy['id']))['status'] == 'accepted'
     assert not any(span['quote'] == '乙的手' for span in node(project, '甲乙握手')['evidence_spans'])
@@ -168,7 +168,7 @@ def test_invalid_existing_id_rejects_the_whole_extraction_without_pending(projec
     before = copy.deepcopy(project.graph_snapshot())
     records = copy.deepcopy(project.property_records())
     assert not preview_first_day(project, sid, payload)['valid']
-    assert submit_first_day(project, sid, payload)['status'] == 'rejected'
+    assert submit_first_day(project, sid, payload)['status'] == 'staged'
     assert project.graph_snapshot() == before
     assert project.property_records() == records
 
@@ -191,7 +191,8 @@ def test_formal_evidence_span_precheck_rejects_graph_and_property_batch_atomical
     before = copy.deepcopy(project.graph_snapshot())
     properties = copy.deepcopy(project.property_records())
     assert any(row['severity'] == 'error' for row in project.change_precheck([bad, good], records, revision))
-    assert project.apply_changes([bad, good], records, revision, reason="非法证据原子拒绝")["status"] == "rejected"
+    staged = project.apply_changes([bad, good], records, revision, reason="非法证据原子暂存")
+    assert staged["status"] == "staged" and staged["problems"]
     assert project.graph_snapshot() == before
     assert project.property_records() == properties
     assert project.graph_project_info()['revision'] == revision
@@ -203,7 +204,7 @@ def test_new_occurrence_conflicting_with_one_exact_existing_event_is_not_silentl
     before = copy.deepcopy(project.graph_snapshot())
     preview = preview_first_day(project, sid, payload)
     assert not preview['valid'] and preview['diagnostics']
-    assert submit_first_day(project, sid, payload)['status'] == 'rejected'
+    assert submit_first_day(project, sid, payload)['status'] == 'staged'
     assert project.graph_snapshot() == before
 
 
@@ -228,7 +229,7 @@ def test_legacy_primary_exact_match_does_not_invent_missing_or_override_conflict
         assert len(events(project)) == 1 and events(project)[0]['id'] == legacy['id']
         assert events(project)[0]['evidence'] == legacy['evidence']
     else:
-        assert result['status'] == 'rejected'
+        assert result['status'] == 'staged'
         assert project.graph_snapshot() == before
 
 
@@ -241,7 +242,7 @@ def test_repeated_quote_in_a_wide_task_is_not_arbitrarily_used_as_shared_event_i
     # clearly later occurrence is the same event as the previously stored one.
     preview = project.preview_extraction(sid, later)
     assert not preview['valid'] and preview['diagnostics']
-    assert project.submit_extraction(sid, later)['status'] == 'rejected'
+    assert project.submit_extraction(sid, later)['status'] == 'staged'
     assert project.graph_snapshot() == before
     later['nodes'][-1]['new_occurrence'] = True
     assert project.submit_extraction(sid, later, start=FIRST_DAY_END)['status'] == 'accepted'

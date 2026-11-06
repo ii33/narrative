@@ -14,7 +14,7 @@ def test_removed_revision_and_retraction_protocol_is_rejected():
         tool_api.call("read_project_state", {"as_of_revision": 1})
 
 
-def test_interval_correction_and_rollback_tools_use_operations():
+def test_event_correction_and_rollback_tools_use_operations():
     calls = []
     class Ops:
         def __getattr__(self, name):
@@ -23,15 +23,16 @@ def test_interval_correction_and_rollback_tools_use_operations():
                 return {"revision": 7}
             return invoke
     ops = Ops()
-    result = tool_api.TOOLS["correct_property"].handler(ops, {
-        "record_id": "v1", "value": "正确值", "reason": "录入错误", "quote": "原文",
-    })
-    assert result["status"] == "accepted"
-    assert calls[-1] == ("correct_property", ("v1", "正确值", "录入错误"), {"quote": "原文"})
-    tool_api.TOOLS["expire_properties"].handler(ops, {
-        "record_ids": ["v1"], "source_id": "s1", "start": 8, "reason": "状态改变",
-    })
-    assert calls[-1] == ("expire_properties", (["v1"], "s1", 8), {"event_id": None, "reason": "状态改变"})
+    result = tool_api.TOOLS['correct_property'].handler(ops, {
+        'record_id': 'PC1', 'changes': {'value': '正确值', 'quote': '原文'},
+        'expected_revision': 6, 'reason': '录入错误'})
+    assert result['revision'] == 7
+    assert calls[-1] == ('correct_property', ('PC1', {'value': '正确值', 'quote': '原文'}, '录入错误'), {'expected_revision': 6})
+    assert 'expire_properties' not in tool_api.TOOLS and 'add_property' not in tool_api.TOOLS
+    tool_api.TOOLS['record_property_change'].handler(ops, {
+        'node_id': 'P1', 'property_id': '称呼', 'event_id': 'E2', 'op': 'clear',
+        'expected_revision': 6, 'reason': '本事件终止'})
+    assert calls[-1] == ('record_property_change', ('P1', '称呼', 'E2', 'clear'), {'expected_revision': 6, 'reason': '本事件终止'})
     tool_api.TOOLS["rollback_to"].handler(ops, {
         "source_id": "s1", "start": 8, "expected_revision": 6, "reason": "回退",
     })

@@ -5,9 +5,22 @@ import QtQuick.Dialogs
 
 Item {
     id: page
+    SubmissionState{id:contentSubmission;owner:page;operation:"create_adaptation_span";target:({screenplay_id:page.screenplay.id||null});onRestoreRequested:function(a){segmentTitle.text=a.name||"";page.pendingSpanName=a.name||"";range.startId=(a.selection_ids||[])[0]||a.start_node_id||"";range.endId=(a.selection_ids||[]).slice(-1)[0]||a.end_node_id||"";page.previewRange()}}
+
     objectName: structureOnly ? "screenplayStructurePage" : "screenplayPage"
     property var app
     property bool structureOnly:false
+    property bool restoringSelection:false
+    onSelectedSegmentIdChanged:captureSelection()
+    onSelectedUnitIdChanged:captureSelection()
+    onSelectedBlockIdChanged:captureSelection()
+    property string selectedBlockId:""
+    property bool blockActionBusy:false
+    property int blockActionSequence:0
+    property var blockActionScope:({})
+    readonly property var selectedBlock:(unit.blocks||[]).find(function(b){return b.id===selectedBlockId})||({})
+    readonly property int selectedBlockIndex:(unit.blocks||[]).findIndex(function(b){return b.id===selectedBlockId})
+    onUnitChanged:if(selectedBlockId&&!(unit.blocks||[]).some(function(b){return b.id===selectedBlockId}))selectedBlockId=""
     readonly property var t:app.theme
     property var workspace:({screenplays:[],adaptation:{nodes:[]},timeline:{nodes:[]},document:{}})
     readonly property var doc:workspace.document || ({})
@@ -29,7 +42,10 @@ Item {
     property var pendingRebind:({})
     property string notice:""
     property var exportResult:({})
-    property string exportFormat:"text"
+    property string exportFormat:"pdf"
+    property string exportScreenplayId:""
+    readonly property var exportFormats:[{id:"pdf",label:"PDF 文档",extension:"pdf",filter:"PDF 文档 (*.pdf)"},{id:"docx",label:"Word 文档",extension:"docx",filter:"Word 文档 (*.docx)"},{id:"html",label:"HTML 网页",extension:"html",filter:"HTML 网页 (*.html)"},{id:"text",label:"纯文本",extension:"txt",filter:"文本文件 (*.txt)"},{id:"fountain",label:"Fountain 剧本",extension:"fountain",filter:"Fountain 剧本 (*.fountain)"},{id:"json",label:"结构化 JSON",extension:"json",filter:"JSON 文件 (*.json)"}]
+    readonly property var exportChoice:exportFormats.find(function(row){return row.id===exportFormat})||exportFormats[0]
     property var writingTarget:({})
     property string writingTaskId:""
     property string writingStatus:""
@@ -53,21 +69,10 @@ Item {
     readonly property var basisLabels:({unbased:"依据未记录",current:"依据一致",changed:"依据需复查",invalid:"来源失效",empty_source:"来源为空"})
     readonly property var bodyLabels:({empty:"正文为空",present:"已有正文"})
     readonly property var spanLabels:({valid:"有效",invalid:"失效",empty:"为空"})
-    readonly property var blockLabels:({action:"动作",dialogue:"对白",screen_text:"字幕",sound:"声音",transition:"转场"})
+    readonly property var blockLabels:({action:"动作",scene_description:"场景描写",dialogue:"对白",screen_text:"字幕",sound:"声音",transition:"转场"})
     readonly property var targetLabels:({screenplay:"整部剧本",episode:"集",act:"幕",segment:"段落",scene_table:"场表",unit:"场次",blocks:"正文块"})
     readonly property var taskLabels:({running:"进行中",cancelled:"已停止",failed:"未完成",completed:"已完成"})
-    property var projectStyle: ({revision:0,text:""})
-    property bool styleLoaded:false
-    property bool styleSaving:false
-    property string styleMessage:""
-    function openProjectStyle() {
-        styleDialog.projectPath=app.project.path || ""
-        styleDialog.revision=projectStyle.revision
-        styleDialog.originalText=projectStyle.text || ""
-        styleText.text=styleDialog.originalText
-        styleMessage=""
-        styleDialog.open()
-    }
+
     property var effectivePrompts: ({})
     readonly property string sceneTablePrompt: effectivePrompts.scene_table_shortcut || ""
     function diagnosticsText(values){return (values||[]).map(function(value){return value.message || value.code || String(value)}).join("\n")}
@@ -115,7 +120,15 @@ Item {
     }
     function structure(actions,format) { if(structureBusy)return;structureBusy=true;var args={screenplay_id:screenplay.id,actions:actions,expected_structure_revision:screenplay.structure_revision,reason:"编辑剧本结构"}; if(format)args.format=format; act("apply_screenplay_structure",args) }
     function changeSceneTable(change) { act("apply_scene_table_changes",{segment_id:segment.id,changes:[change],expected_outline_revision:segment.outline_revision,reason:"手工编辑场表"}) }
-    function changeBlock(change) { act("apply_script_block_changes",{unit_id:unit.id,changes:[change],target_block_ids:change.block_id?[change.block_id]:[],expected_body_revision:unit.body_revision,reason:"手工编辑正文"}) }
+    function changeBlock(change) {
+        if(blockActionBusy||!unit.id)return
+        var rows=unit.blocks||[],index=rows.findIndex(function(b){return b.id===change.block_id})
+        if(change.block_id&&index<0)return
+        blockActionSequence++;blockActionBusy=true
+        blockActionScope={token:"body-action-"+(structureOnly?"structure":"writing")+"-"+blockActionSequence,screenplay_id:screenplay.id,unit_id:unit.id,block_id:change.block_id,replacement_id:rows[index+1]?rows[index+1].id:index>0?rows[index-1].id:""}
+        act("apply_script_block_changes",{unit_id:unit.id,changes:[change],target_block_ids:change.block_id?[change.block_id]:[],expected_body_revision:unit.body_revision,reason:"手工编辑正文",_view_request_token:blockActionScope.token})
+    }
+    function moveSelectedBlock(){var index=selectedBlockIndex;if(index>0)changeBlock({op:"move",block_id:selectedBlock.id,after_id:index>1?unit.blocks[index-2].id:null})}
     function lastBlockId() { var blocks=unit.blocks || [];return blocks.length?blocks[blocks.length-1].id:null }
     function previousBlock(index) { return index>1 ? unit.blocks[index-2].id:null }
     function selectSegment(id) { selectedSegmentId=id;selectedUnitId="" }
@@ -123,6 +136,11 @@ Item {
         range.startId="";range.endId="";rangePreview=({});rangePreviewRequest++;pendingRangeRefresh=false
         timelineImportScope=({});timelineImportCandidates=[];timelineImportSelection=[]
         timelineImportDialog.close();timelineEditor.close();timelineDeleteDialog.close();timelineBusy=false;timelineMutationScope=({});pendingTimelineSelection=""
+    }
+    function captureSelection() {
+        if(restoringSelection||!visible||!screenplay.id||screenplay.id!==app.screenplayId)return
+        if(selectedUnitId&&!units.some(function(u){return u.id===selectedUnitId}))return
+        app.screenplaySelection={project_path:app.project.path||"",screenplay_id:screenplay.id,segment_id:selectedSegmentId,unit_id:selectedUnitId,block_id:(unit.blocks||[]).some(function(b){return b.id===selectedBlockId})?selectedBlockId:""}
     }
     function selectScreenplay(id){resetRangeScope();app.screenplayId=id;selectedSegmentId="";selectedUnitId="";load()}
     function openBody(id) {
@@ -204,21 +222,16 @@ Item {
         }
         structure(actions,isSeries?"single":"series")
     }
-    onVisibleChanged:if(visible){load();bridge.loadPromptSettings();bridge.loadProjectStyle()}
+    onVisibleChanged:if(visible){load();bridge.loadPromptSettings()}
     Connections {
         target:app
-        function onProjectChanged(){page.effectivePrompts=({});page.projectStyle=({revision:0,text:""});page.styleLoaded=false;page.styleSaving=false;page.styleMessage="";styleDialog.close();if(app.mode==="workspace"){bridge.loadPromptSettings();bridge.loadProjectStyle()}}
+        function onProjectChanged(){page.blockActionBusy=false;page.blockActionScope=({});page.restoringSelection=true;page.workspace=({});page.selectedSegmentId="";page.selectedUnitId="";page.selectedBlockId="";page.restoringSelection=false;page.effectivePrompts=({});if(app.mode==="workspace"){bridge.loadPromptSettings()}}
         function onModeChanged(){ if(app.mode==="workspace")page.load();else{page.workspace=({});page.selectedSegmentId="";page.selectedUnitId="";page.writingStatus="";page.writingTaskId="";page.submittedUnitIds=[];page.structureBusy=false} }
     }
     Connections {
         target:bridge
         function onResultReady(kind,payload) {
-            if(kind==="project_style"){
-                if(payload.project_path!==(app.project.path||""))return
-                page.projectStyle=payload;page.styleLoaded=true;page.styleSaving=false
-                if(payload.saved){page.styleMessage="项目风格约定已保存。";styleDialog.close();if(page.visible)app.toast(page.styleMessage,false)}
-                return
-            }
+            if(kind==="screenplay"&&payload.operation==="apply_script_block_changes"&&payload.request_token===page.blockActionScope.token)page.blockActionBusy=false
             if(kind==="prompt_settings"){
                 if(payload.project_path!==(app.project.path||""))return
                 var effective={};(payload.prompts||[]).forEach(function(row){effective[row.id]=row.effective});page.effectivePrompts=effective;return
@@ -228,16 +241,25 @@ Item {
                 if(payload.superseded)return
                 var nextScreenplay=(payload.document||{}).screenplay||({})
                 if(screenplay.id!==nextScreenplay.id||screenplay.timeline_id!==nextScreenplay.timeline_id)resetRangeScope()
+                var shared=app.screenplaySelection||{},restore=shared.screenplay_id===nextScreenplay.id&&shared.project_path===(app.project.path||"")
+                restoringSelection=true
                 workspace=payload
                 timelineBusy=false
                 if(pendingTimelineSelection&&((workspace.timeline||{}).nodes||[]).some(function(node){return node.id===pendingTimelineSelection})){range.reveal(pendingTimelineSelection);pendingTimelineSelection=""}
                 if(storageNeedsReset)app.screenplayId=""
                 if(screenplay.id)app.screenplayId=screenplay.id
+                if(restore&&segments.some(function(s){return s.id===shared.segment_id}))selectedSegmentId=shared.segment_id
                 if(!segments.some(function(s){return s.id===selectedSegmentId}))selectedSegmentId=segments.length?segments[0].id:""
+                if(restore&&units.some(function(u){return u.id===shared.unit_id}))selectedUnitId=shared.unit_id
                 if(!units.some(function(u){return u.id===selectedUnitId}))selectedUnitId=units.length?units[0].id:""
+                selectedBlockId=restore&&(unit.blocks||[]).some(function(b){return b.id===shared.block_id})?shared.block_id:""
+                restoringSelection=false;captureSelection()
+                if(selectedBlockId)Qt.callLater(function(){bodyBlocksList.positionViewAtIndex(bodyBlocksList.currentIndex,ListView.Contain)})
                 if(pendingRangeRefresh)refreshRetainedRange()
             } else if(kind==="screenplay"&&page.visible) {
                 var result=payload.result || {}, op=payload.operation
+                if(op==="apply_script_block_changes"&&payload.request_token===page.blockActionScope.token&&page.screenplay.id===page.blockActionScope.screenplay_id&&page.selectedUnitId===page.blockActionScope.unit_id&&page.selectedBlockId===page.blockActionScope.block_id){var blocks=result.blocks||[];if(!blocks.some(function(b){return b.id===page.selectedBlockId}))page.selectedBlockId=blocks.some(function(b){return b.id===page.blockActionScope.replacement_id})?page.blockActionScope.replacement_id:""}
+                if(["load_creative_agreement","save_creative_agreement","load_compile_settings","save_compile_settings","list_assets"].indexOf(op)>=0)return
                 if(op==="reset_screenplay_storage"){
                     storageResetBusy=false;storageResetDialog.close();app.screenplayId="";selectedSegmentId="";selectedUnitId="";resetRangeScope()
                     notice="剧本存储已重建，原文、改编与资产保持不变。现在可以新建剧本。";page.load();return
@@ -295,8 +317,7 @@ Item {
                 if(op==="create_screenplay") { app.screenplayId=(result.screenplay || result).id;createDialog.close() }
                 if(op==="create_script_segment")selectedSegmentId=(result.segment || result).id
                 if(op==="apply_scene_table_changes"){planEditor.close()}
-                if(op==="apply_script_block_changes"){blockEditor.close()}
-                if(op==="export_screenplay"){exportResult=result;exportDialog.open();return}
+                if(op==="compile_screenplay"){if(payload.request_screenplay_id!==exportScreenplayId||exportScreenplayId!==screenplay.id)return;exportResult=result;exportDialog.open();return}
                 if(op==="check_screenplay"){notice=(result.ok?"剧本检查通过":"剧本检查结果")+"\n"+diagnosticsText(result.issues||result.diagnostics||[]);return}
                 if(op==="prepare_script_writing_targets") {
                     writingTarget={kind:"unit",ids:result.unit_ids || [],screenplay_id:screenplay.id,target_manifest:result}
@@ -310,24 +331,32 @@ Item {
             }
             else if(kind==="assistant" || (kind==="conversation_progress" && payload.event==="task_complete"))page.load()
         }
-        function onErrorOccurred(kind,message){if(kind==="project_style"){page.styleSaving=false;page.styleMessage="风格约定未保存："+message}if(kind==="screenplay"){page.structureBusy=false;page.storageResetBusy=false;page.timelineBusy=false}}
+        function onErrorOccurred(kind,message){if(kind==="screenplay"){page.blockActionBusy=false;page.structureBusy=false;page.storageResetBusy=false;page.timelineBusy=false}}
     }
     ColumnLayout {
+        SubmissionFeedback{state:contentSubmission}
+
         anchors.fill:parent;anchors.margins:16;spacing:10
-        RowLayout {
-            Layout.fillWidth:true
-            Label { text:page.structureOnly?"结构":"剧本";font.pixelSize:22;font.bold:true;color:t.ink }
-            ComboBox { objectName:"screenplaySelector";enabled:!page.structureBusy;Layout.preferredWidth:260;model:page.workspace.screenplays || [];textRole:"title";currentIndex:Math.max(0,(page.workspace.screenplays||[]).findIndex(function(s){return s.id===page.screenplay.id}));onActivated:page.selectScreenplay(model[currentIndex].id) }
-            Button { objectName:"screenplayCreate";text:"新建剧本";enabled:page.canCreateScreenplay;onClicked:createDialog.open() }
-            Item { Layout.fillWidth:true }
-            Button { text:"刷新";onClicked:page.load() }
-            Button { text:"检查";enabled:!!page.screenplay.id;onClicked:page.act("check_screenplay",{screenplay_id:page.screenplay.id}) }
-            Button { objectName:"screenplayExport";text:"导出";enabled:!!page.screenplay.id;onClicked:{page.exportFormat="text";page.act("export_screenplay",{screenplay_id:page.screenplay.id,format:"text"})} }
-        }
-        RowLayout {
-            Layout.fillWidth:true
-            Button {objectName:"scriptProjectStyle";text:"项目风格约定";enabled:page.styleLoaded&&!page.styleSaving;onClicked:page.openProjectStyle()}
-            Label {Layout.fillWidth:true;wrapMode:Text.Wrap;font.pixelSize:11;color:t.muted;text:page.projectStyle.text?"已设置，当前工程的所有剧本共用。":"可自由约定表达、节奏与语言风格，当前工程的所有剧本共用。"}
+        Flickable {
+            id:headerViewport;objectName:"screenplayHeaderViewport"
+            Layout.fillWidth:true;Layout.preferredHeight:headerActions.implicitHeight+(contentWidth>width?10:0)
+            contentWidth:Math.max(width,headerActions.implicitWidth);contentHeight:headerActions.implicitHeight
+            flickableDirection:Flickable.HorizontalFlick;boundsBehavior:Flickable.StopAtBounds;clip:true
+            ScrollBar.horizontal:ScrollBar{policy:headerViewport.contentWidth>headerViewport.width?ScrollBar.AlwaysOn:ScrollBar.AlwaysOff}
+            RowLayout {
+                id:headerActions;objectName:"screenplayPrimaryActions";width:headerViewport.contentWidth;spacing:4
+                Label {objectName:"screenplayHeaderTitle";text:page.structureOnly?"结构":"剧本";font.pixelSize:22;font.bold:true;color:t.ink}
+                ComboBox {objectName:"screenplaySelector";enabled:!page.structureBusy;Layout.preferredWidth:180;Layout.minimumWidth:100;Layout.maximumWidth:240;Layout.fillWidth:true;font.pixelSize:12;model:page.workspace.screenplays||[];textRole:"title";currentIndex:Math.max(0,(page.workspace.screenplays||[]).findIndex(function(s){return s.id===page.screenplay.id}));onActivated:page.selectScreenplay(model[currentIndex].id)}
+                Button {objectName:"screenplayCreate";font.pixelSize:12;leftPadding:4;rightPadding:4;implicitWidth:contentItem.implicitWidth+8;text:"新建剧本";enabled:page.canCreateScreenplay;onClicked:createDialog.open()}
+                Button {objectName:"scriptCreativeAgreement";font.pixelSize:12;leftPadding:4;rightPadding:4;implicitWidth:contentItem.implicitWidth+8;text:"剧本创作约定";onClicked:creativeEditor.openFor()}
+                Button {objectName:"screenplayDiscuss";font.pixelSize:12;leftPadding:4;rightPadding:4;implicitWidth:contentItem.implicitWidth+8;text:"讨论整部";enabled:!!page.screenplay.id;onClicked:page.openWriting("screenplay",[page.screenplay.id],"")}
+                Button {objectName:"screenplayBatchWrite";visible:!page.structureOnly;font.pixelSize:12;leftPadding:4;rightPadding:4;implicitWidth:contentItem.implicitWidth+8;text:"批量写空场";enabled:!!page.screenplay.id;onClicked:page.prepareBatch()}
+                Item {Layout.fillWidth:true}
+                Button {objectName:"screenplayRefresh";font.pixelSize:12;leftPadding:4;rightPadding:4;implicitWidth:contentItem.implicitWidth+8;text:"刷新";onClicked:{page.load()}}
+                Button {objectName:"openStoryboard";visible:!page.structureOnly;text:"进入分镜";enabled:!!page.unit.id;onClicked:{page.captureSelection();app.goTo("storyboard")}}
+                Button {objectName:"screenplayCheck";font.pixelSize:12;leftPadding:4;rightPadding:4;implicitWidth:contentItem.implicitWidth+8;text:"检查";enabled:!!page.screenplay.id;onClicked:page.act("check_screenplay",{screenplay_id:page.screenplay.id})}
+                Button {objectName:"screenplayExport";font.pixelSize:12;leftPadding:4;rightPadding:4;implicitWidth:contentItem.implicitWidth+8;text:"编译 / 导出";enabled:!!page.screenplay.id;onClicked:{page.exportScreenplayId=page.screenplay.id;page.exportResult=({});page.act("compile_screenplay",{screenplay_id:page.exportScreenplayId,format:"html"})}}
+            }
         }
         Label { visible:!!page.notice;text:page.notice;color:t.warn;wrapMode:Text.Wrap;Layout.fillWidth:true }
         Frame {
@@ -340,16 +369,12 @@ Item {
                 Button{objectName:"screenplayStorageReset";text:"重建剧本存储";enabled:!page.storageResetBusy;onClicked:page.openStorageReset()}
             }
         }
-        Label {visible:!!page.writingStatus;text:"当前写作任务："+(page.taskLabels[page.writingStatus]||page.writingStatus)+(page.submittedUnitIds.length?" · 已提交 "+page.submittedUnitIds.length+" 场正文":"");color:page.writingStatus==="failed"?t.warn:t.muted;wrapMode:Text.Wrap;Layout.fillWidth:true;HoverHandler{id:taskHover}ToolTip.visible:taskHover.hovered;ToolTip.text:page.writingTaskId}
+        Label {visible:!!page.writingStatus;text:"当前任务："+(page.taskLabels[page.writingStatus]||page.writingStatus)+(page.submittedUnitIds.length?" · 已提交 "+page.submittedUnitIds.length+" 场正文":"");color:page.writingStatus==="failed"?t.warn:t.muted;wrapMode:Text.Wrap;Layout.fillWidth:true;HoverHandler{id:taskHover}ToolTip.visible:taskHover.hovered;ToolTip.text:page.writingTaskId}
         Label { visible:!page.screenplay.id&&!page.storageNeedsReset;text:"创建剧本方案，再从改编时间线导入节点，选择连续范围建立段落。";color:t.muted }
         RowLayout {
             visible:!!page.screenplay.id;Layout.fillWidth:true
-            Label { text:page.screenplay.title+" · "+(page.screenplay.format==="series"?"剧集":"单片")+" · 结构修订 "+page.screenplay.structure_revision;color:t.muted }
-            Item {Layout.fillWidth:true}
-            Button { text:"修改剧本要求";enabled:!page.structureBusy;onClicked:settingsDialog.openFor() }
-            Button { text:"讨论整部";onClicked:page.openWriting("screenplay",[page.screenplay.id],"") }
-            Button {visible:!page.structureOnly;text:"批量写空场";onClicked:page.prepareBatch()}
-            Button {text:page.structureOnly?"回剧本工作页":"集幕结构";onClicked:app.goTo(page.structureOnly?"screenplay":"screenplay_structure")}
+            Label {text:page.screenplay.title+" · "+(page.screenplay.format==="series"?"剧集":"单片")+" · 结构修订 "+page.screenplay.structure_revision;color:t.muted;Layout.fillWidth:true;elide:Text.ElideRight}
+            Button {visible:page.structureOnly;text:"回剧本工作页";onClicked:app.goTo("screenplay")}
         }
         Flickable {
             id:workbenchViewport
@@ -409,8 +434,15 @@ ListView {
                 }
                 ScriptWorkbenchColumn {
                     id:sceneColumn;objectName:"scriptSceneColumn";namePrefix:"scriptSceneColumn";title:"场表";t:page.t;expandedWidth:340;minimumExpandedWidth:300
-ColumnLayout {visible:!!page.segment.id;Layout.fillWidth:true;Button{objectName:"scriptWriteSceneTable";text:"讨论 / 拆场";onClicked:page.openWriting("scene_table",[page.segment.id],page.sceneTablePrompt) }Button{objectName:"scriptAdoptOutline";text:page.segment.outline_state==="adopted"?"取消采用标记":"采用当前场表";onClicked:page.adopt()}Label{text:"采用仅是工作标记，可继续修改";font.pixelSize:11;color:t.muted}}
-RowLayout {visible:!!page.segment.id;Layout.fillWidth:true;Button{objectName:"scriptAddUnit";text:"新增场次 / 画面段";onClicked:planEditor.openFor(null)}}
+ColumnLayout {
+    visible:!!page.segment.id;Layout.fillWidth:true
+    RowLayout {Layout.fillWidth:true;spacing:4
+        Button{font.pixelSize:12;leftPadding:4;rightPadding:4;implicitWidth:contentItem.implicitWidth+8;objectName:"scriptWriteSceneTable";text:"讨论 / 拆场";onClicked:page.openWriting("scene_table",[page.segment.id],page.sceneTablePrompt)}
+        Button{font.pixelSize:12;leftPadding:4;rightPadding:4;implicitWidth:contentItem.implicitWidth+8;objectName:"scriptAdoptOutline";text:page.segment.outline_state==="adopted"?"取消采用标记":"采用当前场表";onClicked:page.adopt()}
+        Button{font.pixelSize:12;leftPadding:4;rightPadding:4;implicitWidth:contentItem.implicitWidth+8;objectName:"scriptAddUnit";text:"新增场次 / 画面段";onClicked:planEditor.openFor(null)}
+    }
+    Label{text:"采用仅是工作标记，可继续修改";font.pixelSize:11;color:t.muted}
+}
 ListView {
                     objectName:"scriptUnitTable";Layout.fillWidth:true;Layout.fillHeight:true;clip:true;model:page.units
                     delegate:Frame {
@@ -431,20 +463,32 @@ ListView {
                 }
                 ScriptWorkbenchColumn {
                     id:bodyColumn;objectName:"scriptBodyColumn";namePrefix:"scriptBodyColumn";title:"正文";t:page.t;expandedWidth:400;minimumExpandedWidth:340
-                    RowLayout {Layout.fillWidth:true;Button{text:"写当前场";enabled:!!page.unit.id;onClicked:page.openWriting("unit",[page.unit.id],page.effectivePrompts.unit_writing_shortcut || "") }Button{text:"修改当前场";enabled:!!page.unit.id;onClicked:page.openWriting("unit",[page.unit.id],"")}}
+                    RowLayout {Layout.fillWidth:true;spacing:4
+                        Button {objectName:"scriptWriteCurrentUnit";text:(page.unit.blocks||[]).length?"修改当前场":"写当前场";enabled:!!page.unit.id;onClicked:page.openWriting("unit",[page.unit.id],(page.unit.blocks||[]).length?"":page.effectivePrompts.unit_writing_shortcut||"")}
+                        Button {objectName:"scriptAddBlock";text:"添加正文块";enabled:!!page.unit.id;onClicked:blockEditor.openFor(null)}
+                    }
 
 
                     ComboBox {objectName:"scriptBodyUnit";Layout.fillWidth:true;model:page.units.map(function(u){return {id:u.id,title:page.unitTitle(u)}});textRole:"title";displayText:page.unit.id?page.unitTitle(page.unit):"选择场次";currentIndex:Math.max(0,page.units.findIndex(function(u){return u.id===page.selectedUnitId}));onActivated:page.selectedUnitId=model[currentIndex].id}
                     Label {text:page.unit.id?page.unitTitle(page.unit)+" · "+(page.bodyLabels[page.unit.body_presence]||"正文为空")+" · "+(page.basisLabels[page.unit.basis_state]||"依据未记录"):"";color:t.muted;wrapMode:Text.Wrap;Layout.fillWidth:true;HoverHandler{id:bodyUnitHover}ToolTip.visible:bodyUnitHover.hovered;ToolTip.text:page.unit.id||""}
-                    Button {objectName:"scriptAddBlock";text:"添加正文块";enabled:!!page.unit.id;onClicked:blockEditor.openFor(null)}
-                    ListView {objectName:"scriptBodyBlocks";Layout.fillWidth:true;Layout.fillHeight:true;clip:true;model:page.unit.blocks || []
-                        delegate:Frame {required property var modelData;required property int index;width:ListView.view.width
+                    RowLayout {Layout.fillWidth:true;spacing:4
+                        Button{objectName:"scriptBlockModify";property string blockId:page.selectedBlockId;text:"修改";enabled:!!page.selectedBlock.id&&!page.blockActionBusy;onClicked:blockEditor.openFor(page.selectedBlock)}
+                        Button{objectName:"scriptBlockMoveUp";text:"↑";enabled:page.selectedBlockIndex>0&&!page.blockActionBusy;onClicked:page.moveSelectedBlock()}
+                        Button{objectName:"scriptBlockDelete";text:"删除";enabled:!!page.selectedBlock.id&&!page.blockActionBusy;onClicked:page.changeBlock({op:"delete",block_id:page.selectedBlock.id})}
+                    }
+                    ListView {id:bodyBlocksList;objectName:"scriptBodyBlocks";currentIndex:page.selectedBlockIndex;Layout.fillWidth:true;Layout.fillHeight:true;clip:true;model:page.unit.blocks || []
+                        delegate:Frame {id:blockCard;objectName:"scriptBlockCard";required property var modelData;required property int index;property string blockId:modelData.id;readonly property bool selected:page.selectedBlockId===modelData.id;width:ListView.view.width
                             height:bodyCard.implicitHeight+24
+                            background:Rectangle{color:blockCard.selected?"#e5edff":t.card;border.color:blockCard.selected?t.accent:t.line;radius:4}
+                            TapHandler{parent:blockCard;gesturePolicy:TapHandler.DragThreshold;acceptedButtons:Qt.LeftButton;onTapped:page.selectedBlockId=blockCard.modelData.id;onDoubleTapped:{page.selectedBlockId=blockCard.modelData.id;if(!blockEditor.visible)blockEditor.openFor(blockCard.modelData)}}
                             ColumnLayout {id:bodyCard;anchors.fill:parent
                                 Label{text:(page.blockLabels[modelData.type]||"正文块")+" "+(index+1);color:t.muted;font.pixelSize:10;HoverHandler{id:blockHover}ToolTip.visible:blockHover.hovered;ToolTip.text:modelData.id}
                                 Label{visible:modelData.type==="dialogue";text:(modelData.payload.speaker_label||"未命名发声者")+" · "+({on_screen:"现场",off_screen:"画外",voice_over:"旁白",inner_voice:"内心声"}[modelData.payload.delivery]||"");color:t.ink;font.bold:true}
-                                TextArea {objectName:"scriptBlockDisplayText";text:modelData.payload.text || modelData.payload.kind || "";readOnly:true;selectByMouse:true;wrapMode:TextEdit.Wrap;Layout.fillWidth:true;background:null}
-                                Flow{Layout.fillWidth:true;spacing:6;Button{text:"修改";onClicked:blockEditor.openFor(modelData)}Button{text:"对话修改此块";onClicked:page.openWriting("blocks",[modelData.id],"")}Button{implicitWidth:32;Layout.preferredWidth:32;text:"↑";enabled:index>0;onClicked:page.changeBlock({op:"move",block_id:modelData.id,after_id:page.previousBlock(index)})}Button{text:"删除";onClicked:page.changeBlock({op:"delete",block_id:modelData.id})}}
+                                TextArea {objectName:"scriptBlockDisplayText";property string blockId:modelData.id;onActiveFocusChanged:if(activeFocus)page.selectedBlockId=modelData.id;text:modelData.payload.text || modelData.payload.kind || "";readOnly:true;selectByMouse:true;wrapMode:TextEdit.Wrap;Layout.fillWidth:true;background:null
+                                    id:blockText
+                                    Component.onCompleted:bridge.observeBlockTextDoubleClicks(blockText)
+                                    Connections{target:bridge;function onBlockTextDoubleClicked(blockId){if(blockId===blockText.blockId&&page.visible&&blockCard.visible&&!page.blockActionBusy){page.selectedBlockId=modelData.id;if(!blockEditor.visible)blockEditor.openFor(modelData)}}}
+                                }
                             }
                         }
                     }
@@ -478,24 +522,6 @@ ListView {
             RowLayout{Item{Layout.fillWidth:true}Button{objectName:"screenplayStorageResetCancel";text:"取消";onClicked:storageResetDialog.close()}Button{objectName:"screenplayStorageResetConfirm";text:"确认清空并重建";enabled:storageDiscardConfirmed.checked&&!!storageResetReason.text.trim();onClicked:page.resetStorage()}}
         }
     }
-    Dialog {
-        id:styleDialog;objectName:"scriptProjectStyleDialog";title:"项目风格约定";modal:true;anchors.centerIn:parent;width:Math.min(820,page.width-40);height:Math.min(620,page.height-30)
-        property string projectPath:""
-        property int revision:0
-        property string originalText:""
-        contentItem:ColumnLayout {
-            Label {Layout.fillWidth:true;wrapMode:Text.Wrap;color:t.muted;text:"当前工程的全部剧本共用。可自由约定剧本风格、视觉表达，以及对白、动作或场景的风格；无需按固定模板填写。约定供创作参考，本次具体要求优先。"}
-            ScrollView {Layout.fillWidth:true;Layout.fillHeight:true;TextArea{id:styleText;objectName:"scriptProjectStyleText";selectByMouse:true;wrapMode:TextEdit.Wrap;placeholderText:"写下本工程希望保留的表达方式、节奏、语言或其他风格约定。可留空。"}}
-            Label {objectName:"scriptProjectStyleMessage";Layout.fillWidth:true;wrapMode:Text.Wrap;visible:!!page.styleMessage;text:page.styleMessage;color:t.warn}
-            RowLayout {
-                Layout.fillWidth:true
-                Button {objectName:"scriptProjectStyleRevert";text:"还原未保存修改";enabled:!page.styleSaving;onClicked:styleText.text=styleDialog.originalText}
-                Item {Layout.fillWidth:true}
-                Button {text:"取消";onClicked:styleDialog.close()}
-                Button {objectName:"scriptProjectStyleSave";text:"保存风格约定";highlighted:true;enabled:page.styleLoaded&&!page.styleSaving&&!app.busy&&styleText.text!==styleDialog.originalText;onClicked:{if(styleDialog.projectPath!==(app.project.path||"")){styleDialog.close();return}page.styleSaving=true;bridge.saveProjectStyle(styleText.text,styleDialog.revision)}}
-            }
-        }
-    }
     ScriptTimelineEditor {id:timelineEditor;host:page}
     Dialog {
         id:timelineDeleteDialog;objectName:"scriptTimelineDeleteDialog";title:"删除时间点及子树";modal:true;anchors.centerIn:parent;width:Math.min(440,page.width-30)
@@ -520,8 +546,10 @@ ListView {
         }
     }
     Dialog {
-        id:createDialog;objectName:"scriptCreateDialog";title:"新建剧本方案";modal:true;anchors.centerIn:parent;width:420
-        contentItem:ColumnLayout {TextField{id:createTitle;objectName:"scriptCreateTitle";placeholderText:"剧本名称";Layout.fillWidth:true}ComboBox{id:createFormat;model:["单片","剧集"]}Button{objectName:"scriptCreateSave";text:"创建";enabled:!!createTitle.text.trim()&&page.canCreateScreenplay;onClicked:page.act("create_screenplay",{title:createTitle.text,format:createFormat.currentIndex===1?"series":"single",reason:"创建剧本方案"})}}
+        id:createDialog;
+        SubmissionState{id:createSubmission;owner:createDialog;app:page.app;controller:page;operation:"create_screenplay";onRestoreRequested:function(a){createTitle.text=a.title||"";createFormat.currentIndex=a.format==="series"?1:0}}
+        objectName:"scriptCreateDialog";title:"新建剧本方案";modal:true;anchors.centerIn:parent;width:420
+        contentItem:ColumnLayout {SubmissionFeedback{state:createSubmission}TextField{id:createTitle;objectName:"scriptCreateTitle";placeholderText:"剧本名称";Layout.fillWidth:true}ComboBox{id:createFormat;model:["单片","剧集"]}Button{objectName:"scriptCreateSave";text:"创建";enabled:!!createTitle.text.trim()&&page.canCreateScreenplay;onClicked:page.act("create_screenplay",{title:createTitle.text,format:createFormat.currentIndex===1?"series":"single",reason:"创建剧本方案"})}}
     }
     Dialog {
         id:deleteUnitDialog;title:"删除场次";modal:true;anchors.centerIn:parent;standardButtons:Dialog.Ok|Dialog.Cancel
@@ -538,22 +566,60 @@ ListView {
             CheckBox {text:page.writingTarget.target_manifest?"固定批量：仅正文为空的启用普通场景":"允许修改目标范围内已有正文";checked:page.writingTarget.include_existing===true;enabled:!page.writingTarget.target_manifest;onToggled:{var target=Object.assign({},page.writingTarget);target.include_existing=checked;page.writingTarget=target}}
             RowLayout {
                 Layout.fillWidth:true
-                Label {objectName:"scriptWritingStyleSummary";Layout.fillWidth:true;wrapMode:Text.Wrap;color:t.muted;text:page.projectStyle.text?"本次写作使用项目风格约定；本次具体创作要求优先。":"尚未设置项目风格约定，可按本次要求自由创作。"}
-                Button {objectName:"scriptWritingStyleOpen";text:page.projectStyle.text?"查看风格约定":"设置风格约定";enabled:page.styleLoaded;onClicked:page.openProjectStyle()}
+                Label {objectName:"scriptWritingAgreementSummary";Layout.fillWidth:true;wrapMode:Text.Wrap;color:t.muted;text:"本次写作使用目标剧本的有效创作约定；本次具体要求可进一步说明。"}
+                Button {objectName:"scriptWritingAgreementOpen";text:"查看 / 编辑剧本创作约定";onClicked:creativeEditor.openFor(page.writingTarget.screenplay_id)}
             }
             TextArea{id:writingPrompt;objectName:"scriptWritingPrompt";placeholderText:"写作或修改要求";wrapMode:TextEdit.Wrap;Layout.fillWidth:true;Layout.fillHeight:true}
             RowLayout{Item{Layout.fillWidth:true}Button{text:"取消";onClicked:writingDialog.close()}Button{objectName:"scriptWritingSend";text:"发送到当前聊天";enabled:!!writingPrompt.text.trim()&&(page.writingTarget.ids||[]).length>0;onClicked:{app.assistantOpen=true;bridge.screenplayWritingTurn(writingPrompt.text,page.writingTarget)}}}
         }
     }
     Dialog {
-        id:exportDialog;objectName:"scriptExportDialog";title:"剧本导出预览";modal:true;anchors.centerIn:parent;width:Math.min(900,page.width-40);height:Math.min(700,page.height-30)
-        contentItem:ColumnLayout{RowLayout{ComboBox{model:["文本","JSON"];currentIndex:page.exportFormat==="json"?1:0;onActivated:{page.exportFormat=currentIndex===1?"json":"text";page.act("export_screenplay",{screenplay_id:page.screenplay.id,format:page.exportFormat})}}Button{text:"保存 UTF-8 文件";onClicked:exportFile.open()}}Label{visible:(page.exportResult.diagnostics||[]).length>0;text:page.diagnosticsText(page.exportResult.diagnostics);color:t.warn;wrapMode:Text.Wrap;Layout.fillWidth:true}ScrollView{Layout.fillWidth:true;Layout.fillHeight:true;TextArea{objectName:"scriptExportText";text:page.exportResult.text || "";readOnly:true;selectByMouse:true;wrapMode:TextEdit.Wrap}}}
+        id:exportDialog;objectName:"scriptExportDialog";title:"剧本排版预览与输出";modal:true;anchors.centerIn:parent;width:Math.min(980,page.width-32);height:Math.min(760,page.height-24)
+        contentItem:ColumnLayout {
+            RowLayout {
+                Layout.fillWidth:true
+                Label{text:"保存格式"}
+                ComboBox {objectName:"scriptExportFormat";model:page.exportFormats;textRole:"label";currentIndex:Math.max(0,page.exportFormats.findIndex(function(row){return row.id===page.exportFormat}));onActivated:page.exportFormat=model[currentIndex].id}
+                Button {objectName:"scriptCompileSettingsOpen";text:"排版设置";onClicked:compileSettings.openSettings()}
+                Button {objectName:"scriptExportSave";text:"保存文件…";enabled:page.exportScreenplayId===page.screenplay.id;onClicked:exportFile.open()}
+                Item{Layout.fillWidth:true}
+                Button{text:"关闭";onClicked:exportDialog.close()}
+            }
+            Label{text:"以下为剧本排版预览。保存时按所选格式输出；检查提示不会写入正文。";color:t.muted;wrapMode:Text.Wrap;Layout.fillWidth:true}
+            Label{visible:(page.exportResult.diagnostics||[]).length>0;text:page.diagnosticsText(page.exportResult.diagnostics);color:t.warn;wrapMode:Text.Wrap;Layout.fillWidth:true}
+            ScrollView {
+                id: exportPreviewScroll
+                Layout.fillWidth:true;Layout.fillHeight:true;clip:true
+                contentWidth:Math.max(availableWidth,210*96/25.4)
+                contentHeight:previewText.height
+                background:Rectangle{color:"#e6e7e9"}
+                Item {
+                    width:exportPreviewScroll.contentWidth;height:previewText.height
+                    TextArea {
+                        id:previewText;objectName:"scriptExportText"
+                        readonly property var pageMargins:((page.exportResult.compile_settings||{}).settings||{}).page_margins_mm||({top:25,right:23,bottom:25,left:23})
+                        width:210*96/25.4;anchors.horizontalCenter:parent.horizontalCenter
+                        height:Math.max(297*96/25.4,contentHeight+topPadding+bottomPadding)
+                        topPadding:pageMargins.top*96/25.4;rightPadding:pageMargins.right*96/25.4
+                        bottomPadding:pageMargins.bottom*96/25.4;leftPadding:pageMargins.left*96/25.4
+                        text:page.exportResult.qt_preview_html||page.exportResult.preview_html||""
+                        textFormat:TextEdit.RichText;readOnly:true;selectByMouse:true;wrapMode:TextEdit.Wrap;color:"#181818"
+                        background:Rectangle{color:"white"}
+                    }
+                }
+            }
+        }
     }
-    FileDialog{id:exportFile;fileMode:FileDialog.SaveFile;defaultSuffix:page.exportFormat==="json"?"json":"txt";onAccepted:bridge.saveScreenplayExport(page.screenplay.id,page.exportFormat,selectedFile.toString())}
-    Dialog{id:formatDialog;title:"完整重组结构";modal:true;anchors.centerIn:parent;standardButtons:Dialog.Ok|Dialog.Cancel;contentItem:Label{text:page.screenplay.format==="series"?"将各集下的幕和段落搬到单片根级，并删除空集。":"创建第1集，并将当前根级幕和段落全部归入此集。";wrapMode:Text.Wrap;width:420}onAccepted:page.changeFormat()}
+    FileDialog {
+        id:exportFile;objectName:"scriptExportFile";title:"保存已编译剧本";fileMode:FileDialog.SaveFile
+        defaultSuffix:page.exportChoice.extension;nameFilters:[page.exportChoice.filter]
+        onAccepted:bridge.saveScreenplayExport(page.exportScreenplayId,page.exportFormat,selectedFile.toString())
+    }
+    Dialog{id:formatDialog;objectName:"scriptFormatDialog";title:"完整重组结构";modal:true;anchors.centerIn:parent;width:Math.min(460,parent.width-24);standardButtons:Dialog.Ok|Dialog.Cancel;contentItem:Label{text:page.screenplay.format==="series"?"将各集下的幕和段落搬到单片根级，并删除空集。":"创建第1集，并将当前根级幕和段落全部归入此集。";wrapMode:Text.Wrap}onAccepted:page.changeFormat()}
+    CompileSettingsEditor{id:compileSettings;host:page}
     ScriptStructureEditor{id:structureDialog;host:page}
     ScriptSegmentEditor{id:segmentDialog;host:page}
-    ScriptSettingsEditor{id:settingsDialog;host:page}
+    CreativeAgreementEditor{id:creativeEditor;host:page}
 }
 
 

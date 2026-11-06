@@ -7,6 +7,7 @@ from typing import cast
 
 from .order_ids import allocate, prefix_for
 from .property_labels import BIG_EVENT_PROGRESS, STORYLINE_PROGRESS
+from .source_location import ExactQuoteLookup
 
 NODE_TYPES = ("person", "group", "item", "location", "scene", "event", "action", "big_event", "storyline")
 
@@ -24,12 +25,12 @@ VALUE_TYPES = ("string", "number", "boolean", "node", "any", "either")
 ALLOWED_PARTICIPANTS = ("person", "group", "item", "location")
 
 
-def _parse_properties(rows, text: str, names: set[str], rejected: list[dict], locations: dict) -> list[dict]:
+def _parse_properties(rows, text: str, names: set[str], rejected: list[dict], locations: dict, lookup=None) -> list[dict]:
     """Verify property observations the same way as nodes: exact quote, known owner."""
     if not isinstance(rows, list):
         return []
     properties: list[dict] = []
-    for row in rows:
+    for draft_index, row in enumerate(rows):
         if not isinstance(row, dict):
             continue
         node_name = str(row.get("node") or "").strip()
@@ -47,13 +48,16 @@ def _parse_properties(rows, text: str, names: set[str], rejected: list[dict], lo
         if value_type not in VALUE_TYPES:
             rejected.append({"name": f"{node_name}.{property_id}", "reason": f"值类型无效：{value_type}"})
             continue
+        if "cardinality" in row and row["cardinality"] not in ("one", "many"):
+            rejected.append({"name": f"{node_name}.{property_id}", "reason": "cardinality必须为one或many"})
+            continue
         if "symmetric" in row and type(row["symmetric"]) is not bool:
             rejected.append({"name": f"{node_name}.{property_id}", "reason": "symmetric必须是布尔值"})
             continue
         quotes = [str(item) for item in (row.get("quotes") or []) if str(item).strip()]
         good = []
         for quote in quotes:
-            index, found = _locate(text, quote, locations)
+            index, found = _locate(text, quote, locations, lookup)
             if index < 0:
                 rejected.append({"name": f"{node_name}.{property_id}", "reason": "引文不在原文中",
                                  "quote": quote[:60]})
@@ -63,33 +67,24 @@ def _parse_properties(rows, text: str, names: set[str], rejected: list[dict], lo
             rejected.append({"name": f"{node_name}.{property_id}", "reason": "没有可用的原文引文"})
             continue
         good.sort(key=lambda item: item["start"])
-        raw_value = row.get("value")
-        if value_type == "number":
-            if not isinstance(raw_value, (int, float, str)):
-                rejected.append({"name": f"{node_name}.{property_id}", "reason": "数值无法解析"})
-                continue
-            try:
-                value = int(raw_value)
-            except (TypeError, ValueError):
-                try:
-                    value = float(raw_value)
-                except (TypeError, ValueError):
-                    rejected.append({"name": f"{node_name}.{property_id}", "reason": "数值无法解析"})
-                    continue
-        elif value_type == "boolean":
-            if type(raw_value) is not bool:
-                rejected.append({"name": f"{node_name}.{property_id}", "reason": "布尔属性必须为true或false"})
-                continue
-            value = raw_value
-        elif value_type in {"any", "node", "either"}:
-            value = raw_value
-        else:
-            value = str(raw_value if raw_value is not None else "").strip()
+        op = row.get('op')
+        if not isinstance(op, str) or op not in {'set', 'add', 'remove', 'clear', 'unknown'}:
+            rejected.append({'name': property_id, 'reason': '必须明确事件变更op'})
+            continue
+        if ('value' in row) != (op in {'set', 'add', 'remove'}):
+            rejected.append({'name': property_id, 'reason': 'set/add/remove须有value，clear/unknown禁止value'})
+            continue
+        value = row.get('value')
+        if op in {'set', 'add', 'remove'} and value_type == 'boolean' and not isinstance(value, list) and type(value) is not bool:
+            rejected.append({'name': property_id, 'reason': '布尔属性必须为true或false'})
+            continue
         properties.append({
+            "_draft_index": draft_index,
             "node": node_name,
             "property": property_id,
-            "value": value,
+            **({"value": value} if op in {"set", "add", "remove"} else {}), "op": op,
             "value_type": value_type,
+            **({"cardinality": row["cardinality"]} if "cardinality" in row else {}),
             **({"symmetric": row["symmetric"]} if "symmetric" in row else {}),
             "start": good[0]["start"],
             "quotes": [item["quote"] for item in good],
@@ -112,27 +107,28 @@ def _parse_properties(rows, text: str, names: set[str], rejected: list[dict], lo
 WRAPPING_QUOTES = "\"'\u2018\u2019\u201c\u201d\u300c\u300d\u300e\u300f"
 
 
-def _locate(text: str, quote: str, locations: dict) -> tuple[int, str]:
+def _locate(text: str, quote: str, locations: dict, lookup=None) -> tuple[int, str]:
     if quote not in locations:
-        locations[quote] = _find_quote(text, quote)
+        locations[quote] = _find_quote(text, quote, lookup)
     return locations[quote]
 
 
-def _find_quote(text: str, quote: str) -> tuple[int, str]:
+def _find_quote(text: str, quote: str, lookup=None) -> tuple[int, str]:
     """找到引文在原文里的位置，返回 (下标, 实际用的引文)。
 
     先按原样找；找不到就只去掉**首尾的引号**再试一次——模型经常把整句再套一层
     引号（`“他说‘火纹石改过外形’”` 多套了一层），多出来的是排版不是内容。只剥首尾、
     不动中间，所以「逐字对上」这条并没有松。
     """
-    index = text.find(quote)
-    if index >= 0:
-        return index, quote
+    lookup = lookup if lookup is not None else ExactQuoteLookup(text)
+    found = lookup.positions(quote, 1)
+    if found:
+        return found[0], quote
     trimmed = quote.strip().strip(WRAPPING_QUOTES).strip()
     if trimmed and trimmed != quote:
-        index = text.find(trimmed)
-        if index >= 0:
-            return index, trimmed
+        found = lookup.positions(trimmed, 1)
+        if found:
+            return found[0], trimmed
     return -1, quote
 
 
@@ -166,6 +162,7 @@ def parse_nodes(payload: dict, text: str) -> dict:
 
     nodes: list[dict] = []
     locations: dict[str, tuple[int, str]] = {}
+    lookup = ExactQuoteLookup(text)
     rejected: list[dict] = []
     for original_index, row in rows:
         if not isinstance(row, dict):
@@ -185,11 +182,12 @@ def parse_nodes(payload: dict, text: str) -> dict:
         closing_span = None
         if node_type == "storyline":
             closing = row.get("closing_quote")
-            if not isinstance(closing, str) or not closing or text.find(closing) < 0:
+            closing_positions = lookup.positions(closing, 2) if isinstance(closing, str) and closing else []
+            if not isinstance(closing, str) or not closing_positions:
                 rejected.append({"name": name, "reason": "主要故事仅在完整结束后总结，须给出原文closing_quote"})
                 continue
-            closing_start = text.find(closing)
-            if text.find(closing, closing_start+1) >= 0:
+            closing_start = closing_positions[0]
+            if len(closing_positions) > 1:
                 rejected.append({"name": name, "reason": "closing_quote出现多次，须用完整上下文唯一定位"})
                 continue
             closing_span = {"start": closing_start, "end": closing_start+len(closing), "quote": closing}
@@ -198,13 +196,14 @@ def parse_nodes(payload: dict, text: str) -> dict:
             quotes = [closing_span["quote"]] if closing_span else []
         good: list[dict] = []
         for quote in quotes:
-            index, found = _locate(text, quote, locations)
+            index, found = _locate(text, quote, locations, lookup)
             if index < 0:
                 rejected.append({"name": name, "reason": "引文不在原文中", "quote": quote[:60]})
                 continue
-            if node_type == "event" and text.find(found, index + 1) >= 0:
+            positions = lookup.positions(found, 2) if node_type == "event" else []
+            if len(positions) > 1:
                 rejected.append({"name": name, "quote": found,
-                                 "positions_sample": [index, text.find(found, index + 1)],
+                                 "positions_sample": positions,
                                  "position_basis": "submission_relative",
                                  "reason": "事件引文在提交范围出现多处，不能任取首处作为精确身份依据；请缩小提交范围或提供更具体的逐字引文"})
             good.append({"quote": found, "start": index})
@@ -257,7 +256,7 @@ def parse_nodes(payload: dict, text: str) -> dict:
     declared = declared if isinstance(declared, list) else []
     if strays:
         declared = declared + strays
-    properties = _parse_properties(declared, text, {item["name"] for item in nodes}, rejected, locations)
+    properties = _parse_properties(declared, text, {item["name"] for item in nodes}, rejected, locations, lookup)
     scenes = {item["name"] for item in grouped["scene"]}
     for event in grouped["event"]:
         if event["scene"] and event["scene"] not in scenes:
@@ -313,47 +312,6 @@ def _anchor_for(reference: str, event_by_name: dict[str, str]) -> tuple[str | No
     anchor = event_by_name.get(reference)
     return anchor, "explicit" if anchor else ""
 
-
-def _expiry_updates(data: dict, records: list[dict], accepted: list[dict],
-                    nodes: dict[str, dict], event_by_name: dict[str, str],
-                    skipped: list[dict]) -> list[dict]:
-    """Put the expiry on the value itself; there is no invalidation record."""
-    values = {row["id"]: dict(row) for row in accepted + records}
-    changed: dict[str, dict] = {}
-    for item in data.get("expirations") or []:
-        identifier = str(item.get("record_id") or "")
-        row = values.get(identifier)
-        if not identifier:
-            subjects = {key for key, node in nodes.items()
-                        if key == item.get("node") or node.get("name") == item.get("node")}
-            matches = [value for value in values.values()
-                       if value.get("kind") == "property_value"
-                       and value.get("node_id") in subjects
-                       and value.get("property_id") == item.get("property")
-                       and value.get("value") == item.get("value")]
-            if len(matches) == 1:
-                row = matches[0]
-                identifier = row["id"]
-        if row is None or row.get("kind") != "property_value":
-            skipped.append({"name": identifier, "reason": "失效目标必须是已有或本批的属性取值ID"})
-            continue
-        boundary = item.get("valid_to")
-        if boundary is None:
-            anchor, _ = _anchor_for(str(item.get("at_event") or ""), event_by_name)
-            event = nodes.get(anchor or "", {})
-            disclosure = event.get("disclosure") or {}
-            if not anchor or not disclosure:
-                skipped.append({"name": identifier, "reason": "失效位置须给valid_to原文坐标或明确at_event"})
-                continue
-            boundary = {**disclosure, "event_id": anchor}
-        if not isinstance(boundary, dict) or not isinstance(boundary.get("source_id"), str) or type(boundary.get("start")) is not int:
-            skipped.append({"name": identifier, "reason": "valid_to须包含source_id和整数start"})
-            continue
-        updated = dict(row) | {"valid_to": dict(boundary)}
-        if updated != row:
-            changed[identifier] = updated
-            values[identifier] = updated
-    return list(changed.values())
 
 
 def _node_spans(item: dict, source_id: str) -> list[dict]:
@@ -426,12 +384,12 @@ def _event_reuse_candidates(item: dict, snapshot: dict, source_id: str,
 
 def observation_key(row: dict) -> str:
     """Full fact/provenance identity; readable row IDs do not encode semantics."""
-    boundary = row.get("valid_from") or row.get("disclosure") or {}
+    boundary = row.get("disclosure") or {}
     evidence = row.get("evidence") or {}
     fields = {
         "node": row.get("node_id"), "property": row.get("property_id"), "value": row.get("value"),
         "scope": row.get("scope") or "world", "holder": row.get("holder_id"),
-        "event": row.get("event_id") or boundary.get("event_id"), "applies_to": row.get("applies_to"),
+        "event": row.get("event_id"), "op": row.get("op"), "sequence": row.get("sequence"),
         "source_id": boundary.get("source_id"), "start": boundary.get("start"),
         "quote": evidence.get("quote"), "evidence_source": evidence.get("source_id"),
     }
@@ -757,9 +715,10 @@ def build_extraction(ops, data: dict) -> dict:
     # It does not follow that the checkpoint caused the value, or that the value
     # began to hold in the story world at that moment.
     accepted_records = ops.property_records()
-    known_values = {observation_key(row): row for row in accepted_records if row.get("kind") == "property_value"}
+    known_values = {observation_key(row): row for row in accepted_records if row.get("kind") == "property_change"}
     reserved_ids = {row["id"] for row in accepted_records} | {prop["property"] for prop in data.get("properties", [])}
     records: list[dict] = []
+    property_origins: dict[str, list[int]] = {}
 
     for node in snapshot['nodes']:
         if node['node_type'] in {'event', 'action'} and not node.get('retracted'):
@@ -777,6 +736,16 @@ def build_extraction(ops, data: dict) -> dict:
         if name in symmetric_flags and symmetric_flags[name] != prop["symmetric"]:
             skipped.append({"name": name, "reason": "同一属性定义的symmetric声明冲突"})
         symmetric_flags[name] = prop["symmetric"]
+    cardinalities = {}
+    for prop in data.get("properties", []):
+        if "cardinality" not in prop:
+            continue
+        name, proposed = prop["property"], prop["cardinality"]
+        if name in cardinalities and cardinalities[name] != proposed:
+            skipped.append({"name": name, "reason": "同一属性定义的cardinality声明冲突"})
+        cardinalities[name] = proposed
+        if name in definition_records and definition_records[name].get("cardinality", "one") != proposed:
+            skipped.append({"name": name, "reason": "cardinality与已有定义冲突；请显式修改属性定义"})
     definition_updates = set()
     definitions: dict[str, str] = {
         str(item["id"]): str(item.get("value_type") or "string")
@@ -836,7 +805,7 @@ def build_extraction(ops, data: dict) -> dict:
             definitions[property_id] = known_type
             records.append({
                 "kind": "property_definition", "id": property_id,
-                "value_type": known_type, "cardinality": "one",
+                "value_type": known_type, "cardinality": cardinalities.get(property_id, "one"),
                 "symmetric": symmetric_flags.get(property_id, False),
             })
         elif known_type != proposed_type and {known_type, proposed_type} != {"node", "either"}:
@@ -847,35 +816,31 @@ def build_extraction(ops, data: dict) -> dict:
             records.append(definition_records[property_id] | {"symmetric": symmetric_flags[property_id]})
             definition_updates.add(property_id)
         value_type = known_type
-        value = prop["value"]
-        if value_type in {"node", "either"}:
-            target = None
-            for kind in NODE_TYPES:
-                target = ids.get((kind, value))
-                if target:
+        value = prop.get("value")
+        if "value" in prop and value_type in {"node", "either"}:
+            resolved_values = []
+            values = value if isinstance(value, list) else [value]
+            unresolved = False
+            for item in values:
+                target = None
+                if isinstance(item, str):
+                    for kind in NODE_TYPES:
+                        target = ids.get((kind, item)) or existing.get((kind, item))
+                        if target:
+                            break
+                if target is None and value_type == "node":
+                    unresolved = True
                     break
-            if target is None:
-                for kind in NODE_TYPES:
-                    target = existing.get((kind, value))
-                    if target:
-                        break
-            if target is None:
-                # either 允许写「无」「未知」这类非节点值；node 类型解析不到就跳过。
-                if value_type == "node":
-                    continue
-            else:
-                value = target
+                resolved_values.append(target if target is not None else item)
+            if unresolved:
+                skipped.append({"name": property_id, "reason": "节点引用未能解析"})
+                continue
+            value = resolved_values if isinstance(value, list) else resolved_values[0]
         quote = prop["quotes"][0]
         anchor = event_by_name.get(prop.get("at_event") or "")
         if prop.get('at_event') and anchor is None:
             skipped.append({'name': property_id, 'reference': prop['at_event'], 'reason': '显式披露锚点未能解析，不使用临近事件代替'})
             continue
-        basis = "model" if prop.get("at_event") else "nearest"
-        if property_id in progress_owners:
-            anchor = last_leaf(node_id) if node_id else None
-            basis = "container_end"
-        if not anchor:
-            anchor = _checkpoint_at(prop["start"], checkpoint_order)
         if not anchor:
             # Nothing in this chapter covers the position. Anchoring to a made-up
             # start would make the value visible before the reader learns it, so
@@ -886,15 +851,15 @@ def build_extraction(ops, data: dict) -> dict:
             })
             continue
         record = {
-            "kind": "property_value",
+            "kind": "property_change",
             "node_id": node_id, "property_id": property_id,
-            "value": value, "event_id": anchor,
+            "op": prop['op'], "event_id": anchor, "sequence": prop['start'],
+            **({'value': value} if 'value' in prop else {}),
             "disclosure": {"source_id": data["source_id"], "start": prop["start"]},
             "evidence": {"source_id": data["source_id"], "quote": quote},
         }
         # Who chose the anchor, not what it proves: "model" means the model named
         # the event; it still only locates the disclosure, not the story change.
-        record["anchor_basis"] = basis
         if prop.get("source"):
             record["source"] = str(prop["source"])
         # The category the model chose. It is a suggestion: a human can move the
@@ -933,7 +898,9 @@ def build_extraction(ops, data: dict) -> dict:
         key = observation_key(record)
         previous = known_values.get(key)
         if previous is not None:
-            # Classification edits do not create another observation or reopen an ended interval.
+            if "_draft_index" in prop:
+                property_origins.setdefault(previous["id"], []).append(prop["_draft_index"])
+            # Classification edits preserve the identity of the original event change.
             annotations = {field: record[field] for field in ("category", "source")
                            if record.get(field) and previous.get(field) != record[field]}
             combined_related = sorted(set(previous.get("related_nodes") or []) | set(record.get("related_nodes") or []))
@@ -951,25 +918,10 @@ def build_extraction(ops, data: dict) -> dict:
         while record["id"] in reserved_ids:
             record["id"] = ops.new_property_id()
         reserved_ids.add(record["id"])
+        if "_draft_index" in prop:
+            property_origins.setdefault(record["id"], []).append(prop["_draft_index"])
         known_values[key] = record
         records.append(record)
-
-    prospective_nodes = {row["id"]: row for row in snapshot["nodes"]}
-    prospective_nodes.update({row["id"]: row for row in objects if row.get("kind") == "node"})
-    reference_ids = {ref: identifier for (_kind, ref), identifier in ids.items()}
-    for expiration in data.get('expirations', []):
-        if expiration.get('node') in reference_ids:
-            expiration['node'] = reference_ids[expiration['node']]
-        if (data.get('property_reference_types', {}).get(expiration.get('property')) in {'node', 'either'}
-                and isinstance(expiration.get('value'), str) and expiration['value'] in reference_ids):
-            expiration['value'] = reference_ids[expiration['value']]
-        if isinstance(expiration.get('valid_to'), dict):
-            value = expiration['valid_to'].get('event_id')
-            if value in reference_ids:
-                expiration['valid_to']['event_id'] = reference_ids[value]
-    updates = _expiry_updates(data, records, accepted_records, prospective_nodes, event_by_name, skipped)
-    updates_by_id = {row["id"]: row for row in updates}
-    records = [updates_by_id.pop(row["id"], row) for row in records] + list(updates_by_id.values())
 
     revision = ops.graph_project_info()["revision"]
     node_ids = {item['reference']: ids[(item['type'], item['name'])] for item in data['nodes']
@@ -979,12 +931,13 @@ def build_extraction(ops, data: dict) -> dict:
             "objects": [], "property_records": [], "diagnostics": [], "errors": [],
             "revision": revision, "empty": True, "node_count": 0,
             "property_count": 0, "scene_links": 0,
-            "skipped": skipped, "node_ids": node_ids,
+            "skipped": skipped, "node_ids": node_ids, "property_origins": property_origins,
         }
     diagnostics: list[dict] = []
     errors: list[dict] = []
     return {
         "node_ids": node_ids,
+        "property_origins": property_origins,
         "objects": objects,
         "property_records": records,
         "diagnostics": diagnostics,
@@ -994,7 +947,7 @@ def build_extraction(ops, data: dict) -> dict:
         "skipped": skipped,
         "node_count": len([item for item in objects if item["kind"] == "node"]),
         "property_count": len([
-            item for item in records if item["kind"] == "property_value"
+            item for item in records if item["kind"] == "property_change"
         ]),
         "scene_links": sum(len(items) for items in scene_children.values()),
     }

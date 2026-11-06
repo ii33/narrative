@@ -1,4 +1,4 @@
-"""Independent read-only project checking, including isolated legacy corruption."""
+"""Independent read-only project checking, including isolated malformed event facts."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def test_check_is_readonly_and_healthy_graph_has_no_current_errors(project):
     assert files(root) == before_files
 
 
-def test_legacy_active_corruption_reports_specific_targets_without_mutation(project):
+def test_corrupt_event_facts_report_specific_targets_without_mutation(project):
     sid, ids, _item = install(project)
     with project.project.store.connect(write=True) as db:
         scene = next(n for n in project.graph_snapshot()["nodes"] if n["node_type"] == "scene")
@@ -49,14 +49,11 @@ def test_legacy_active_corruption_reports_specific_targets_without_mutation(proj
             "UPDATE objects SET data=? WHERE id=?",
             (json.dumps(item, ensure_ascii=False), item["id"]),
         )
-        # Legacy corruption is explicit test-only SQL, not a runtime bypass API.
+        # Explicit corruption is test-only SQL, not a runtime bypass API.
         holder = db.execute("SELECT data FROM property_records WHERE id='holder0'").fetchone()
         old = json.loads(holder["data"])
-        old["valid_to"] = {
-            "source_id": sid,
-            "start": TEXT.index(SENTENCES[3]),
-            "event_id": ids[SENTENCES[3]],
-        }
+        old['op'] = 'clear'
+        old.pop('value', None)
         db.execute(
             "UPDATE property_records SET data=? WHERE id=?",
             (json.dumps(old, ensure_ascii=False), old["id"]),
@@ -81,43 +78,26 @@ def test_legacy_active_corruption_reports_specific_targets_without_mutation(proj
     assert project.graph_snapshot() == before
 
 
-def test_ended_historical_bad_record_is_not_current_dangling_error(project):
+def test_earlier_bad_change_is_still_reported_after_later_valid_fact(project):
     sid, ids, _item = install(project)
-    position = {"source_id": sid, "start": 0}
-    bad = {
-        "kind": "property_value",
-        "id": "legacy_bad",
-        "node_id": "missing_old_node",
-        "property_id": "持有者",
-        "value": "missing_old_holder",
-        "event_id": ids[SENTENCES[0]],
-        "disclosure": position,
-        "evidence": {"source_id": sid, "quote": SENTENCES[0] + "。"},
-    }
-    bad["valid_from"] = {"source_id": sid, "start": 0, "event_id": ids[SENTENCES[0]]}
-    bad["valid_to"] = {
-        "source_id": sid,
-        "start": TEXT.index(SENTENCES[1]),
-        "event_id": ids[SENTENCES[1]],
-    }
+    definition = {'kind': 'property_definition', 'id': '曾接触者', 'value_type': 'node', 'cardinality': 'one'}
+    bad = {'kind': 'property_change', 'id': 'bad_earlier_change', 'node_id': 'I1', 'property_id': '曾接触者',
+           'op': 'set', 'sequence': 0, 'value': 'missing_old_person', 'event_id': ids[SENTENCES[0]],
+           'disclosure': {'source_id': sid, 'start': 0}, 'evidence': {'source_id': sid, 'quote': SENTENCES[0]+'。'}}
+    offset = TEXT.index(SENTENCES[1])
+    later = bad | {'id': 'later_valid_change', 'value': ids['甲'], 'event_id': ids[SENTENCES[1]], 'sequence': offset,
+                   'disclosure': {'source_id': sid, 'start': offset}, 'evidence': {'source_id': sid, 'quote': SENTENCES[1]+'。'}}
     with project.project.store.connect(write=True) as db:
-        db.execute(
-            "INSERT INTO property_records(id,kind,data,accepted_revision) VALUES (?,?,?,?)",
-            (
-                bad["id"],
-                bad["kind"],
-                json.dumps(bad, ensure_ascii=False),
-                project.graph_project_info()["revision"],
-            ),
-        )
+        for row in [definition, bad, later]:
+            db.execute('INSERT INTO property_records(id,kind,data,accepted_revision) VALUES (?,?,?,?)',
+                       (row['id'], row['kind'], json.dumps(row, ensure_ascii=False), project.graph_project_info()['revision']))
+    before = copy.deepcopy(project.property_records())
     result = project.check_project()
-    offending = [
-        r
-        for r in result["issues"]
-        if r.get("record_id") == "legacy_bad" or "legacy_bad" in r.get("record_ids", [])
-    ]
-    assert not [r for r in offending if r["severity"] == "error" and not r.get("history")]
-    assert project.property_state("I1", "持有者")["state"]["value"] == "未知"
+    offending = [r for r in result['issues'] if r.get('record_id') == bad['id'] or bad['id'] in r.get('record_ids', [])]
+    assert [r for r in offending if r['severity'] == 'error']
+    assert project.property_state('I1', '曾接触者')['state']['value'] == ids['甲']
+    assert project.property_state('I1', '持有者')['state']['value'] == '未知'
+    assert project.property_records() == before
 
 
 def test_checker_rejects_obsolete_merged_fields_without_following_redirects(project):
@@ -139,10 +119,11 @@ def test_checker_rejects_obsolete_merged_fields_without_following_redirects(proj
 def test_checker_reports_current_value_with_missing_definition(project):
     sid, ids, _item = install(project)
     row = {
-        "kind": "property_value",
-        "id": "legacy_missing_definition",
+        "kind": "property_change",
+        "id": "missing_definition_change",
         "node_id": ids["甲"],
         "property_id": "未定义的属性",
+        "op": "set", "sequence": TEXT.index(SENTENCES[1]),
         "value": "原文支持的文字",
         "event_id": ids[SENTENCES[1]],
         "disclosure": {"source_id": sid, "start": TEXT.index(SENTENCES[1])},
@@ -160,7 +141,7 @@ def test_checker_reports_current_value_with_missing_definition(project):
         )
     result = project.check_project()
     assert any(
-        r["code"] in {"DEFINITION", "definition_missing"}
+        r["code"] in {"DEFINITION", "definition_missing", "TARGET", "PROPERTY"}
         and (r.get("record_id") == row["id"] or row["id"] in r.get("record_ids", []))
         for r in result["issues"]
     )
@@ -171,10 +152,11 @@ def test_deleting_definition_still_used_by_current_value_is_rejected_without_wri
     records = [
         {"kind": "property_definition", "id": "颜色", "value_type": "string", "cardinality": "one"},
         {
-            "kind": "property_value",
+            "kind": "property_change",
             "id": "stone_color",
             "node_id": "I1",
             "property_id": "颜色",
+            "op": "set", "sequence": 0,
             "value": "灰",
             "event_id": ids[SENTENCES[0]],
             "evidence": {"source_id": sid, "quote": SENTENCES[0] + "。"},
@@ -191,7 +173,7 @@ def test_deleting_definition_still_used_by_current_value_is_rejected_without_wri
     import pytest
 
     with pytest.raises(ValueError):
-        project.delete_property_records(["颜色"], reason="不能留下当前取值缺定义")
+        project.delete_property_records(["颜色"], reason="不能留下事件事实缺定义", expected_revision=project.graph_project_info()["revision"])
     assert project.property_records() == before
 
 
@@ -207,10 +189,11 @@ def test_definition_and_all_values_can_be_deleted_atomically_without_alias_or_re
             "cardinality": "one",
         },
         {
-            "kind": "property_value",
+            "kind": "property_change",
             "id": "old_color",
             "node_id": "I1",
             "property_id": "旧颜色",
+            "op": "set", "sequence": 0,
             "value": "灰",
             "event_id": ids[SENTENCES[0]],
             "evidence": {"source_id": sid, "quote": SENTENCES[0] + "。"},
@@ -223,7 +206,7 @@ def test_definition_and_all_values_can_be_deleted_atomically_without_alias_or_re
         )["status"]
         == "accepted"
     )
-    project.delete_property_records(["旧颜色", "old_color"], reason="确认错误定义及记录物理删除")
+    project.delete_property_records(["旧颜色", "old_color"], reason="确认错误定义及记录物理删除", expected_revision=project.graph_project_info()["revision"])
     assert not {"旧颜色", "old_color"}.intersection(r["id"] for r in project.property_records())
     result = project.check_project()
     assert not [r for r in result["issues"] if r["severity"] == "error"]

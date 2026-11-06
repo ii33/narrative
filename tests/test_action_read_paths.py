@@ -13,7 +13,7 @@ def install(project):
     sid, _, objects = action_batch(project)
     definitions = [{'kind': 'property_definition', 'id': '状态', 'value_type': 'string', 'cardinality': 'one'}]
     records = definitions + [
-        {'kind': 'property_value', 'id': f'state{i}', 'node_id': 'P1', 'property_id': '状态',
+        {'kind': 'property_change', 'op': 'set', 'sequence': TEXT.index(quote), 'id': f'state{i}', 'node_id': 'P1', 'property_id': '状态',
          'value': state, 'event_id': identifier, 'disclosure': {'source_id': sid, 'start': TEXT.index(quote)},
          'evidence': {'source_id': sid, 'quote': quote}}
         for i, (identifier, quote, state) in enumerate([('A99', FIRST, '进入'), ('A1', SECOND, '停止')])]
@@ -22,8 +22,8 @@ def install(project):
 
 def test_summary_event_api_and_action_order_do_not_compare_type_number_sequences(project):
     install(project)
-    assert project.property_event_state('P1', '状态', 'A99')['value'] == '进入'
-    assert project.property_event_state('P1', '状态', 'A1')['value'] == '停止'
+    assert project.property_event_state('P1', '状态', 'A99')['state']['value'] == '进入'
+    assert project.property_event_state('P1', '状态', 'A1')['state']['value'] == '停止'
     assert project.property_node_summary('P1', cut='A99')['properties'][0]['value'] == '进入'
     assert project.property_node_summary('P1', cut='A1')['properties'][0]['value'] == '停止'
     assert project.graph_event_compare('A99', 'A1')['relation'] == 'before'

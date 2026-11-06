@@ -63,7 +63,9 @@ def test_import_uses_current_adaptation_order_and_state_not_source_disclosure(pr
     assert ids["事件3"] not in {n["id"] for n in imported["nodes"]}
     assert ids["场景0"] not in {n["id"] for n in imported["nodes"]}
     coat = [r for r in imported["properties"] if r.get("property_id") == "服装"]
-    assert len(coat) == 1 and coat[0]["value"] == "白衣" and coat[0]["event_id"] == ids["事件2"]
+    from narrative.adaptation_state import current_rows
+    assert len(coat) == 2
+    assert next(row for row in current_rows(imported) if row.get("property_id") == "服装")["value"] == "白衣"
     assert ids["桥边"] in {n["id"] for n in imported["nodes"]}
     assert ids["远处"] not in {n["id"] for n in imported["nodes"]}
     assert project.adaptation_snapshot() == source

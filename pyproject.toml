@@ -5,9 +5,15 @@ description = "本地叙事证据工作台"
 requires-python = ">=3.12"
 dependencies = [
     "deepseek-harness-sdk==0.2.1rc2",
+    "fonttools>=4.50,<5",
+    "pillow>=11",
+    "mutagen>=1.47,<2",
+    "imageio-ffmpeg>=0.6,<1",
     "pydantic>=2.10,<3",
     "pypdf>=5,<7",
+    "python-docx>=1.1,<2",
     "regex>=2025.11.3",
+    "reportlab>=4,<5",
 ]
 
 [project.optional-dependencies]

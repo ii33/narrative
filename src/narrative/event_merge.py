@@ -24,11 +24,11 @@ def _rewrite_records(records: list[dict], source_id: str, target_id: str) -> lis
     result = []
     for record in records:
         row = deepcopy(record)
-        for field in ("node_id", "holder_id", "event_id", "applies_to", "related_nodes", "valid_from", "valid_to"):
+        for field in ("node_id", "holder_id", "event_id", "related_nodes"):
             if field in row:
                 row[field] = graph_references(row[field], mapping, field)
         definition = definitions.get(row.get("property_id"), {})
-        if row.get("kind") == "property_value" and definition.get("value_type") in {"node", "either"}:
+        if row.get("kind") == "property_change" and definition.get("value_type") in {"node", "either"}:
             value = row.get("value")
             if isinstance(value, str):
                 row["value"] = mapping.get(value, value)

@@ -74,28 +74,25 @@ def test_delete_removes_subtree_and_baselines_but_keeps_invalid_span_body(projec
     assert not set(result["deleted_node_ids"]) & set(local["baseline_nodes"])
 
 
-def test_delete_end_reopens_prior_value_and_clears_deleted_start_state(project):
+def test_delete_event_removes_its_changes_and_replays_prior_state(project):
     ids, script = prepare(project)
-    first = call(project, script, "set_screenplay_timeline_property", node_id=ids["甲"], property_id="服装", value="青衣", event_id=ids["甲敲门"])
-    row = next(r for r in first["properties"] if r.get("property_id") == "服装")
-    call(project, script, "set_screenplay_timeline_property", node_id=ids["甲"], property_id="服装", value="白衣", event_id=ids["甲开门"], record_id=row["id"])
+    call(project, script, "set_screenplay_timeline_property", node_id=ids["甲"], property_id="服装", op="set", value="青衣", event_id=ids["甲敲门"])
+    call(project, script, "set_screenplay_timeline_property", node_id=ids["甲"], property_id="服装", op="set", value="白衣", event_id=ids["甲开门"])
     result = call(project, script, "delete_screenplay_timeline_node", node_id=ids["甲开门"])
     remaining = [r for r in result["properties"] if r.get("property_id") == "服装"]
-    assert len(remaining) == 1 and remaining[0]["value"] == "青衣" and remaining[0]["end_event_id"] is None
-    assert result["opened_property_ids"] == [row["id"]]
+    assert len(remaining) == 1 and remaining[0]["value"] == "青衣" and "end_event_id" not in remaining[0]
     assert len(result["deleted_property_ids"]) == 1
 
 
-def test_delete_rejects_newly_opened_single_value_overlap_atomically(project):
+def test_delete_clear_event_replays_remaining_changes_without_intervals(project):
     ids, script = prepare(project)
-    first = call(project, script, "set_screenplay_timeline_property", node_id=ids["甲"], property_id="服装", value="青衣", event_id=ids["甲敲门"])
-    row = next(r for r in first["properties"] if r.get("property_id") == "服装")
-    call(project, script, "set_screenplay_timeline_property", node_id=ids["甲"], property_id="服装", event_id=ids["甲开门"], record_id=row["id"], expire=True)
-    call(project, script, "set_screenplay_timeline_property", node_id=ids["甲"], property_id="服装", value="白衣", event_id=ids["甲坐下"])
-    before = copy.deepcopy(project.read_screenplay_timeline(script))
-    with pytest.raises(ValueError, match="服装.*区间重叠"):
-        call(project, script, "delete_screenplay_timeline_node", node_id=ids["甲开门"])
-    assert project.read_screenplay_timeline(script) == before
+    call(project, script, "set_screenplay_timeline_property", node_id=ids["甲"], property_id="服装", op="set", value="青衣", event_id=ids["甲敲门"])
+    call(project, script, "set_screenplay_timeline_property", node_id=ids["甲"], property_id="服装", event_id=ids["甲开门"], op="clear")
+    call(project, script, "set_screenplay_timeline_property", node_id=ids["甲"], property_id="服装", op="set", value="白衣", event_id=ids["甲坐下"])
+    result = call(project, script, "delete_screenplay_timeline_node", node_id=ids["甲开门"])
+    from narrative.adaptation_state import current_rows
+    assert next(row for row in current_rows(result) if row.get("property_id") == "服装")["value"] == "白衣"
+    assert all(row.get("event_id") != ids["甲开门"] for row in result["properties"])
 
 
 def test_referenced_entity_delete_is_atomic_and_keeps_body(project):

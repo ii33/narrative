@@ -26,14 +26,17 @@ def draft_result(*, note=False, ended=True):
             {"node": "甲", "property": "朋友", "value": "乙", "value_type": "node",
              "category": "关系", "quotes": ["甲约好接乙。"], "at_event": "甲约好接乙"},
         ],
-        "expirations": [{"node": "甲", "property": "计划", "value": "接乙",
-                       "at_event": "甲接到乙后离开", "reason": "原文明示已接到乙并离开"}] if ended else [],
         "uncertainties": [], "exclusions": [],
     }
+    for row in result["properties"]:
+        row["op"] = "set"
+    if ended:
+        result["properties"].append({"node": "甲", "property": "计划", "at_event": "甲接到乙后离开",
+            "op": "clear", "scope": "claim", "holder": "甲", "quotes": ["甲接到乙后离开。"]})
     if note:
         result["nodes"].append({"type": "item", "name": "便笺", "quotes": ["乙收起便笺。"]})
         result["properties"].append({"node": "便笺", "property": "持有者", "value": "乙", "value_type": "either",
-                                     "scope": "world", "category": "归属与持有", "quotes": ["乙收起便笺。"],
+                                     "op": "set", "scope": "world", "category": "归属与持有", "quotes": ["乙收起便笺。"],
                                      "at_event": "甲接到乙后离开"})
     return result
 

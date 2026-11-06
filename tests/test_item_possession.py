@@ -52,12 +52,13 @@ def record(
 ):
     sentence = SENTENCES[event_index] + "。"
     result = {
-        "kind": "property_value",
+        "kind": "property_change",
         "id": identifier,
         "node_id": "I1",
         "property_id": "持有者",
         "value": value,
         "event_id": ids[SENTENCES[event_index]],
+        "op": "set", "sequence": TEXT.index(sentence),
         "scope": scope,
         "category": "归属与持有",
         "evidence": {"source_id": sid, "quote": sentence},
@@ -143,7 +144,7 @@ def test_missing_or_nonworld_or_invalid_holder_does_not_create_item(project, pro
         project.apply_changes(
             [item], rows, project.graph_project_info()["revision"], reason="无效状态不可写"
         )["status"]
-        == "rejected"
+        == "staged"
     )
     assert project.graph_snapshot() == before
 
@@ -152,22 +153,18 @@ def test_graph_only_item_write_cannot_bypass_possession_requirement(project):
     _sid, _ids, item = setup(project)
     rev = project.graph_project_info()["revision"]
     assert not prepare(project, [item], [], rev).valid
-    assert project.apply_changes([item], [], rev, reason="缺持有人")["status"] == "rejected"
+    assert project.apply_changes([item], [], rev, reason="缺持有人")["status"] == "staged"
     assert project.graph_project_info()["revision"] == rev
 
 
-def test_expiring_only_current_holder_cannot_leave_item_uncovered(project):
+def test_clear_only_current_holder_cannot_leave_item_uncovered(project):
     sid, ids, _item = install(project)
     before = copy.deepcopy(project.graph_snapshot())
     rows = copy.deepcopy(project.property_records())
-    with pytest.raises(ValueError):
-        project.expire_property(
-            "holder0",
-            sid,
-            TEXT.index(SENTENCES[1]),
-            event_id=ids[SENTENCES[1]],
-            reason="只有历史值不算当前持有",
-        )
+    result = project.record_property_change("I1", "持有者", ids[SENTENCES[1]], "clear",
+        expected_revision=project.graph_project_info()["revision"], reason="清空不是明确未知")
+    assert result['status'] == 'staged'
+    assert any(r['code'] == 'ITEM_HOLDER_REQUIRED' for r in result['diagnostics'])
     assert project.graph_snapshot() == before and project.property_records() == rows
 
 
@@ -237,7 +234,7 @@ def test_latest_invalid_holder_cannot_be_hidden_by_a_valid_historical_value(proj
         project.apply_changes(
             [], rows, project.graph_project_info()["revision"], reason="无效值不可写"
         )["status"]
-        == "rejected"
+        == "staged"
     )
     assert project.property_records() == before
 
@@ -323,8 +320,8 @@ def test_item_only_cognition_affiliation_does_not_hide_missing_world_holder(proj
             )
     before = copy.deepcopy(project.property_records())
     values = project.property_node_summary("I1")["properties"]
-    holder = next(r for r in values if r["property_id"] == "持有者" and r["scope"] == "world")
-    assert holder["derived"] and holder["value"] == "未记录" and holder["record_count"] == 0
+    assert not any(r['property_id'] == '持有者' and r['scope'] == 'world' for r in values)
+    assert project.property_state('I1', '持有者')['state'] == {'kind': 'unrecorded'}
     assert project.property_records() == before
     from narrative.project_package import layout
     from narrative.tool_api import call
@@ -363,11 +360,9 @@ def test_early_cut_before_real_holder_disclosure_does_not_leak_future_person(pro
     )
     assert result["status"] == "accepted"
     summary = project.property_node_summary("I1", cut=ids[SENTENCES[0]])
-    holder = next(
-        r for r in summary["properties"] if r["property_id"] == "持有者" and r["scope"] == "world"
-    )
-    assert holder["derived"] and holder["value"] == "未披露" and holder["record_count"] == 0
-    assert not holder["value_node"] and "乙" not in json.dumps(holder, ensure_ascii=False)
+    assert not any(r['property_id'] == '持有者' and r['value_node'] for r in summary['properties'])
+    assert project.property_state('I1', '持有者', ids[SENTENCES[0]])['state'] == {'kind': 'unrecorded'}
+    assert '乙' not in json.dumps(summary['properties'], ensure_ascii=False)
     assert project.property_state("I1", "持有者")["state"]["value"] == ids["乙"]
 
 
@@ -429,14 +424,14 @@ def test_same_position_conflicting_holders_are_rejected_independent_of_input_ord
     diagnostics = prepare(
         project, [item], records, project.graph_project_info()["revision"]
     ).diagnostics
-    assert any(row["code"] == "RECORD" and "同一时间点" in row["message"] for row in diagnostics), (
+    assert any(row["code"] == "STATE_CONFLICT" and "同sequence" in row["message"] for row in diagnostics), (
         diagnostics
     )
     assert (
         project.apply_changes(
             [item], records, project.graph_project_info()["revision"], reason="无效状态不可写"
         )["status"]
-        == "rejected"
+        == "staged"
     )
     assert project.graph_snapshot() == before
 
@@ -461,18 +456,17 @@ def test_prepared_batch_uses_complete_prospective_item_and_holder_without_false_
     assert project.graph_snapshot() == before
 
 
-def test_prepared_batch_detects_intrinsic_expiry_of_only_current_holder(project):
+def test_prepared_batch_detects_clear_of_only_current_holder(project):
     sid, ids, _item = install(project)
     revision = project.graph_project_info()["revision"]
-    ended = copy.deepcopy(next(r for r in project.property_records() if r["id"] == "holder0"))
-    ended["valid_to"] = {
-        "source_id": sid,
-        "start": TEXT.index(SENTENCES[1]),
-        "event_id": ids[SENTENCES[1]],
-    }
+    ended = {'kind': 'property_change', 'id': 'holder-clear', 'node_id': 'I1',
+        'property_id': '持有者', 'event_id': ids[SENTENCES[1]], 'op': 'clear',
+        'sequence': TEXT.index(SENTENCES[1]),
+        'disclosure': {'source_id': sid, 'start': TEXT.index(SENTENCES[1])},
+        'evidence': {'source_id': sid, 'quote': SENTENCES[1] + '。'}}
     issues = prepare(project, [], [ended], revision).diagnostics
     assert any(row["code"] == "ITEM_HOLDER_REQUIRED" and row["object_id"] == "I1" for row in issues)
     assert project.graph_project_info()["revision"] == revision
     assert (
-        next(r for r in project.property_records() if r["id"] == "holder0").get("valid_to") is None
+        next(r for r in project.property_records() if r["id"] == "holder0")["op"] == "set"
     )

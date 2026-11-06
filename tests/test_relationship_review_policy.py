@@ -20,7 +20,7 @@ def relationship_project(tmp_path, monkeypatch):
         *[{"type": "person", "name": name, "quotes": [name]} for name in "甲乙丙丁"],
         {"type": "scene", "name": "送药风波", "quotes": [TEXT]},
         *[{"type": "event", "name": name, "scene": "送药风波", "participants": list("甲乙丙丁"), "quotes": [quote]} for name, quote in zip(("建立友谊", "争执后合作", "明确断交", "继续送药"), QUOTES, strict=True)]],
-        "properties": [{"node": a, "property": "朋友", "value": b, "value_type": "node", "symmetric": True, "at_event": "建立友谊", "quotes": [QUOTES[0]]} for a, b in (("甲", "乙"), ("丙", "丁"))]})
+        "properties": [{"node": a, "property": "朋友", "value": b, "value_type": "node", "symmetric": True, "at_event": "建立友谊", "op": "set", "quotes": [QUOTES[0]]} for a, b in (("甲", "乙"), ("丙", "丁"))]})
     assert result["status"] == "accepted", result
     ids = {node["name"]: node["id"] for node in ops.graph_snapshot()["nodes"]}
     return ops, entry, source, ids
@@ -31,29 +31,31 @@ def test_relationship_prompt_requires_temporal_evidence_and_distinguishes_bad_re
     assert "检查建立依据、可能的终止事件" in prompt
     assert "争吵、一次攻击、失联或后文未再提及不自动等于关系终止" in prompt
     assert "泛称、反讽、否认或追述" in prompt
-    assert "submit_extraction.expirations" in prompt and "expire_properties" in prompt
+    assert "在有证据的终止事件追加remove指定对象或clear清空" in prompt
+    assert "用correct_property或delete_property_records" in prompt
     assert "不把录入错误伪装为故事失效" in prompt
-    assert "另起新有效区间" in prompt and "证据不足先保留" in prompt
+    assert "在恢复事件追加set或add记录" in prompt and "证据不足先保留" in prompt
     assert "冲突、攻击或未再提及不自动等于失效" in CONVERSATION_SYSTEM_PROMPT
 
 
-@pytest.mark.parametrize("method", ["expire_properties", "submit_extraction"])
+@pytest.mark.parametrize("method", ["record_property_change", "submit_extraction"])
 def test_review_expiry_preserves_true_history_and_quarrelling_friends(relationship_project, method):
     ops, entry, source, ids = relationship_project
     before = ops.graph_snapshot()["nodes"]
-    records = [row for row in ops.property_records() if row.get("kind") == "property_value"]
+    records = [row for row in ops.property_records() if row.get("kind") == "property_change"]
     ended = next(row for row in records if row["node_id"] == ids["甲"])
     continuing = next(row for row in records if row["node_id"] == ids["丙"])
-    end = TEXT.index(QUOTES[2])
-    if method == "expire_properties":
-        result = call(method, {"record_ids": [ended["id"]], "source_id": source, "start": end,
-            "event_id": ids["明确断交"], "reason": "原文明示绝交且友谊结束；保留此前真实成立的关系"}, project=entry)
+    if method == "record_property_change":
+        result = call(method, {"node_id": ids["甲"], "property_id": "朋友", "op": "remove", "value": ids["乙"],
+            "event_id": ids["明确断交"], "expected_revision": ops.graph_project_info()["revision"],
+            "quote": QUOTES[2], "source_id": source, "reason": "原文明示绝交且友谊结束"}, project=entry)
     else:
-        result = ops.submit_extraction(source, {"nodes": [], "properties": [],
-            "expirations": [{"record_id": ended["id"], "at_event": ids["明确断交"]}]})
+        result = ops.submit_extraction(source, {"nodes": [], "properties": [{"node": ids["甲"], "property": "朋友",
+            "op": "remove", "value": ids["乙"], "at_event": ids["明确断交"], "quotes": [QUOTES[2]]}]})
     assert result["status"] == "accepted"
-    current = {row["id"]: row for row in ops.property_records() if row.get("kind") == "property_value"}
-    assert current[ended["id"]] == ended | {"valid_to": {"source_id": source, "start": end, "event_id": ids["明确断交"]}}
+    current = {row["id"]: row for row in ops.property_records() if row.get("kind") == "property_change"}
+    assert current[ended["id"]] == ended
+    assert any(r["op"] == "remove" and r["event_id"] == ids["明确断交"] for r in current.values())
     assert current[continuing["id"]] == continuing
     assert ops.graph_snapshot()["nodes"] == before
     def edges(cut=""):

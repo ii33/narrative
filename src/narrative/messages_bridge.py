@@ -25,6 +25,27 @@ STOP_REASONS = {
 }
 
 
+def _messages_usage(raw: dict) -> dict:
+    """Map disjoint Messages buckets; Chat prompt_tokens includes cache hits."""
+    prompt = max(0, int(raw.get("prompt_tokens") or 0))
+    details = raw.get("prompt_tokens_details")
+    details = details if isinstance(details, dict) else {}
+    cached = details.get("cached_tokens")
+    if cached is None:
+        cached = raw.get("prompt_cache_hit_tokens", raw.get("cached_tokens", 0))
+    read = min(prompt, max(0, int(cached or 0)))
+    # A cache miss is ordinary input, not a cache-creation report. Only copy
+    # writes when the provider actually exposes the separate write counter.
+    write = min(prompt - read, max(0, int(details.get("cache_write_tokens") or 0)))
+    usage = {"input_tokens": prompt - read - write,
+             "output_tokens": max(0, int(raw.get("completion_tokens") or 0))}
+    if read:
+        usage["cache_read_input_tokens"] = read
+    if write:
+        usage["cache_creation_input_tokens"] = write
+    return usage
+
+
 def _text_of(content) -> str:
     """system 既可能是字符串，也可能是 text 块数组。"""
     if isinstance(content, str):
@@ -187,6 +208,7 @@ class MessagesStream:
         self.stop_reason = "end_turn"
         self.input_tokens = 0
         self.output_tokens = 0
+        self.usage: dict = {}
 
     def _start(self) -> bytes:
         if self.started:
@@ -237,6 +259,7 @@ class MessagesStream:
         out = bytearray()
         usage = payload.get("usage")
         if isinstance(usage, dict):
+            self.usage.update(usage)
             self.input_tokens = int(usage.get("prompt_tokens") or self.input_tokens or 0)
             self.output_tokens = int(usage.get("completion_tokens") or self.output_tokens or 0)
         for choice in payload.get("choices") or []:
@@ -309,7 +332,10 @@ class MessagesStream:
         out += _event("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": self.stop_reason, "stop_sequence": None},
-            "usage": {"output_tokens": self.output_tokens},
+            # Input usage commonly arrives only after the final content chunk.
+            # The SDK accepts these cumulative fields in message_delta; leaving
+            # them only in local state would record every request as zero input.
+            "usage": _messages_usage(self.usage),
         })
         out += _event("message_stop", {"type": "message_stop"})
         self.stopped = True
@@ -345,8 +371,5 @@ def to_messages_response(payload: dict, model: str = "") -> dict:
         "content": content,
         "stop_reason": STOP_REASONS.get(choice.get("finish_reason") or "", "end_turn"),
         "stop_sequence": None,
-        "usage": {
-            "input_tokens": int(usage.get("prompt_tokens") or 0),
-            "output_tokens": int(usage.get("completion_tokens") or 0),
-        },
+        "usage": _messages_usage(usage),
     }

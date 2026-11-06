@@ -5,6 +5,8 @@ import QtQuick.Dialogs
 
 Rectangle {
     id: page
+    SubmissionState{id:contentSubmission;owner:page;enabled:page.editing;operation:"save_asset";target:page.card.id?({"payload.id":page.card.id}):({"payload.category":page.category,"payload.domain":"adaptation"});onRestoreRequested:function(a){page.edit(a.payload)}}
+
     objectName: "assetsPage"
     property var app
     readonly property var t: app.theme
@@ -28,6 +30,7 @@ Rectangle {
     })
     function reload() { bridge.loadAssets(category, category === "material" ? "" : moment, category === "material" ? "" : nodeId) }
     function edit(c) {
+        if(!contentSubmission.restoring)contentSubmission.begin()
         card = c; titleEdit.text = c.title || ""; detailEdit.text = c.detail || ""; promptEdit.text = c.prompt || ""
         images = c.images || []; references = c.reference_images || []
         var rows = [{id: "", name: "不限"}].concat(payload.moments || [])
@@ -58,6 +61,8 @@ Rectangle {
         }
     }
     ColumnLayout {
+        SubmissionFeedback{state:contentSubmission}
+
         anchors.fill: parent; anchors.margins: 20; spacing: 12
         Label { text: "资产"; font.pixelSize: 22; font.bold: true; color: t.ink }
         TabBar {

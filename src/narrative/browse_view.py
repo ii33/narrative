@@ -150,8 +150,9 @@ def _progress_by_member(snapshot: dict, records: list[dict] | None) -> dict[str,
     """主要故事进展记在大事件上，大事件进展记在场景上。"""
     nodes = _by_id(snapshot)
     best: dict[str, tuple[tuple, dict]] = {}
-    for record in records or []:
-        if not isinstance(record, dict) or record.get("kind") != "property_value":
+    from .temporal_state import projected_changes
+    for record in projected_changes(snapshot, records or []):
+        if record.get("state_kind") != "known":
             continue
         scene = nodes.get(str(record.get("node_id") or ""))
         expected = {"big_event": STORYLINE_PROGRESS, "scene": "big_event_progress"}.get(str((scene or {}).get("node_type") or ""))
@@ -422,23 +423,18 @@ def related_nodes(
         if (nodes.get(identifier) or {}).get("node_type") != "person"
     }
     from .property_core import canonical_definitions
-    from .temporal_state import point, position
-    cutoff = position(boundary, snapshot)
+    from .temporal_state import projected_changes
     definitions = canonical_definitions(records or [])
     if records:
-        for record in records:
-            if record.get("kind") != "property_value" or record.get("node_id") not in structural:
+        for record in projected_changes(snapshot, records, boundary):
+            if record.get("state_kind") != "known" or record.get("node_id") not in structural:
                 continue
             if record.get("scope", "world") != "world":
                 continue
-            begin, end = position(point(record), snapshot), position(record.get("valid_to"), snapshot)
-            if cutoff is not None and (begin is None or begin > cutoff or end is not None and end <= cutoff):
-                continue
-            if cutoff is None and record.get("valid_to") is not None:
-                continue
             targets = list(record.get("related_nodes") or [])
             if definitions.get(str(record.get("property_id") or ""), {}).get("value_type") in {"node", "either"}:
-                targets.append(record.get("value"))
+                value = record.get("value")
+                targets.extend(value if isinstance(value, list) else [value])
             for target in targets:
                 if isinstance(target, str) and target in nodes and target != step_id:
                     found.add(target)

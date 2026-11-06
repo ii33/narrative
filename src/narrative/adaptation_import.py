@@ -95,23 +95,16 @@ def select(nodes, records, orders, moment_ids, state):
     wanted_records = set()
     boundary_ids = set()
     definitions = {r["id"]: r for r in records if r.get("kind") == "property_definition"}
-    values = [r for r in records if r.get("kind") == "property_value"]
+    values = [r for r in records if r.get("kind") == "property_change"]
     cuts = [_position(by_id[key].get("disclosure"), orders) for key in primary]
     cuts = [cut for cut in cuts if cut is not None]
 
-    def row_position(row, end=False):
-        field = "source_valid_to" if end else "source_valid_from"
-        point = _position(row.get(field), orders)
-        if point is not None:
-            return point
-        anchor = by_id.get(row.get("end_event_id" if end else "event_id"), {})
-        return _position(anchor.get("disclosure"), orders)
+    def row_position(row):
+        return _position(by_id.get(row.get("event_id"), {}).get("disclosure"), orders)
 
     def relevant(row):
-        if row.get("event_id") in primary:
-            return True
-        start, end = row_position(row), row_position(row, True)
-        return any((start is None or start <= cut) and (end is None or cut < end) for cut in cuts)
+        position = row_position(row)
+        return position is not None and bool(cuts) and position <= max(cuts)
 
     def add(identifier):
         if isinstance(identifier, str) and identifier in by_id:
@@ -122,13 +115,15 @@ def select(nodes, records, orders, moment_ids, state):
 
     def include_value(row):
         wanted_records.add(row["id"])
-        for field in ("node_id", "event_id", "end_event_id", "holder_id", "applies_to"):
+        for field in ("node_id", "event_id", "holder_id", "applies_to"):
             add(row.get(field))
         for identifier in row.get("related_nodes", []):
             add(identifier)
         definition = definitions.get(row.get("property_id"), {})
         if definition.get("value_type") in {"node", "either"}:
-            add(row.get("value"))
+            value = row.get("value")
+            for target in value if isinstance(value, list) else [value]:
+                add(target)
 
     # A finite closure: only entity state at selected cuts and explicit references
     # can add data. Merely neighboring an event never expands the selection.
@@ -154,18 +149,6 @@ def select(nodes, records, orders, moment_ids, state):
                 (owner in included and (owner in primary or owner_node.get("node_type") not in MOMENTS)
                  and relevant(row))):
                 include_value(row)
-        # An imported active item must also retain an explicit current holder.
-        # Include only its final holder state, not intervening unselected events.
-        for identifier in list(included):
-            if by_id[identifier]["node_type"] != "item" or by_id[identifier].get("retracted"):
-                continue
-            holders = [r for r in values if r.get("node_id") == identifier
-                       and r.get("scope", "world") == "world" and not r.get("holder_id")
-                       and not r.get("end_event_id") and not r.get("source_valid_to")
-                       and (r.get("property_id") == "持有者" or
-                            definitions.get(r.get("property_id"), {}).get("semantic") == "item_holder")]
-            if holders:
-                include_value(max(holders, key=lambda r: row_position(r) or (-1, -1)))
         if previous == (len(included), len(wanted_records)):
             break
 

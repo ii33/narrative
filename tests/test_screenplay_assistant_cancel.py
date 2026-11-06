@@ -101,12 +101,19 @@ def test_ordinary_assistant_append_then_cancel_keeps_copy_body_and_resident_sess
         assert ops.read_script_segment(segment["id"])["units"] == old_units
         messages = ui.store.load(job["chat_id"])["messages"]
         stopped = next(m for m in reversed(messages) if m.get("kind") == "assistant_cancelled")
-        assert "1 项剧本写入仍保留" in stopped["text"]
+        assert "程序入库汇总" in stopped["text"]
+        summaries = [m for m in messages if m.get("kind") == "task_summary" and m.get("task_id") == job["task_id"]]
+        assert len(summaries) == 1
+        summary = summaries[0]["commit_summary"]
+        assert summary["source"] == "program" and summary["status"] == "cancelled"
+        assert summary["committed_operations"] == 1 and summary["has_changes"]
+        assert result["commit_summary"] == summary
         assert "未产生新的入库变更" not in stopped["text"]
         audit = json.loads((Path(result["audit_directory"]) / "task.json").read_text(encoding="utf-8"))
         assert "writing_task" not in audit
         assert audit["status"] == "cancelled"
-        assert [step["tool"] for step in audit["completed_screenplay_actions"]] == ["append_screenplay_timeline"]
+        assert audit["commit_summary"] == summary
+        assert [step["tool"] for step in summary["operations"]] == ["append_screenplay_timeline"]
         assert runtime is ui.bridge._assistant_runtime and not runtime.closed and not instances[0]._closed
         ui.bridge.assistantTurn("继续同一上下文。", "")
         ui.wait(lambda: len(instances[0].calls) == 2)

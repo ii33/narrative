@@ -6,6 +6,12 @@ import json
 from pathlib import Path
 from typing import Literal
 
+from .content_errors import (
+    ContentGuardError,
+    ContentValidationError,
+    content_write,
+    validate_content,
+)
 from .graph_store import GraphStore
 from .screenplay_commands import ACTION_ADAPTER
 from .screenplay_models import AdaptationSpan, Screenplay, ScriptSegment
@@ -36,7 +42,7 @@ from .screenplay_timeline import new_script_timeline, screenplay_timeline, timel
 def _require_span(state, identifier):
     row = state["adaptation_spans"].get(identifier)
     if not row:
-        raise ValueError("改编时间段不存在")
+        raise ContentGuardError("改编时间段不存在")
     return row
 
 
@@ -76,9 +82,9 @@ def _span_result(state, adaptation, span, selected=None):
     return result
 
 
-def _text(value, label):
+def _text(value, label, path):
     if not isinstance(value, str) or not value.strip():
-        raise ValueError(label + "不能为空")
+        raise ContentValidationError(label + "不能为空", problems=[{"code": "CONTENT_VALIDATION", "message": label + "不能为空", "path": path}])
     return value.strip()
 
 
@@ -135,13 +141,14 @@ class ScreenplayOperationsMixin:
                               start_node_id=start, end_node_id=end).model_dump(mode="json")
         return _span_result(state, adaptation, span, selected)
 
+    @content_write
     def create_adaptation_span(self, screenplay_id, name, start_node_id=None, end_node_id=None, selection_ids=None,
                                expected_timeline_revision=None, reason=None) -> dict:
         def mutate(state, source, _db):
             adaptation = screenplay_timeline(state, source, screenplay_id)
             expect_revision(adaptation, expected_timeline_revision)
             start, end, selected = span_endpoints(adaptation, selection_ids, start_node_id, end_node_id)
-            span = AdaptationSpan(**object_fields("span"), timeline_id=adaptation["timeline_id"], name=_text(name, "时间段名称"),
+            span = AdaptationSpan(**object_fields("span"), timeline_id=adaptation["timeline_id"], name=_text(name, "时间段名称", ["name"]),
                                   start_node_id=start, end_node_id=end).model_dump(mode="json")
             result = _span_result(state, adaptation, span, selected)
             if result["status"] == "invalid":
@@ -154,6 +161,7 @@ class ScreenplayOperationsMixin:
         state, adaptation = read_context(self)
         return _span_result(state, adaptation, _require_span(state, span_id))
 
+    @content_write
     def update_adaptation_span(self, span_id, changes, expected_revision, expected_timeline_revision,
                                reason) -> dict:
         if not isinstance(changes, dict) or set(changes) - {"name", "start_node_id", "end_node_id", "selection_ids"}:
@@ -169,7 +177,7 @@ class ScreenplayOperationsMixin:
                 start, end, selected = span_endpoints(adaptation, patch.pop("selection_ids"), patch.get("start_node_id"), patch.get("end_node_id"))
                 patch.update(start_node_id=start, end_node_id=end)
             if "name" in patch:
-                patch["name"] = _text(patch["name"], "时间段名称")
+                patch["name"] = _text(patch["name"], "时间段名称", ["changes", "name"])
             _update(span, patch)
             result = _span_result(state, adaptation, span, selected)
             if set(changes) - {"name"} and result["status"] == "invalid":
@@ -181,11 +189,12 @@ class ScreenplayOperationsMixin:
         state, _adaptation = read_context(self)
         return list(copy.deepcopy(state["screenplays"]).values())
 
+    @content_write
     def create_screenplay(self, title, format: Literal["single", "series"] = "single", language="zh-CN", creative_brief=None, reason=None) -> dict:
         def mutate(state, adaptation, _db):
             fields = object_fields("screenplay")
             local = new_script_timeline(fields["id"], adaptation)
-            screenplay = Screenplay(**fields, timeline_id=local["id"], title=_text(title, "剧本名称"),
+            screenplay = Screenplay(**fields, timeline_id=local["id"], title=_text(title, "剧本名称", ["title"]),
                                     format=format, language=language, creative_brief={} if creative_brief is None else creative_brief).model_dump(mode="json")
             state["screenplays"][screenplay["id"]] = screenplay
             state["script_timelines"][local["id"]] = local
@@ -200,6 +209,7 @@ class ScreenplayOperationsMixin:
             return list(copy.deepcopy(state["screenplays"]).values())
         return _screenplay_view(state, adaptation, screenplay_id)
 
+    @content_write
     def create_script_segment(self, screenplay_id, span_id, title, expected_structure_revision, reason,
                               parent_kind=None, parent_id=None, after_entry_id=None, role: Literal["normal", "prologue", "epilogue"] = "normal", brief=None,
                               target_duration_seconds=None) -> dict:
@@ -208,9 +218,9 @@ class ScreenplayOperationsMixin:
             expect_revision(screenplay, expected_structure_revision, "structure_revision")
             span = _require_span(state, span_id)
             if span["timeline_id"] != screenplay["timeline_id"]:
-                raise ValueError("段落不可跨改编时间线绑定")
+                raise ContentGuardError("段落不可跨改编时间线绑定")
             segment = ScriptSegment(**object_fields("segment"), screenplay_id=screenplay_id, span_id=span_id,
-                                    title=_text(title, "段落标题"), role=role, brief={} if brief is None else brief,
+                                    title=_text(title, "段落标题", ["title"]), role=role, brief={} if brief is None else brief,
                                     target_duration_seconds=target_duration_seconds).model_dump(mode="json")
             state["script_segments"][segment["id"]] = segment
             if (parent_kind is None) != (parent_id is None):
@@ -222,6 +232,7 @@ class ScreenplayOperationsMixin:
             return _segment_view(state, adaptation, segment["id"])
         return write_transaction(self, reason, mutate)
 
+    @content_write
     def update_script_segment(self, segment_id, changes, expected_revision, reason) -> dict:
         if not isinstance(changes, dict) or set(changes) - {"title", "span_id", "role", "brief", "target_duration_seconds", "enabled"}:
             raise ValueError("段落仅允许修改标题、绑定、角色、要求、时长和启用状态")
@@ -237,11 +248,12 @@ class ScreenplayOperationsMixin:
         require(state, "segment", segment_id)
         return _segment_view(state, adaptation, segment_id)
 
+    @content_write
     def apply_screenplay_structure(self, screenplay_id, actions, expected_structure_revision, reason, format=None) -> dict:
-        parsed = ACTION_ADAPTER.validate_python(actions)
         def mutate(state, adaptation, _db):
             screenplay = require(state, "screenplay", screenplay_id)
             expect_revision(screenplay, expected_structure_revision, "structure_revision")
+            parsed = validate_content(ACTION_ADAPTER, actions, 'actions')
             for command in parsed:
                 action = command.model_dump(exclude_unset=True)
                 op = action["op"]
@@ -261,18 +273,18 @@ class ScreenplayOperationsMixin:
                     kind = op.removeprefix("update_")
                     row = require(state, kind, screenplay_id if kind == "screenplay" else action[kind + "_id"])
                     if kind != "screenplay" and row["screenplay_id"] != screenplay_id:
-                        raise ValueError("不能修改其他剧本对象")
+                        raise ContentGuardError("不能修改其他剧本对象")
                     expect_revision(row, action["expected_revision"])
                     _update(row, action["changes"])
                 elif op == "move":
                     entry = entry_for(state, action["child_kind"], action["child_id"])
                     if entry["screenplay_id"] != screenplay_id:
-                        raise ValueError("不能移动其他剧本对象")
+                        raise ContentGuardError("不能移动其他剧本对象")
                     move_entry(state, entry, action["parent_kind"], action["parent_id"], action.get("after_entry_id"))
                 elif op == "delete_segment":
                     segment = require(state, "segment", action["segment_id"])
                     if segment["screenplay_id"] != screenplay_id:
-                        raise ValueError("不能删除其他剧本段落")
+                        raise ContentGuardError("不能删除其他剧本段落")
                     expect_revision(segment, action["expected_revision"])
                     units = {u["id"] for u in state["script_units"].values() if u["segment_id"] == segment["id"]}
                     blocks = {b["id"] for b in state["script_blocks"].values() if b["unit_id"] in units}
@@ -294,7 +306,7 @@ class ScreenplayOperationsMixin:
                     kind = op.removeprefix("delete_")
                     row = require(state, kind, action[kind + "_id"])
                     if row["screenplay_id"] != screenplay_id:
-                        raise ValueError("不能删除其他剧本对象")
+                        raise ContentGuardError("不能删除其他剧本对象")
                     expect_revision(row, action["expected_revision"])
                     children = child_entries(state, kind, row["id"])
                     target = action.get("move_to")
@@ -324,6 +336,49 @@ class ScreenplayOperationsMixin:
     def check_screenplay(self, screenplay_id) -> dict:
         state, adaptation = read_context(self)
         return _check_snapshot(state, adaptation, screenplay_id)
+
+    def compile_screenplay(self, screenplay_id, format="html", path=None) -> dict:
+        """Compile current enabled screenplay content without a model call."""
+        from .screenplay_compile import (
+            compile_elements,
+            json_text,
+            render_html,
+            render_qt_html,
+            render_text,
+        )
+        if format not in {"text", "html", "fountain", "json", "pdf", "docx"}:
+            raise ValueError("不支持的剧本编译格式")
+        state, adaptation = read_context(self)
+        document = _screenplay_view(state, adaptation, screenplay_id)
+        timeline = screenplay_timeline(state, adaptation, screenplay_id)
+        from .compile_settings import read_compile_settings
+        with self._store.connect() as db:
+            compile_settings = read_compile_settings(db)
+        settings = compile_settings["settings"]
+        document["compile_settings"] = compile_settings
+        elements, extra = compile_elements(state, document, timeline, child_entries, require)
+        diagnostics = _check_snapshot(state, adaptation, screenplay_id)["issues"] + extra
+        title = document["screenplay"]["title"]
+        preview = render_html(elements, title, settings)
+        mime = {"text": "text/plain", "html": "text/html", "fountain": "text/plain", "json": "application/json",
+                "pdf": "application/pdf", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}[format]
+        result = {"format": format, "title": title, "elements": elements, "document": document,
+                  "preview_html": preview, "qt_preview_html": render_qt_html(elements, settings), "compile_settings": compile_settings, "diagnostics": diagnostics, "mime": mime}
+        if format in {"text", "fountain"}:
+            diagnostics.append({"severity": "info", "code": "COMPILE_FORMAT_STYLE_UNSUPPORTED", "message": "文本/Fountain不支持字体、字号、行距、页边距或精确段落排版；请用HTML、PDF或Word保留排版"})
+        if format in {"pdf", "docx"}:
+            result["requires_path"] = path is None
+            if path is not None:
+                from .screenplay_document_output import write_document
+                result.update(write_document(elements, title, format, path, settings=settings))
+        else:
+            result["text"] = json_text(document) if format == "json" else preview if format == "html" else render_text(elements, format == "fountain")
+            if path is not None:
+                target = Path(path).resolve()
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(result["text"], encoding="utf-8")
+                result["path"] = str(target)
+        return result
 
     def export_screenplay(self, screenplay_id, format="text", path=None) -> dict:
         if format not in {"text", "json"}:

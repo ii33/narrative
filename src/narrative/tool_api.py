@@ -5,9 +5,9 @@ no GUI state. The CLI and the MCP server are two doors onto this same list, so a
 LLM calling a tool and a person typing a command cannot disagree about what
 "the state of this scene" means.
 
-Reading is cheap and side-effect free. Writing follows the same rules as the
-interface: records are never rewritten, an edit is a new record, and a value that
-is replaced stops counting from the disclosure that replaced it.
+Reading is side-effect free. Event facts are appended for story changes;
+editorial corrections change the current record through Operations. Validated
+writes are atomic and audited; pending extraction drafts are separate from facts.
 """
 
 from __future__ import annotations
@@ -19,7 +19,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .extraction_draft import RESULT_SCHEMA
+from .assistant_attachment_tools import register as _register_attachment_tools
+from .assistant_host_tools import register as _register_host_tools
+from .extraction_draft import submission_input_schema, submission_parameters
 from .project_catalog import list_projects, open_graph_project
 from .screenplay_tools import register as _register_screenplay_tools
 
@@ -37,8 +39,12 @@ class Tool:
     writes: bool = False
     required: tuple[str, ...] = field(default=())
     scope: str = "project"
+    input_schema: dict | None = None
 
     def schema(self) -> dict:
+        if self.input_schema is not None:
+            from copy import deepcopy
+            return deepcopy(self.input_schema)
         properties = {
             key: {k: v for k, v in spec.items() if k != "required"}
             for key, spec in self.params.items()
@@ -62,7 +68,7 @@ def _labelled(node: dict) -> dict:
 
 
 def _need(params: dict, *keys: str) -> None:
-    missing = [key for key in keys if params.get(key) in (None, "")]
+    missing = [key for key in keys if key not in params or params[key] is None]
     if missing:
         raise ToolError("缺少参数：" + "、".join(missing))
 
@@ -94,7 +100,8 @@ def _properties(ops, node_id: str, cut: str | None) -> list[dict]:
             "records": [
                 {
                     "id": row["id"],
-                    "value": row["value"],
+                    "value": row.get("value"),
+                    "op": row.get("op"), "sequence": row.get("sequence"),
                     "event_id": row["event_id"],
                     "event_name": row.get("event_name"),
                 }
@@ -236,6 +243,11 @@ def _material_view(ops, params: dict) -> dict:
     return ops.material_view(str(params["node_id"]), cut=_cut(params) or "")
 
 
+def _content_receipt(value):
+    return {key: value[key] for key in ('status', 'submission_id', 'submission_revision', 'submission_status',
+        'validation_status', 'operation', 'target', 'base_revisions', 'problems', 'committed_changes') if key in value}
+
+
 def _add_material_card(ops, params: dict) -> dict:
     _need(params, "node_id", "title")
     card = ops.material_add_card(
@@ -245,7 +257,9 @@ def _add_material_card(ops, params: dict) -> dict:
         str(params.get("valid_from") or ""),
         str(params.get("valid_to") or ""),
     )
-    return {"status": "accepted", "card": card} | _material_view(ops, params)
+    if card.get('status') == 'staged':
+        return card
+    return {"status": "accepted", "card": card} | _material_view(ops, params) | _content_receipt(card)
 
 
 def _update_material_card(ops, params: dict) -> dict:
@@ -258,7 +272,9 @@ def _update_material_card(ops, params: dict) -> dict:
         valid_from=None if params.get("valid_from") is None else str(params["valid_from"]),
         valid_to=None if params.get("valid_to") is None else str(params["valid_to"]),
     )
-    return {"status": "accepted", "card": card} | _material_view(ops, params)
+    if card.get('status') == 'staged':
+        return card
+    return {"status": "accepted", "card": card} | _material_view(ops, params) | _content_receipt(card)
 
 
 def _delete_material_card(ops, params: dict) -> dict:
@@ -331,7 +347,7 @@ def _statistics(ops, _params: dict) -> dict:
     records = ops.property_records()
     kinds = Counter(record.get("kind") for record in records)
     definitions = {record["id"] for record in records if record.get("kind") == "property_definition"}
-    values = [record for record in records if record.get("kind") == "property_value"]
+    values = [record for record in records if record.get("kind") == "property_change"]
     info = ops.graph_project_info()
     return {
         "revision": info["revision"],
@@ -345,8 +361,8 @@ def _statistics(ops, _params: dict) -> dict:
         ],
         "properties": {
             "definitions": len(definitions),
-            "value_records": len(values),
-            "expired_values": sum(1 for row in records if row.get("valid_to")),
+            "change_records": len(values),
+            "changes_by_op": dict(Counter(row.get("op") for row in values)),
             "records_by_kind": dict(kinds),
         },
     }
@@ -430,20 +446,15 @@ def _read_source_slice(ops, params: dict) -> dict:
 def _create_source_slices(ops, params: dict) -> dict:
     _need(params, "slices")
     slices = params["slices"]
-    if not isinstance(slices, list) or not slices:
-        raise ToolError("slices must be a non-empty array")
-    for item in slices:
-        if not isinstance(item, dict) or set(item) - {"title", "start", "end"}:
-            raise ToolError("Each slice requires only title, start and end")
-        if not isinstance(item.get("title"), str) or not item["title"].strip():
-            raise ToolError("Each slice requires a non-empty title")
-        if any(type(item.get(key)) is not int for key in ("start", "end")):
-            raise ToolError("Slice start and end must be integer Unicode codepoint offsets")
     source_id = _source_id(ops, params)
     try:
         created = ops.create_source_slices(source_id, slices)
     except (ValueError, KeyError) as exc:
         raise ToolError(str(exc)) from exc
+    if isinstance(created, dict):
+        if created.get('status') == 'staged':
+            return created
+        return {'source_id': source_id, 'slices': created.get('result', []), **_content_receipt(created)}
     return {"status": "created", "source_id": source_id, "slices": created}
 
 
@@ -486,84 +497,19 @@ def _revision(ops) -> int:
     return int(ops.graph_project_info()["revision"])
 
 
-def _add_property(ops, params: dict) -> dict:
-    _need(params, "node_id", "property_id", "value", "event_id")
-    snapshot = ops.graph_snapshot()
-    if not any(node["id"] == params["node_id"] for node in snapshot["nodes"]):
-        raise ToolError(f"节点不存在：{params['node_id']}")
-    anchor_node = next((node for node in snapshot["nodes"] if node["id"] == params["event_id"]), None)
-    if anchor_node is None:
-        raise ToolError(f"事件不存在：{params['event_id']}")
-
-    records = ops.property_records()
-    definitions = {record["id"]: record for record in records if record.get("kind") == "property_definition"}
-    definition = definitions.get(params["property_id"])
-    value_type = params.get("value_type")
-    allowed_types = {"string", "number", "boolean", "node", "either", "any"}
-    if value_type is not None and (not isinstance(value_type, str) or value_type not in allowed_types):
-        raise ToolError("value_type必须为string/number/boolean/node/either/any")
-    if "symmetric" in params and type(params["symmetric"]) is not bool:
-        raise ToolError("symmetric必须为布尔值")
-    batch: list[dict] = []
-    if definition is None:
-        if value_type is None:
-            raise ToolError("新属性定义必须明确提供value_type；节点引用用node/either，不根据P编号字符串猜类型")
-        batch.append({"kind": "property_definition", "id": params["property_id"],
-                      "value_type": value_type, "cardinality": "one",
-                      "symmetric": params.get("symmetric", False)})
-    else:
-        if value_type is not None and value_type != definition["value_type"]:
-            raise ToolError("value_type与已有定义冲突；请通过显式业务修改定义")
-        if "symmetric" in params and params["symmetric"] != definition.get("symmetric", False):
-            raise ToolError("symmetric与已有定义冲突；请通过显式业务修改定义")
-    record: dict[str, Any] = {
-        "kind": "property_value",
-        "node_id": params["node_id"],
-        "property_id": params["property_id"],
-        "value": params["value"],
-        "event_id": params["event_id"],
-        "source": params.get("source") or "narration",
-        "scope": params.get("scope") or "world",
-    }
-    for key in ("category", "holder_id"):
-        if params.get(key):
-            record[key] = params[key]
-    quote = (params.get("quote") or "").strip()
-    source_id = (params.get("source_id") or (anchor_node.get("disclosure") or {}).get("source_id")
-                 or (anchor_node.get("evidence") or {}).get("source_id") or _source_id(ops, params))
-    if quote:
-        hits = ops.locate(source_id, [quote], limit_per_quote=2)[0]["matches"]
-        if len(hits) != 1:
-            raise ToolError("引文缺失或不唯一，请补充准确上下文")
-        record["evidence"] = {"source_id": source_id, "quote": quote}
-        record["disclosure"] = {"source_id": source_id, "start": hits[0]["start"]}
-    else:
-        metadata = next((row for row in snapshot["sources"] if row["id"] == source_id), None)
-        if metadata is None:
-            raise ToolError("原文不存在")
-        record["disclosure"] = {"source_id": source_id, "start": metadata["length"]}
-    batch.append(record)
-
-    revision = _revision(ops)
-    return ops.apply_changes([], batch, revision, "工具补录")
+def _record_property_change(ops, params: dict) -> dict:
+    _need(params, "node_id", "property_id", "event_id", "op", "expected_revision", "reason")
+    fields = {k: v for k, v in params.items() if k not in (
+        "node_id", "property_id", "event_id", "op", "expected_revision", "reason")}
+    return ops.record_property_change(params["node_id"], params["property_id"],
+        params["event_id"], params["op"], expected_revision=params["expected_revision"],
+        reason=params["reason"], **fields)
 
 
 def _correct_property(ops, params: dict) -> dict:
-    _need(params, "record_id", "value", "reason")
-    options = {key: params[key] for key in (
-        "event_id", "source_id", "quote", "category", "scope", "holder_id"
-    ) if key in params}
-    return {"status": "accepted", **ops.correct_property(
-        params["record_id"], params["value"], params["reason"], **options,
-    )}
-
-
-def _expire(ops, params: dict) -> dict:
-    _need(params, "record_ids", "source_id", "start", "reason")
-    return {"status": "accepted", **ops.expire_properties(
-        params["record_ids"], params["source_id"], params["start"],
-        event_id=params.get("event_id"), reason=params["reason"],
-    )}
+    _need(params, "record_id", "changes", "expected_revision", "reason")
+    return ops.correct_property(params["record_id"], params["changes"], params["reason"],
+                                expected_revision=params["expected_revision"])
 
 
 def _revise_node(ops, params: dict) -> dict:
@@ -593,8 +539,8 @@ def _relation_map(ops, params: dict) -> dict:
     """
     from .browse_view import cut_for, moment_tree, related_nodes
     from .property_core import canonical_definitions
-    from .property_store import relation_target
-    from .temporal_state import ended_at, point, position
+    from .property_store import relation_targets
+    from .temporal_state import projected_changes
 
     snapshot = ops.graph_snapshot()
     nodes = {item["id"]: item for item in snapshot["nodes"]}
@@ -609,59 +555,57 @@ def _relation_map(ops, params: dict) -> dict:
     edges: list[dict] = []
     relation_edges: dict[tuple, dict] = {}
     records = ops.property_records()
-    cut_position = position(anchor, snapshot) if anchor else None
-    invalid = ended_at(records, snapshot, anchor)
-    editorial = [record for record in records if record.get("id") not in invalid]
-    definitions = canonical_definitions(editorial)
-    for record in records:
-        if record.get("kind") != "property_value" or record.get("id") in invalid:
+    cut_position = anchor
+    definitions = canonical_definitions(records)
+    for record in projected_changes(snapshot, records, anchor):
+        if record.get("state_kind") != "known":
             continue
         property_id = str(record.get("property_id") or "")
         canonical = property_id
-        if relation_target(record | {"property_id": canonical}, nodes, definitions) is None:
+        targets = relation_targets(record | {"property_id": canonical}, nodes, definitions)
+        if not targets:
             continue
-        if cut_position is not None and (position(point(record), snapshot) or (float("inf"), 0)) > cut_position:
-            continue
-        left, right = str(record.get("node_id") or ""), str(record.get("value") or "")
-        if left == right:
-            continue  # 自己指向自己不是关系（审核会报 self_reference）
-        if nodes.get(left, {}).get("node_type") != "person":
-            continue
-        if nodes.get(right, {}).get("node_type") != "person":
-            continue
-        raw = canonical
-        kind, state = raw, ""
-        for mark in ("（", "("):
-            if mark in raw:
-                head, _, tail = raw.partition(mark)
-                kind, state = head.strip(), tail.rstrip("）)").strip()
-                break
-        scope = str(record.get("scope") or "world")
-        holder = str(record.get("holder_id") or "")
-        context = str(record.get("context_id") or "canon")
-        key = (left, right, kind, state, scope, holder, context)
-        existing = relation_edges.get(key)
-        if existing is not None:
-            existing["record_ids"].append(record.get("id"))
-            existing["records"].append(dict(record))
-            if record.get("event_id") not in existing["event_ids"]:
-                existing["event_ids"].append(record.get("event_id"))
-            continue
-        edge = {
-            "record_id": record.get("id"),
-            "record_ids": [record.get("id")],
-            "records": [dict(record)],
-            "from": left, "from_name": nodes[left].get("name", left),
-            "to": right, "to_name": nodes[right].get("name", right),
-            "kind": kind, "state": state,
-            "symmetric": definitions.get(canonical, {}).get("symmetric") is True,
-            "scope": scope, "holder_id": holder, "context_id": context,
-            "event_id": record.get("event_id"),
-            "event_ids": [record.get("event_id")],
-            "event_name": events.get(record.get("event_id") or "", ""),
-        }
-        relation_edges[key] = edge
-        edges.append(edge)
+        for right in targets:
+            left = str(record.get("node_id") or "")
+            if left == right:
+                continue  # 自己指向自己不是关系（审核会报 self_reference）
+            if nodes.get(left, {}).get("node_type") != "person":
+                continue
+            if nodes.get(right, {}).get("node_type") != "person":
+                continue
+            raw = canonical
+            kind, state = raw, ""
+            for mark in ("（", "("):
+                if mark in raw:
+                    head, _, tail = raw.partition(mark)
+                    kind, state = head.strip(), tail.rstrip("）)").strip()
+                    break
+            scope = str(record.get("scope") or "world")
+            holder = str(record.get("holder_id") or "")
+            context = str(record.get("context_id") or "canon")
+            key = (left, right, kind, state, scope, holder, context)
+            existing = relation_edges.get(key)
+            if existing is not None:
+                existing["record_ids"].append(record.get("id"))
+                existing["records"].extend(record.get("provenance") or [dict(record)])
+                if record.get("event_id") not in existing["event_ids"]:
+                    existing["event_ids"].append(record.get("event_id"))
+                continue
+            edge = {
+                "record_id": record.get("id"),
+                "record_ids": [record.get("id")],
+                "records": record.get("provenance") or [dict(record)],
+                "from": left, "from_name": nodes[left].get("name", left),
+                "to": right, "to_name": nodes[right].get("name", right),
+                "kind": kind, "state": state,
+                "symmetric": definitions.get(canonical, {}).get("symmetric") is True,
+                "scope": scope, "holder_id": holder, "context_id": context,
+                "event_id": record.get("event_id"),
+                "event_ids": [record.get("event_id")],
+                "event_name": events.get(record.get("event_id") or "", ""),
+            }
+            relation_edges[key] = edge
+            edges.append(edge)
     edges.sort(key=lambda item: (item["from_name"], item["kind"], item["to_name"]))
 
     # 只看相关：只留跟这一步有关的人（这一步出场的人、以及关系指向他们的人）。
@@ -784,6 +728,32 @@ def _submit_extraction(ops, params: dict) -> dict:
     _need(params, "result")
     return ops.submit_extraction(_source_id(ops, params), params["result"],
                                  params.get("start", 0), params.get("end"))
+
+
+def _read_extraction_submission(ops, params):
+    _need(params, 'submission_id')
+    return ops.read_extraction_submission(params['submission_id'], section=params.get('section'), indices=params.get('indices'))
+
+
+def _list_extraction_submissions(ops, params):
+    return ops.list_extraction_submissions(source_id=params.get('source_id'), limit=params.get('limit', 20), after=params.get('after', 0))
+
+
+def _patch_extraction_submission(ops, params):
+    _need(params, 'submission_id', 'expected_revision', 'patches', 'reason')
+    return ops.patch_extraction_submission(params['submission_id'], params['expected_revision'], params['patches'], params['reason'])
+
+
+def _list_content_submissions(ops, params):
+    return ops.list_content_submissions(**params)
+
+
+def _read_content_submission(ops, params):
+    return ops.read_content_submission(**params)
+
+
+def _patch_content_submission(ops, params):
+    return ops.patch_content_submission(**params)
 
 
 TOOLS: dict[str, Tool] = {}
@@ -917,7 +887,7 @@ _register(Tool(
 
 _register(Tool(
     "locate_source",
-    "批量逐字定位引文，返回输入索引、字符坐标与唯一性；多匹配截断明确标记，不创建证据",
+    "可选批量查询引文坐标、歧义或纠错；submit_extraction已自动逐字定位和预检，正常提交无需先调用本工具。多匹配截断明确标记，不创建证据",
     {"source_id": {"type": "string"},
      "quotes": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "maxItems": 1000, "required": True},
      "limit_per_quote": {"type": "integer", "minimum": 1, "maximum": 1000,
@@ -997,7 +967,7 @@ _EVENT_MERGE_PARAMS = {
 }
 _register(Tool("preview_event_merge", "核对原文后预检两个事件ID的显式合并；不按同名自动合并，不写入",
                _EVENT_MERGE_PARAMS, lambda ops, params: _event_merge(ops, params)))
-_register(Tool("merge_events", "凭覆盖两事件的逐字证据合并重复事件；保留历史和canonical映射，当前引用统一指向target",
+_register(Tool("merge_events", "凭覆盖两事件的逐字证据合并重复事件；合并证据与当前引用，物理删除重复事件，不保留重定向",
                _EVENT_MERGE_PARAMS, lambda ops, params: _event_merge(ops, params, create=True), writes=True))
 
 _register(Tool(
@@ -1008,16 +978,21 @@ _register(Tool(
 ))
 
 _register(Tool(
-    "add_property",
-    "补录一条属性披露：立刻生效；更早的值从这次披露起失效",
+    "record_property_change",
+    "在指定事件记录属性建立、变更或失效，程序按事件顺序推导状态；不填写有效期",
     {
         "node_id": {"type": "string", "required": True, "description": "属性主体；身份、关系或作用角色中为参照方A"},
         "property_id": {"type": "string", "required": True, "description": "属性名；关系描述对方相对node的身份、关系或作用中的角色：node=A,property=父亲,value=B表示B是A的父亲"},
-        "value": {"type": ["string", "number", "boolean"],
-                  "description": "值：字符串、数字或节点ID；节点引用为被指向的对方，普通字面值不改写"},
+        "value": {"type": ["string", "number", "boolean", "array"], "items": {"type": ["string", "number", "boolean"]},
+                  "description": "one为单值；many为数组。节点引用为被指向的对方，普通字面值不改写"},
         "value_type": {"type": "string", "enum": ["string", "number", "boolean", "node", "either", "any"], "description": "新定义必填，已知定义省略沿用；node/either为节点引用，string/any不能因P样字符串视为关系"},
+        "cardinality": {"type": "string", "enum": ["one", "many"], "description": "one保存标量，人物关系按对方分别维护可并存；many是集合数组，各元素符合value_type；已知定义省略沿用，显式冲突拒绝"},
         "symmetric": {"type": "boolean", "description": "新关系定义是否对称，默认false；已有定义省略沿用，冲突拒绝"},
         "event_id": {"type": "string", "required": True, "description": "披露事件编号"},
+        "op": {"type": "string", "enum": ["set", "add", "remove", "clear", "unknown"], "required": True, "description": "set/add/remove须value；clear/unknown禁止value"},
+        "expected_revision": {"type": "integer", "required": True},
+        "reason": {"type": "string", "required": True},
+        "context_id": {"type": "string"},
         "category": {"type": "string", "description": "显示大类，默认按属性名推断"},
         "source": {"type": "string", "description": "narration/speech/thought/observation"},
         "scope": {"type": "string", "enum": ["world", "cognition", "claim"], "description": "客观world、人物所知所信cognition、言说主张claim；非world须给认知者/说话人holder_id，不按对白形式机械分类"},
@@ -1025,39 +1000,23 @@ _register(Tool(
         "quote": {"type": "string", "description": "原文引文（与 source_id 一起给）"},
         "source_id": {"type": "string"},
     },
-    _add_property,
+    _record_property_change,
     writes=True,
 ))
 _register(Tool(
-    "correct_property",
-    "修正录入错误：直接更正原取值记录；故事中发生新状态请追加属性值，旧单值自动失效",
-    {
-        "record_id": {"type": "string", "required": True},
-        "value": {"type": ["string", "number", "boolean", "object", "array"], "required": True},
-        "event_id": {"type": "string", "description": "正确的披露事件，默认沿用"},
-        "reason": {"type": "string", "required": True},
-        "quote": {"type": "string"},
-        "source_id": {"type": "string"},
-    },
-    _correct_property,
-    writes=True,
+    "correct_property", "更正错误的事件属性记录，保留原sequence；新剧情变化请追加record_property_change",
+    {"record_id": {"type": "string", "required": True},
+     "changes": {"type": "object", "required": True},
+     "expected_revision": {"type": "integer", "required": True},
+     "reason": {"type": "string", "required": True}}, _correct_property, writes=True,
 ))
 _register(Tool(
-    "expire_properties",
-    "在原文披露边界结束旧值有效期（valid_to），不创建撤回记录；录入错误请更正或删除",
-    {
-        "record_ids": {"type": "array", "items": {"type": "string"}, "required": True},
-        "source_id": {"type": "string", "required": True},
-        "start": {"type": "integer", "required": True},
-        "reason": {"type": "string", "required": True},
-        "event_id": {"type": "string"},
-    }, _expire, writes=True,
-))
-_register(Tool(
-    "delete_property_records", "物理删除错误的属性记录；不表示故事中的状态变化",
+    "delete_property_records", "物理删除错误属性记录；不表示剧情变化",
     {"record_ids": {"type": "array", "items": {"type": "string"}, "required": True},
+     "expected_revision": {"type": "integer", "required": True},
      "reason": {"type": "string", "required": True}},
-    lambda ops, p: ops.delete_property_records(p["record_ids"], p["reason"]), writes=True,
+    lambda ops, p: ops.delete_property_records(p["record_ids"], p["reason"],
+        expected_revision=p["expected_revision"]), writes=True,
 ))
 _register(Tool(
     "rollback_preview", "只读预览按原文时间点删除后缀数据的范围",
@@ -1216,23 +1175,73 @@ for _draft_name, _draft_handler, _draft_writes in (
 ):
     _register(Tool(
         _draft_name,
-        ("检查完整事实草稿的原文证据、关系性质、发生过程与失效锚点，只返回诊断" if not _draft_writes else
-         "把本任务已核对的完整事实草稿自动入库，保留证据与不确定性；不发起另一个模型任务"),
-        {"source_id": {"type": "string", "required": True},
-         "result": {"type": "object", "properties": RESULT_SCHEMA["properties"],
-                    "additionalProperties": False, "required": True,
-                    "description": "草稿须有nodes和properties；已有节点用正式ID，无须重列；同批引用按nodes数组用@1起的序号，避免重复名字；关系性质写property而非category；node=A,property=父亲,value=B表示B是A的父亲"},
-         "start": {"type": "integer", "description": "完整原文的起始字符位置，默认0"},
-         "end": {"type": "integer", "description": "完整原文的结束位置，不包含，默认全文末尾"}},
-        _draft_handler, writes=_draft_writes,
+        ("可选单独试查一个事实批次的原文证据、引用、结构与失效锚点，只返回诊断；不是提交前置" if not _draft_writes else
+         "直接提交一个语境与引用完整的已核实事实批次，支持同任务增量多次提交；source_id/start/end放外层，result仅含草稿字段。后台自动定位逐字引文、静态校验；合法自动原子入库，问题批持久暂存并返回submission_id/submission_revision及问题项，后续只patch修补而不重发整批，无需先locate_source或preview"),
+        submission_parameters(),
+        _draft_handler, writes=_draft_writes, input_schema=submission_input_schema(),
     ))
+
+
+_SUBMISSION_SECTIONS = ['nodes', 'properties', 'uncertainties', 'exclusions']
+_register(Tool('list_extraction_submissions', '仅需找回未完成暂存时列出pending摘要，支持原文过滤与分页，不返回整稿，不是例行提取前置。', {
+    'source_id': {'type': 'string', 'description': '可选，仅列该原文；省略列本工程全部未解决暂存'},
+    'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100, 'description': '每页条数，默认20'},
+    'after': {'type': 'integer', 'minimum': 0, 'description': '上一页next_after整数游标；首请求0'},
+}, _list_extraction_submissions))
+_PATCH_BASE = {'section': {'type': 'string', 'enum': _SUBMISSION_SECTIONS}}
+_EXTRACTION_PATCH_ITEM = {'oneOf': [
+    {'type': 'object', 'additionalProperties': False, 'required': ['op', 'section', 'index', 'field', 'value'],
+     'properties': _PATCH_BASE | {'op': {'type': 'string', 'const': 'set'}, 'index': {'type': 'integer', 'minimum': 0},
+                                 'field': {'type': 'string'}, 'value': {}}},
+    {'type': 'object', 'additionalProperties': False, 'required': ['op', 'section', 'index', 'field'],
+     'properties': _PATCH_BASE | {'op': {'type': 'string', 'const': 'remove'}, 'index': {'type': 'integer', 'minimum': 0},
+                                 'field': {'type': 'string'}}},
+    {'type': 'object', 'additionalProperties': False, 'required': ['op', 'section', 'value'],
+     'properties': _PATCH_BASE | {'op': {'type': 'string', 'const': 'append'}, 'value': {'type': 'object'}}},
+]}
+_register(Tool('read_extraction_submission', '仅缺少局部内容时读取暂存状态/问题/指定行，非patch前置；反馈已足够则直接patch，默认不回传整稿。', {
+    'submission_id': {'type': 'string', 'required': True, 'description': 'submit_extraction返回的暂存编号'},
+    'section': {'type': 'string', 'enum': _SUBMISSION_SECTIONS, 'description': '默认只返回状态和问题；指定才读取该部分'},
+    'indices': {'type': 'array', 'items': {'type': 'integer', 'minimum': 0}, 'description': 'section内0基行号；node reference仍为原1基@n'},
+}, _read_extraction_submission))
+_register(Tool('patch_extraction_submission', '反馈足够时直接一次patch数组修多个问题，无需先read；只改字段或追加项，保留索引和@n引用，自动重检入库，不重发整批。', {
+    'submission_id': {'type': 'string', 'required': True},
+    'expected_revision': {'type': 'integer', 'required': True, 'minimum': 1, 'description': '刚读取的submission_revision，不是正式工程revision'},
+    'patches': {'type': 'array', 'required': True, 'minItems': 1, 'items': _EXTRACTION_PATCH_ITEM,
+                'description': 'set/remove改index行的field；append追加对象。禁止删整行、重排或splice；index0基，不修改source_id/start/end。'},
+    'reason': {'type': 'string', 'required': True, 'description': '局部修补依据'},
+}, _patch_extraction_submission, writes=True))
+
+_CONTENT_PATH = {'type': 'array', 'minItems': 1, 'items': {'type': ['string', 'integer']},
+                 'description': '从原Operations绑定arguments根开始的字段路径；数组索引从0起，不重排既有条目'}
+_CONTENT_PATCH = {'type': 'object', 'additionalProperties': False,
+    'properties': {'op': {'type': 'string', 'enum': ['set', 'remove', 'append']}, 'path': _CONTENT_PATH, 'value': {}},
+    'required': ['op', 'path'], 'oneOf': [
+        {'properties': {'op': {'enum': ['set', 'append']}}, 'required': ['value']},
+        {'properties': {'op': {'const': 'remove'}}, 'not': {'required': ['value']}}]}
+
+_register(Tool('list_content_submissions', '仅需恢复未完成业务内容时，分页列出暂存摘要；不回传正文整稿，不是每次保存的前置步骤。', {
+    'operation': {'type': ['string', 'null']}, 'target': {'type': ['string', 'object', 'null']},
+    'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100}, 'after': {'type': 'integer', 'minimum': 0},
+}, _list_content_submissions))
+_register(Tool('read_content_submission', '查看统一业务内容暂存的状态与问题；默认仅摘要，paths只读取确实需要的局部字段。', {
+    'submission_id': {'type': 'string', 'required': True},
+    'paths': {'type': ['array', 'null'], 'items': _CONTENT_PATH | {'minItems': 0,
+        'description': '显式读取的字段路径；空路径[]仅在确需完整表单恢复时读取全部绑定参数，默认不返回整稿'}},
+}, _read_content_submission))
+_register(Tool('patch_content_submission', '反馈足够则一次局部patch修多个问题，无需先read或重发整稿；重检通过即自动原子入库。不能修改operation、目标、权限、修订与依据，也不能变成删除/移动等命令。', {
+    'submission_id': {'type': 'string', 'required': True},
+    'expected_revision': {'type': 'integer', 'minimum': 1, 'required': True, 'description': '暂存submission_revision，不是业务数据修订号'},
+    'patches': {'type': 'array', 'minItems': 1, 'items': _CONTENT_PATCH, 'required': True},
+    'reason': {'type': 'string', 'minLength': 1, 'required': True},
+}, _patch_content_submission, writes=True))
 
 
 _CHANGE_PARAMS = {
     "graph_objects": {"type": "array", "items": {"type": "object"}, "required": True,
                       "description": "完整新增或更新对象；kind可为node/context/timeline/source_order，结构见get_schema；节点events表达嵌套归属"},
     "property_records": {"type": "array", "items": {"type": "object"}, "required": True,
-                         "description": "追加或更新合法属性记录；新增取值无需填写id，由程序分配PV编号，新单值自动结束旧值有效期；结构见get_schema"},
+                         "description": "追加或更正合法property_definition/property_change；新变更无需id，由程序分配PC编号；event_id/op/sequence记录事件事实，程序按事件顺序推导状态，无有效期字段；结构见get_schema"},
     "expected_revision": {"type": "integer", "required": True,
                           "description": "刚读取的工程修订号，过期即拒绝，不覆盖他人修改"},
 }
@@ -1251,7 +1260,7 @@ def _project_changes(ops, params, *, write=False):
 
 _register(Tool("get_schema", "读取当前图对象和属性记录的结构合同、字段及图JSON schema，不写入", {},
                lambda ops, params: ops.get_schema()))
-_register(Tool("read_project_state", "读取当前完整图结构与原始属性记录（含有效区间），用于查漏补缺；图的投影审计字段不可原样写回", {
+_register(Tool("read_project_state", "读取当前完整图结构与原始属性事件变更记录，用于查漏补缺；图的投影审计字段不可原样写回", {
     },
     lambda ops, params: _read_project_state(ops, params)))
 _register(Tool("preview_changes", "对通用工程修改做静态预检：证据、引用、结构及修订号；不写入", _CHANGE_PARAMS,
@@ -1341,7 +1350,7 @@ _adaptation_tool("save_prompt_override", "修改单项工程提示词；text=nul
 _adaptation_tool("import_adaptation_candidates", "列出可多选导入的提取时间点及层级；不写入", {})
 _adaptation_tool("import_adaptation", "从提取导入指定多个时间点、必要结构与相关有效状态，保留本地改编", _ADAPT_REV | {
     "moment_ids": {"type": "array", "items": {"type": "string"}, "required": True,
-                   "description": "从import_adaptation_candidates选择的非空时间点ID列表；容器包含下属，依赖与区间边界由程序补齐"}}, writes=True)
+                   "description": "从import_adaptation_candidates选择的非空时间点ID列表；容器包含下属，相关依赖与必要前置状态锚点由程序补齐"}}, writes=True)
 _adaptation_tool("adaptation_browse_view", "读取与数据浏览同结构的改编视图，排序与状态按改编sort_id计算", {
     "granularity": {"type": "string", "enum": ["scene", "event", "action"]},
     "cut_id": {"type": ["string", "null"]}, "node_type": {"type": "string"}, "query": {"type": "string"},
@@ -1358,10 +1367,15 @@ _adaptation_tool("delete_adaptation_node", "显式物理删除改编节点及包
     "expected_revision": {"type": "integer", "required": True}, "reason": {"type": "string", "required": True}}, writes=True)
 _adaptation_tool("suppress_adaptation_node", "屏蔽或恢复改编节点及整个包含子树，不影响提取", _ADAPT_REV | _ADAPT_NODE | {
     "suppressed": {"type": "boolean"}}, writes=True)
-_adaptation_tool("set_adaptation_property", "在改编时间点新增、更改或失效属性", _ADAPT_REV | _ADAPT_NODE | {
+_adaptation_tool("set_adaptation_property", "在改编事件记录属性变化，程序按事件顺序推导；record_id仅用于更正错误记录", _ADAPT_REV | _ADAPT_NODE | {
     "property_id": {"type": "string", "required": True}, "value": {},
-    "event_id": {"type": ["string", "null"], "description": "改编生效时点；失效操作指定结束时点"}, "record_id": {"type": ["string", "null"], "description": "更改或失效的已有属性取值ID；省略新增"},
-    "expire": {"type": "boolean"}}, writes=True)
+    "event_id": {"type": "string", "required": True},
+    "op": {"type": "string", "enum": ["set", "add", "remove", "clear", "unknown"], "required": True},
+    "record_id": {"type": ["string", "null"]},
+    "scope": {"type": "string", "enum": ["world", "cognition", "claim"]},
+    "holder_id": {"type": ["string", "null"]}, "context_id": {"type": "string"}}, writes=True)
+_adaptation_tool("delete_adaptation_property_changes", "物理删除错误改编属性变更，不代表剧情失效", _ADAPT_REV | {
+    "record_ids": {"type": "array", "items": {"type": "string"}, "required": True}}, writes=True)
 _adaptation_tool("list_assets", "按类别、角色与改编时间点读取视觉设定卡", {
     "category": {"type": "string", "enum": ["appearance", "item", "location", "material"], "required": True},
     "moment": {"type": "string"}, "node_id": {"type": "string"}, "domain": _ASSET_DOMAIN})
@@ -1392,6 +1406,76 @@ _register(Tool("set_extraction_granularity", "设置工程提取粒度，保留�
 
 
 _register_screenplay_tools(Tool, _register, _validate_adaptation_argument)
+_register_host_tools(Tool, _register, _validate_adaptation_argument)
+_register_attachment_tools(Tool, _register, _validate_adaptation_argument)
+
+
+def _assistant_access_configuration(name, params, writes=False, summary=None):
+    def invoke(ops, args):
+        for key, value in args.items():
+            _validate_adaptation_argument(value, params[key], key)
+        try:
+            return getattr(ops, name)(**args)
+        except (ValueError, OSError) as error:
+            raise ToolError(str(error)) from error
+    _register(Tool(name, summary or ('读取聊天访问模式' if not writes else '设置聊天下一任务的访问模式；不改变活动任务，模型不可自提升'),
+                   params, invoke, writes=writes, scope='configuration'))
+
+
+_assistant_access_configuration('read_assistant_access', {'chat_id': {'type': ['string', 'null']}})
+_assistant_access_configuration('set_assistant_access', {
+    'chat_id': {'type': 'string', 'required': True},
+    'access_mode': {'type': 'string', 'enum': ['standard', 'full'], 'required': True},
+    'reason': {'type': 'string'}}, writes=True)
+
+_assistant_access_configuration('import_chat_attachments', {
+    'chat_id': {'type': 'string', 'required': True},
+    'paths': {'type': 'array', 'items': {'type': 'string'}, 'minItems': 1, 'required': True},
+    'task_id': {'type': ['string', 'null']},
+}, writes=True, summary='显式导入用户选择的聊天附件，复制原件不覆盖；此操作不向助手模型开放任意外部文件导入')
+
+
+def _configure_project_api_key(ops, args):
+    for name, value in args.items():
+        _validate_adaptation_argument(value, TOOLS['configure_project_api_key'].params[name], name)
+    secret = args.get('api_key') or ''
+    try:
+        current = ops.load_project_settings()
+        saved = ops.save_project_settings({key: current[key] for key in ('profile', 'extraction_granularity')},
+                                         api_key=secret, clear_api_key=args.get('clear_api_key', False))
+        return saved['api_key_status']
+    except (ValueError, OSError) as error:
+        message = str(error)
+        for value in (secret, secret.strip()):
+            if value:
+                message = message.replace(value, '[REDACTED]')
+        raise ToolError(message) from None
+
+
+_register(Tool('read_project_api_key_status', '读取本工程当前模型服务的密钥可用状态与来源，不返回密钥或密文', {},
+               lambda ops, args: ops.provider_api_key_status(), scope='configuration'))
+_register(Tool('configure_project_api_key', '显式设置或清除本工程当前服务地址的本机加密API Key；不向助手模型开放，不回显密钥', {
+    'api_key': {'type': 'string', 'writeOnly': True}, 'clear_api_key': {'type': 'boolean'},
+}, _configure_project_api_key, writes=True, scope='configuration'))
+
+
+def _check_project_api_key(ops, args):
+    for name, value in args.items():
+        _validate_adaptation_argument(value, TOOLS['check_project_api_key'].params[name], name)
+    return ops.check_model_credential(api_key=args.get('api_key'), ignore_saved_key=args.get('ignore_saved_key', False))
+
+
+_register(Tool('check_project_api_key', '向当前服务和模型发送一次最小认证检查；不保存配置，不进入聊天，不重试，返回状态及用量而不回显密钥', {
+    'api_key': {'type': 'string', 'writeOnly': True}, 'ignore_saved_key': {'type': 'boolean'},
+}, _check_project_api_key, writes=True, scope='configuration'))
+
+
+def _register_loading_tools():
+    from .tool_loading import register
+    register(Tool, _register)
+
+
+_register_loading_tools()
 
 
 def describe() -> list[dict]:
@@ -1414,7 +1498,7 @@ def call(name: str, params: dict | None = None, *, project: str | Path | None = 
     if unknown:
         raise ToolError("不认识的参数：" + "、".join(sorted(unknown)))
     for key, spec in tool.params.items():
-        if spec.get("required") and args.get(key) in (None, ""):
+        if spec.get("required") and (key not in args or args[key] is None):
             raise ToolError(f"缺少参数：{key}")
     if tool.scope == "workspace":
         return tool.handler(None, args)

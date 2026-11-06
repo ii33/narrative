@@ -91,13 +91,13 @@ class TransitionPayload(WritingModel):
     text: str = ""
 
 
-PAYLOADS = {"action": TextPayload, "dialogue": DialoguePayload, "screen_text": ScreenTextPayload,
+PAYLOADS = {"scene_description": TextPayload, "action": TextPayload, "dialogue": DialoguePayload, "screen_text": ScreenTextPayload,
             "sound": SoundPayload, "transition": TransitionPayload}
 
 
 class BlockDraft(WritingModel):
     id: str | None = None
-    type: Literal["action", "dialogue", "screen_text", "sound", "transition"]
+    type: Literal["scene_description", "action", "dialogue", "screen_text", "sound", "transition"]
     payload: dict[str, Any]
 
     @model_validator(mode="after")
@@ -110,7 +110,7 @@ class ScriptBlock(WritingModel):
     id: str
     unit_id: str
     position: int = Field(ge=0, strict=True)
-    type: Literal["action", "dialogue", "screen_text", "sound", "transition"]
+    type: Literal["scene_description", "action", "dialogue", "screen_text", "sound", "transition"]
     payload: dict[str, Any]
 
     @model_validator(mode="after")
@@ -137,11 +137,12 @@ class WritingBasis(WritingModel):
     plan_fingerprint: str | None = None
     dependency_refs: list[dict[str, str]] = Field(default_factory=list)
     project_style: dict = Field(default_factory=lambda: {"revision": 0, "text": ""})
+    creative_agreement: dict = Field(default_factory=dict)
     creation_scope: dict = Field(default_factory=dict)
     manifest_ref: str | None = None
     task_id: str | None = None
     reason: str
-    fingerprint_version: int = 2
+    fingerprint_version: int = 4
     created_at: str = Field(default_factory=timestamp)
 
 

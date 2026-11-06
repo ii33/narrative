@@ -48,7 +48,7 @@ def test_selected_chat_shares_real_sdk_history_across_roles_and_isolates_other_c
     ops = Operations.create_graph_project(entry)
     source = "EXTRACTION_MEMORY_MARKER\n" + TEXT
     source_id = ops.import_source("合成跨角色提取", source)
-    ops.create_source_slices(source_id, [{"title": "合成接人任务", "start": 0, "end": len(source)}])[0]
+    ops.create_source_slices(source_id, [{"title": "合成接人任务", "start": 0, "end": len(source)}])['result'][0]
     directories = layout(ops.project_info().path)
     # Synthetic legacy audit and runtime data must never be reused or overwritten.
     legacy = directories.extraction / "conversation"
@@ -71,22 +71,27 @@ def test_selected_chat_shares_real_sdk_history_across_roles_and_isolates_other_c
                 messages = json.dumps(request["messages"], ensure_ascii=False)
                 native = {tool["function"]["name"] for tool in request["tools"]}
                 assert "read_source" in native
-                assert {"read_project_state", "preview_changes", "apply_changes", "add_property", "revise_node"} <= native
+                assert {"list_available_tools", "load_tools"} <= native
+                assert "apply_storyboard_changes" not in native
                 assert not {"list_projects", "create_project"} & native
                 system = [row["content"] for row in request["messages"] if row.get("role") == "system"]
                 assert system
                 systems.append(system)
                 if number == 1:
                     assert "CHAT_A_PRIVATE" in messages
-                    assert "create_source_slices" in native
+                    assert "create_source_slices" not in native and "submit_extraction" not in native
                     answer = {"answer": "A 的聊天记号已记录。"}
                 elif number == 2:
-                    assert "CHAT_A_PRIVATE" in messages
-                    assert "source_id" in messages
-                    # The persistent runtime has a union registry. Only the
-                    # active dispatcher mode, not catalog omission, is security.
-                    assert "create_source_slices" in native
-                    assert "preview_extraction" in native
+                    assert "CHAT_A_PRIVATE" in messages and "source_id" in messages
+                    assert "submit_extraction" not in native and "preview_extraction" not in native
+                    answer = None
+                    delta = {"role": "assistant", "content": "按需加载提取提交合同。", "tool_calls": [{
+                        "index": 0, "id": "load-extraction", "type": "function",
+                        "function": {"name": "load_tools", "arguments": json.dumps({"names": ["submit_extraction"]})},
+                    }]}
+                elif number == 3:
+                    assert "CHAT_A_PRIVATE" in messages and "submit_extraction" in native
+                    assert "preview_extraction" not in native and "create_source_slices" not in native
                     answer = None
                     delta = {"role": "assistant", "content": "已核对原文。", "tool_calls": [{
                         "index": 0, "id": "read-original", "type": "function",
@@ -94,7 +99,7 @@ def test_selected_chat_shares_real_sdk_history_across_roles_and_isolates_other_c
                             "source_id": source_id, "start": 0, "length": len(source),
                         }, ensure_ascii=False)},
                     }]}
-                elif number == 3:
+                elif number == 4:
                     observations = [row for row in request["messages"] if row.get("role") == "tool"]
                     assert observations
                     assert "EXTRACTION_MEMORY_MARKER" in json.dumps(observations[-1], ensure_ascii=False)
@@ -105,22 +110,25 @@ def test_selected_chat_shares_real_sdk_history_across_roles_and_isolates_other_c
                             "source_id": source_id, "result": draft_result(),
                         }, ensure_ascii=False)},
                     }]}
-                elif number == 4:
+                elif number == 5:
                     assert 'accepted' in messages
                     answer = {"answer": "提取已自动入库。"}
-                elif number == 5:
+                elif number == 6:
                     assert "CHAT_A_PRIVATE" in messages
                     assert "EXTRACTION_MEMORY_MARKER" in messages
                     assert "CHAT_B_PRIVATE" not in messages
-                    assert "create_source_slices" in native
+                    assert "submit_extraction" in native
+                    assert "create_source_slices" not in native
                     answer = {"answer": "A 可以继续刚才的提取上下文。"}
-                elif number == 6:
+                elif number == 7:
                     assert "CHAT_B_PRIVATE" in messages
+                    assert "submit_extraction" not in native
                     assert "CHAT_A_PRIVATE" not in messages
                     assert "EXTRACTION_MEMORY_MARKER" not in messages
                     answer = {"answer": "B 的上下文独立。"}
                 else:
-                    assert number == 7
+                    assert number == 8
+                    assert "submit_extraction" in native
                     assert "CHAT_A_PRIVATE" in messages
                     assert "EXTRACTION_MEMORY_MARKER" in messages
                     assert "CHAT_B_PRIVATE" not in messages
@@ -172,6 +180,12 @@ def test_selected_chat_shares_real_sdk_history_across_roles_and_isolates_other_c
         value = panel.property("messages")
         return value.toVariant() if hasattr(value, "toVariant") else value
 
+    def assert_message_coverage(rendered, chat_id):
+        raw = ChatStore(ops.project_info().path).load(chat_id)["messages"]
+        expected = [row.get("message_id") or f"{chat_id}:history:{i}" for i, row in enumerate(raw)]
+        actual = [key for row in rendered for key in row.get("sourceMessageKeys", [row["messageKey"]])]
+        assert actual == expected
+
     def send(text):
         panel.setProperty("draft", text)
         panel.send()
@@ -197,7 +211,7 @@ def test_selected_chat_shares_real_sdk_history_across_roles_and_isolates_other_c
         window.setProperty("assistantOpen", True)
         first = invoke("assistant", lambda: send("请记住 CHAT_A_PRIVATE。"))
         assert panel.property("chatId") == chat_a["id"]
-        assert len(panel_messages()) == len(ChatStore(ops.project_info().path).load(chat_a["id"])["messages"])
+        assert_message_coverage(panel_messages(), chat_a["id"])
         before_messages = len(panel_messages())
         runner = bridge._assistant_runner
         assert runner is not None
@@ -234,7 +248,7 @@ def test_selected_chat_shares_real_sdk_history_across_roles_and_isolates_other_c
         assert panel.property("visible") is True
         rendered = panel_messages()
         assert len(rendered) > before_messages
-        assert len(rendered) == len(ChatStore(ops.project_info().path).load(chat_a["id"])["messages"])
+        assert_message_coverage(rendered, chat_a["id"])
         assert "提取" in "\n".join(row["text"] for row in rendered)
         assert "合成接人任务" in "\n".join(row["text"] for row in rendered)
         assert ops.graph_project_info()["revision"] > 0
@@ -243,6 +257,8 @@ def test_selected_chat_shares_real_sdk_history_across_roles_and_isolates_other_c
         assert sum(row['text'] == '已核对原文。' for row in outputs) == 2
         assert [row['seq'] for row in outputs] == sorted(row['seq'] for row in outputs)
         assert all(row.get('full_output') for row in outputs)
+        assert all(row.get('display_kind') in {'answer', 'thought'} for row in outputs)
+        assert any(row.get('display_kind') == 'thought' for row in outputs)
         metadata = json.loads((Path(extraction['audit_directory']) / 'metadata-1.json').read_text(encoding='utf-8'))
         task_outputs = [row for row in outputs if row['task_id'] == extraction['task_id']]
         assert [row['message_id'] for row in metadata['model_messages']] == [row['message_id'] for row in task_outputs]
@@ -253,7 +269,7 @@ def test_selected_chat_shares_real_sdk_history_across_roles_and_isolates_other_c
         following = invoke("assistant", lambda: send("继续刚才同一聊天中的提取任务。"))
         assert bridge._assistant_runner is runner
         assert runner._harness.client._proc.pid == pid and process.poll() is None
-        assert len(panel_messages()) == len(ChatStore(ops.project_info().path).load(chat_a["id"])["messages"])
+        assert_message_coverage(panel_messages(), chat_a["id"])
         assert extraction["chat_id"] == chat_a["id"]
         assert first["chat_id"] == following["chat_id"] == chat_a["id"]
         for result in (first, extraction, following):
@@ -281,7 +297,7 @@ def test_selected_chat_shares_real_sdk_history_across_roles_and_isolates_other_c
         assert panel.property("chatId") == chat_a["id"]
         assert bridge._assistant_runner is runner
         assert runner._harness.client._proc.pid == pid and process.poll() is None
-        assert len(requests) == 7
+        assert len(requests) == 8
         assert all(system == systems[0] for system in systems[1:])
         assert all(path.read_bytes() == content for path, content in old_files.items())
         assert {path for path in legacy.rglob("*") if path.is_file()} == set(old_files)

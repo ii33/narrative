@@ -42,23 +42,23 @@ def test_adaptation_ids_preserve_type_identity_references_and_original_ids(proje
     state = project.edit_adaptation_node(changes={"node_type": "event", "name": "新事件", "participants": [ids["甲"]]}, parent_id=scene["id"])
     event = next(n for n in state["nodes"] if n["name"] == "新事件")
     assert event["id"] == "adapt-event-1"  # failed transaction did not consume it
-    state = project.set_adaptation_property(event["id"], "说明", "第一段", event_id=event["id"])
+    state = project.set_adaptation_property(event["id"], "说明", event["id"], "set", value="第一段")
     value = next(row for row in state["properties"] if row.get("property_id") == "说明")
-    assert value["id"] == "adapt-value-1"
+    assert value["id"] == "adapt-change-1"
     state = project.copy_adaptation_node(scene["id"])
     cloned_scene = next(n for n in state["nodes"] if n["id"] == "adapt-scene-2")
     cloned_event = next(n for n in state["nodes"] if n["id"] == "adapt-event-2")
     assert cloned_scene["events"] == [cloned_event["id"]]
     assert cloned_event["participants"] == [ids["甲"]]
     copied_value = next(row for row in state["properties"] if row.get("node_id") == cloned_event["id"])
-    assert copied_value["id"] == "adapt-value-2" and copied_value["event_id"] == cloned_event["id"]
+    assert copied_value["id"] == "adapt-change-2" and copied_value["event_id"] == cloned_event["id"]
     project.move_adaptation_node(cloned_event["id"], after_id=ids["甲坐下"])
     assert any(n["id"] == cloned_event["id"] for n in project.adaptation_snapshot()["nodes"])
     project.delete_adaptation_node(event["id"], project.adaptation_snapshot()["revision"], "显式删除")
     state = project.edit_adaptation_node(changes={"node_type": "event", "name": "后续事件"}, parent_id=scene["id"])
     assert next(n for n in state["nodes"] if n["name"] == "后续事件")["id"] == "adapt-event-3"
-    state = project.set_adaptation_property(cloned_event["id"], "新增说明", "第二段", event_id=cloned_event["id"])
-    assert next(row for row in state["properties"] if row.get("property_id") == "新增说明")["id"] == "adapt-value-3"
+    state = project.set_adaptation_property(cloned_event["id"], "新增说明", cloned_event["id"], "set", value="第二段")
+    assert next(row for row in state["properties"] if row.get("property_id") == "新增说明")["id"] == "adapt-change-3"
     assert project.check_adaptation()["ok"]
     assert project.graph_snapshot() == source
     assert ids["甲"] == "P1" and ids["甲敲门"] in {n["id"] for n in state["nodes"]}
@@ -66,7 +66,7 @@ def test_adaptation_ids_preserve_type_identity_references_and_original_ids(proje
 
 def test_asset_category_and_image_ids_are_readable_stable_and_never_reused(project, tmp_path):
     ids = seed(project)
-    state = project.edit_adaptation_node(changes={"node_type": "item", "name": "道具", "initial_holder": ids["甲"]})
+    state = project.edit_adaptation_node(changes={"node_type": "item", "name": "道具", "initial_holder": ids["甲"],"point_id":ids["甲敲门"]})
     item = next(n for n in state["nodes"] if n["name"] == "道具")
     state = project.edit_adaptation_node(changes={"node_type": "location", "name": "新地点"})
     location = next(n for n in state["nodes"] if n["name"] == "新地点")

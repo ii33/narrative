@@ -1,4 +1,4 @@
-"""Schema-8 physical event merge preserves facts while replacing all typed IDs."""
+"""Schema-11 physical event merge preserves facts while replacing all typed IDs."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def seed(ops):
         ]
     ]
     common = {
-        "kind": "property_value",
+        "kind": "property_change", "op": "set",
         "node_id": ids["甲"],
         "event_id": "E99",
         "evidence": {"source_id": sid, "quote": QUOTES[0]},
@@ -45,7 +45,6 @@ def seed(ops):
             "node_id": "E99",
             "property_id": "标注",
             "value": "E99",
-            "applies_to": "E99",
             "related_nodes": ["E99", ids["甲"]],
         },
         common | {"id": "node_value", "property_id": "指向", "value": "E99"},
@@ -70,9 +69,12 @@ def seed(ops):
             "property_id": "标注",
             "value": "结束的文字E99",
             "node_id": ids["甲"],
-            "valid_to": {"source_id": sid, "start": TEXT.index(QUOTES[1]), "event_id": "E99"},
+
         },
     ]
+    values.append(common | {"id": "ended-clear", "node_id": ids["甲"], "property_id": "标注", "op": "clear",
+                            "event_id": ids[QUOTES[1][:-1]], "disclosure": {"source_id": sid, "start": TEXT.index(QUOTES[1])},
+                            "evidence": {"source_id": sid, "quote": QUOTES[1]}})
     assert (
         ops.apply_changes(
             [source, scene],
@@ -93,7 +95,7 @@ def seed(ops):
     return sid, ids, target, source, proof
 
 
-def test_physical_merge_rewrites_current_and_ended_typed_references_not_literals(project):
+def test_physical_merge_rewrites_current_and_historical_typed_references_not_literals(project):
     _sid, ids, target, source, proof = seed(project)
     before = copy.deepcopy(project.graph_snapshot())
     records = copy.deepcopy(project.property_records())
@@ -114,7 +116,7 @@ def test_physical_merge_rewrites_current_and_ended_typed_references_not_literals
     assert not any(n.get("merged_into") for n in nodes)
     rows = {r["id"]: r for r in project.property_records()}
     assert (
-        rows["subject"]["node_id"] == target["id"] and rows["subject"]["applies_to"] == target["id"]
+        rows["subject"]["node_id"] == target["id"] and rows["subject"]["event_id"] == target["id"]
     )
     assert rows["subject"]["related_nodes"] == [target["id"], ids["甲"]]
     assert rows["subject"]["value"] == "E99"
@@ -126,11 +128,10 @@ def test_physical_merge_rewrites_current_and_ended_typed_references_not_literals
     for row in rows.values():
         if row.get("event_id"):
             assert row["event_id"] != "E99"
-        for field in ("valid_from", "valid_to"):
-            if row.get(field):
-                assert row[field].get("event_id") != "E99"
+        assert not {"valid_from", "valid_to", "applies_to"} & set(row)
         assert "original_references" not in row
-    assert rows["ended"]["valid_to"]["start"] == TEXT.index(QUOTES[1])
+    assert rows["ended-clear"]["event_id"] == ids[QUOTES[1][:-1]]
+    assert project.property_state(ids["甲"], "标注")["state"]["kind"] == "absent"
     with pytest.raises(ValueError):
         project.merge_events(
             source["id"],

@@ -4,6 +4,8 @@ import QtQuick.Layouts
 
 Dialog {
     id: editor
+    SubmissionState{id:contentSubmission;identityKey:editor.creating?"new":editor.unit.id||"";owner:editor;operation:"apply_scene_table_changes";target:({segment_id:editor.host.segment.id||null});onRestoreRequested:function(a){var c=(a.changes||[])[0]||{};editor.openFor(c.op==="insert"?c.unit:Object.assign({id:c.unit_id},c.changes||{}))}}
+
     objectName: "scriptPlanEditor"
     property var host
     property var unit: ({})
@@ -15,6 +17,7 @@ Dialog {
     modal: true; width: Math.min(820, host.width-40); height: Math.min(740,host.height-30); anchors.centerIn: parent
     title: creating ? "新增场次 / 画面段" : "编辑场表 · " + (unit.plan.title || "未命名场次")
     function openFor(value) {
+        if(visible&&!contentSubmission.restoring)contentSubmission.begin();
         unit=value || ({}); creating=!unit.id; plan=Object.assign({},unit.plan || {})
         kind.currentIndex=unit.kind === "screen_segment" ? 1:0; titleField.text=plan.title || ""; summary.text=plan.summary || ""
         location.text=plan.location_text || ""; time.text=plan.time_label || ""; number.text=unit.scene_number || ""; enabledBox.checked=unit.enabled !== false
@@ -38,6 +41,8 @@ Dialog {
     contentItem: ScrollView {
         clip: true
         ColumnLayout {
+        SubmissionFeedback{state:contentSubmission}
+
             width: parent.width; spacing: 8
             Label { visible: !!editor.errorText; text: editor.errorText; color: t.bad; wrapMode: Text.Wrap; Layout.fillWidth:true }
             Label {objectName:"scriptSceneTableGuide";text:"按创作需要编写或修改内容。对话使用工程设置中的提示词，已有内容可反复编辑。场表所有字段都会供写作参考，请与当前事件线核对。";color:t.muted;wrapMode:Text.Wrap;Layout.fillWidth:true}
@@ -45,7 +50,7 @@ Dialog {
             TextField { id:titleField; objectName:"scriptPlanTitle"; placeholderText:"场表标题"; Layout.fillWidth:true }
             TextArea { id:summary; objectName:"scriptPlanSummary"; placeholderText:"剧情概要（必填）"; wrapMode:TextEdit.Wrap; Layout.fillWidth:true; Layout.preferredHeight:90 }
             RowLayout { ComboBox { id:interior; model:["UNSPECIFIED","INT","EXT","INT_EXT"] } TextField { id:location; placeholderText:"地点文字"; Layout.fillWidth:true } TextField { id:time; placeholderText:"时间，如夜 / 连续"; Layout.fillWidth:true } }
-            TextField { id:locationId; placeholderText:"地点实体ID（可选）"; Layout.fillWidth:true }
+            TextField { id:locationId; objectName:"scriptPlanLocationId"; placeholderText:"地点实体ID（可选）"; Layout.fillWidth:true }
             TextField { id:cast; placeholderText:"人物/群体ID，逗号分隔（草稿可不绑定）"; Layout.fillWidth:true }
             RowLayout { TextField { id:duration; placeholderText:"预计秒数"; validator:DoubleValidator { bottom:0.01 } Layout.fillWidth:true } ComboBox { id:mode; model:["normal","flashback","dream","imagined"] } ComboBox { id:presentation; visible:kind.currentIndex===1; model:["title_card","black_screen","credits","other"] } }
             TextField { id:goal; placeholderText:"目标"; Layout.fillWidth:true }

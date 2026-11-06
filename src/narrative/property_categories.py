@@ -10,11 +10,10 @@ type list with a default for every type, stored as project config so it can be
 renamed, extended or trimmed at any time. A record gets a category from the
 first of these that applies:
 
-1. an explicit ``property_categorization`` record — a human moved it;
-2. the ``category`` the extractor wrote on the disclosure;
-3. a name hint for the property (``height`` → 外貌);
-4. a value hint for a generic name (``state`` = 身受重伤 → 能力与身体状态);
-5. ``其他``.
+1. the ``category`` saved on the event change, including direct edits;
+2. a name hint for the property (``height`` → 外貌);
+3. a value hint for a generic name (``state`` = 身受重伤 → 能力与身体状态);
+4. ``其他``.
 
 Nothing is enforced at capture time: an unclassifiable record is stored under
 ``其他`` and stays there until someone moves it. Merging two property names is a

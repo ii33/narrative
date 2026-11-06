@@ -97,12 +97,13 @@ def test_stdio_adaptation_edit_copy_move_false_values_and_atomic_conflict(seeded
     assert next(node for node in state["nodes"] if node["id"] == clone)["suppressed"] is False
     for property_id, value in (("开关", False), ("数量", 0)):
         state = call(entry, "set_adaptation_property", {"node_id": person, "property_id": property_id,
-                                                       "value": value, "event_id": first, "expire": False})
+                                                       "value": value, "event_id": first, "op": "set"})
         row = next(row for row in state["properties"] if row.get("property_id") == property_id)
         assert row["value"] == value and type(row["value"]) is type(value)
         state = call(entry, "set_adaptation_property", {"node_id": person, "property_id": property_id,
-                                                       "record_id": row["id"], "event_id": last, "expire": True})
-        assert next(row2 for row2 in state["properties"] if row2["id"] == row["id"])["end_event_id"] == last
+                                                       "event_id": last, "op": "clear"})
+        assert next(row2 for row2 in state["properties"] if row2["id"] == row["id"])["value"] == value
+        assert any(row2.get("op")=="clear" and row2["event_id"]==last for row2 in state["properties"] if row2.get("property_id")==property_id)
     assert call(entry, "check_adaptation")["ok"]
     snapshot = call(entry, "adaptation_snapshot")
     message = call(entry, "edit_adaptation_node", {"node_id": person, "changes": {"name": "不能写入"},

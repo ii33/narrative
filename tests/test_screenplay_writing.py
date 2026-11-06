@@ -130,14 +130,19 @@ def test_five_payloads_unbound_warning_typed_refs_and_invalid_payload_atomic(pro
     assert len(written["blocks"]) == 5
     assert any(row["code"] == "DIALOGUE_SPEAKER_UNBOUND" for row in written["diagnostics"])
     before = read_context(ops)[0]
-    with pytest.raises(ValueError):
-        body(ops, unit["id"], [{"type": "action", "payload": {"text": "非法", "speaker_label": "混用"}}])
-    with pytest.raises(ValueError, match="引用"):
-        body(ops, unit["id"], [{"type": "dialogue", "payload": {"speaker_id": "missing", "text": "非法"}}])
-    with pytest.raises(ValueError):
-        ops.apply_scene_table_changes(segment_id, [{"op": "update", "unit_id": unit["id"], "changes": {"enabled": "false"}}],
-            ops.read_script_segment(segment_id)["outline_revision"], reason="拒绝字符串bool")
+    invalid_payload = body(ops, unit['id'], [{'type': 'action', 'payload': {'text': '非法', 'speaker_label': '混用'}}])
+    assert invalid_payload['status'] == 'staged'
+    assert invalid_payload['problems'][0]['path'] == ['blocks', 0, 'payload', 'speaker_label']
+    invalid_reference = body(ops, unit['id'], [{'type': 'dialogue', 'payload': {'speaker_id': 'missing', 'text': '非法'}}])
+    assert invalid_reference['status'] == 'staged'
+    assert invalid_reference['problems'][0]['path'] == ['blocks', 0, 'payload', 'speaker_id']
+    invalid_bool = ops.apply_scene_table_changes(segment_id, [{'op': 'update', 'unit_id': unit['id'], 'changes': {'enabled': 'false'}}],
+        ops.read_script_segment(segment_id)['outline_revision'], reason='拒绝字符串bool')
+    assert invalid_bool['status'] == 'staged'
     assert read_context(ops)[0] == before
+    fixed = ops.patch_content_submission(invalid_payload['submission_id'], invalid_payload['submission_revision'],
+        [{'op': 'remove', 'path': ['blocks', 0, 'payload', 'speaker_label']}], '仅修不属于动作类型的字段')
+    assert fixed['status'] == 'accepted' and fixed['blocks'][0]['payload']['text'] == '非法'
 
 
 def test_local_block_targets_and_explicit_deletion_keep_other_body(project):
@@ -157,8 +162,10 @@ def test_local_block_targets_and_explicit_deletion_keep_other_body(project):
     with pytest.raises(ValueError, match="正文"):
         ops.apply_scene_table_changes(segment_id, [{"op": "delete", "unit_id": unit["id"], "body_policy": "require_empty"}], segment["outline_revision"], reason="不可隐式丢正文")
     assert read_context(ops)[0] == before
-    with pytest.raises(ValueError, match="稳定ID"):
-        table(ops, segment_id, [{"plan": {"summary": "偷偷重建同名场"}}])
+    previous = read_context(ops)[0]
+    invalid = table(ops, segment_id, [{"plan": {"summary": "偷偷重建同名场"}}])
+    assert invalid['status'] == 'staged' and '稳定ID' in invalid['problems'][0]['message']
+    assert read_context(ops)[0] == previous
 
 
 def test_batch_freezes_targets_and_failure_retains_success(project):
@@ -313,12 +320,17 @@ def test_same_source_ids_are_scoped_and_local_only_entities_cannot_cross_scripts
     with pytest.raises(ValueError, match="指定剧本"):
         ops.prepare_script_writing_task({"kind": "unit", "ids": [first_unit["id"]], "screenplay_id": second["id"]})
     before = read_context(ops)[0]
-    with pytest.raises(ValueError, match="引用"):
-        edit_plan(ops, segment["id"], unit, {"cast_ids": [exclusive["id"]]})
-    with pytest.raises(ValueError, match="引用"):
-        body(ops, unit["id"], [{"type": "dialogue", "payload": {"speaker_id": exclusive["id"], "text": "不可跨剧本"}}])
+    invalid_cast = edit_plan(ops, segment['id'], unit, {'cast_ids': [exclusive['id']]})
+    assert invalid_cast['status'] == 'staged'
+    assert invalid_cast['problems'][0]['path'] == ['changes', 0, 'changes', 'plan', 'cast_ids', 0]
+    invalid_speaker = body(ops, unit['id'], [{'type': 'dialogue', 'payload': {'speaker_id': exclusive['id'], 'text': '不可跨剧本'}}])
+    assert invalid_speaker['status'] == 'staged'
+    assert invalid_speaker['problems'][0]['path'] == ['blocks', 0, 'payload', 'speaker_id']
     with pytest.raises(ValueError, match="引用"):
         ops.read_script_unit_context(unit["id"], dependency_refs=[{"kind": "adaptation_entity", "id": exclusive["id"]}])
     assert read_context(ops)[0] == before
+    repaired = ops.patch_content_submission(invalid_cast['submission_id'], invalid_cast['submission_revision'],
+        [{'op': 'set', 'path': ['changes', 0, 'changes', 'plan', 'cast_ids'], 'value': []}], '修复本场无效人物引用')
+    assert repaired['status'] == 'accepted'
     own = edit_plan(ops, segment_id, first_unit, {"cast_ids": [exclusive["id"]]})["units"][0]
     assert body(ops, own["id"], [{"type": "dialogue", "payload": {"speaker_id": exclusive["id"], "text": "本剧本合法"}}])["basis_state"] == "current"

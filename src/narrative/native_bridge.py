@@ -26,13 +26,12 @@ from .graph_operations import GraphOperations
 from .harness import HarnessRunner, harness_env
 from .native_models import CanvasState, node_detail, search_result
 from .node_material import holds_at
-from .order_ids import order_key
 from .prompt_defaults import DEFAULT_PROMPTS
 from .prompt_settings import effective_prompt
 from .provider_store import GLOBAL_SCOPE, ProviderStore
 
 _NODE_TYPES = {"person", "group", "item", "location", "event", "action", "scene", "big_event", "storyline", "other"}
-SCREENPLAY_WRITING_PROMPT_VERSION = "screenplay-writing-ui/8"
+SCREENPLAY_WRITING_PROMPT_VERSION = "screenplay-writing-ui/9"
 
 SCREENPLAY_SCENE_TABLE_RULES = DEFAULT_PROMPTS["scene_table"]["text"]
 
@@ -43,6 +42,7 @@ class NativeBridge(QObject):
 
     # The string form is what QML needs: a bare ``dict`` registers a Python type
     # that QML cannot see, so every Connections handler silently fails.
+    blockTextDoubleClicked = Signal(str)
     resultReady = Signal(str, "QVariantMap")  # type: ignore[arg-type]
     errorOccurred = Signal(str, str)
     busyChanged = Signal(bool)
@@ -57,11 +57,16 @@ class NativeBridge(QObject):
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
         self.resultReady.connect(self._invalidate_conversation_graph)
+        from .native_text_events import ReadOnlyBlockTextEvents
+        self._block_text_events = ReadOnlyBlockTextEvents(self)
+        self._block_text_events.doubleClicked.connect(self.blockTextDoubleClicked.emit)
+        from .native_content import FormSubmissions
+        self._content_forms = FormSubmissions()
         self._project_path: Path | None = None
         self._canvas = CanvasState()
         self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="narrative-native")
         self._requests: dict[
-            int, tuple[str, int, Callable[[dict], dict] | None, int | None, float]
+            int, tuple[str, int, Callable[[dict], dict] | None, int | None, float, str]
         ] = {}
         self._next_request = 0
         self._static_scan_generation = 0
@@ -86,13 +91,14 @@ class NativeBridge(QObject):
         self._assistant_steps: list[dict] = []
         self._assistant_task_lock = threading.Lock()
         self._assistant_jobs: dict[int, dict] = {}
+        self._assistant_activity_sequence = 0
         self._assistant_chat = ""
         self._assistant_resumed: set[str] = set()
         self._assistant_lock = threading.Lock()
         self._workerDone.connect(self._on_worker_done)
 
     def close(self) -> None:
-        """Stop queued UI reads; an already started graph agent remains independently observable."""
+        """Cancel owned tasks and close this project runtime; ignore late UI callbacks."""
         self._closed = True
         self._close_assistant()
         self._pool.shutdown(wait=False, cancel_futures=True)
@@ -105,6 +111,7 @@ class NativeBridge(QObject):
         *,
         epoch: int | None = None,
         query_epoch: int | None = None,
+        content_form: str = "",
     ) -> None:
         if self._closed:
             return
@@ -113,7 +120,7 @@ class NativeBridge(QObject):
         request_id = self._next_request
         started = time.perf_counter()
         self._requests[request_id] = (
-            kind, self._epoch if epoch is None else epoch, apply, query_epoch, started,
+            kind, self._epoch if epoch is None else epoch, apply, query_epoch, started, content_form,
         )
         if len(self._requests) == 1:
             self.busyChanged.emit(True)
@@ -156,22 +163,40 @@ class NativeBridge(QObject):
             self.busyChanged.emit(False)
         if request is None or self._closed:
             return
-        kind, epoch, apply, query_epoch, started = request
+        kind, epoch, apply, query_epoch, started, content_form = request
         if epoch != self._epoch or (query_epoch is not None and query_epoch != self._query_epoch):
             return  # A different project was selected while the read was pending.
         if kind == "graph_view" and not self._unified_active:
             return
         if error is not None:
+            conflict = self._content_forms.take_conflict(content_form)
+            if conflict:
+                self.resultReady.emit("content_submission_conflict", {**conflict, "form_id": content_form,
+                    "project_path": str(self._project_path or "")})
             self.errorOccurred.emit(kind, str(error))
             return
         try:
             result = payload if isinstance(payload, dict) else {}
+            conflict = self._content_forms.take_conflict(content_form)
+            if conflict:
+                self.resultReady.emit("content_submission_conflict", {**conflict, "form_id": content_form,
+                    "project_path": str(self._project_path or "")})
+            if kind in {"chat", "chats"}:
+                result = result | self._assistant_activity_snapshot()
             if kind == "recent_projects" and result.get("generation") != self._recent_generation:
                 return
             if kind == "detail" and result.get("node", {}).get("id") != self._detail_node:
                 return
+            from .native_content import receipt
+            submission = receipt(result)
+            if submission and submission.get("status") == "staged" and kind not in {"content_submission_read", "content_submissions"}:
+                self.resultReady.emit("content_submission", {**submission, "form_id": content_form,
+                    "original_kind": kind, "project_path": str(self._project_path or "")})
+                return
             if apply is not None:
                 result = apply(result)
+            if submission and kind not in {"content_submission_read", "content_submissions"}:
+                result = {**result, "content_form_id": content_form}
             # 界面自己处理这条结果花了多久：卡在布局/重建列表时，这个数会很大。
             handler_started = time.perf_counter()
             self.resultReady.emit(kind, result)
@@ -235,13 +260,48 @@ class NativeBridge(QObject):
             self.errorOccurred.emit(kind, str(exc))
             return
 
+        content_form = "" if kind in {"assistant", "screenplay_writing", "source_task", "event_actions_task"} else self._content_forms.current()
         def work() -> dict:
             ops = project_catalog.open_graph_project(path)
-            return operation(ops)
+            return operation(self._content_forms.proxy(ops, content_form))
 
-        self._submit(kind, work, apply,
+        self._submit(kind, work, apply, content_form=content_form,
                      query_epoch=self._query_epoch if kind in {"graph_view", "canvas", "detail", "search", "expand", "timeline", "hierarchy", "reading_hierarchy", "event_compare", "property_context", "property_state", "property_world", "property_history",
                                    "node_properties"} else None)
+
+    @Slot(result=str)
+    def newContentFormSession(self) -> str:
+        return self._content_forms.token()
+
+    @Slot(str, bool, int)
+    def activateContentForm(self, form_id: str, active: bool, priority: int) -> None:
+        self._content_forms.activate(form_id, active, priority)
+
+    @Slot(str, str, str)
+    def listContentSubmissions(self, operation: str, target_json: str, form_id: str) -> None:
+        target = json.loads(target_json or "{}")
+        def work(ops):
+            result = ops.list_content_submissions(operation=operation or None, target=target or None)
+            if operation == "apply_storyboard_changes":
+                for row in result["submissions"]:
+                    detail = ops.read_content_submission(row["submission_id"], paths=[["changes", 0]])
+                    action = (detail.get("values") or [{}])[0].get("value") or {}
+                    row["action_kind"] = action.get("op")
+                    row["action_fields"] = list(action)
+            return result | {"form_id": form_id,
+                "project_path": str(project_package.layout(ops.project_info().path).entry)}
+        self._project_task("content_submissions", work)
+
+    @Slot(str, str)
+    def readContentSubmission(self, submission_id: str, form_id: str) -> None:
+        def work(ops):
+            result = ops.read_content_submission(submission_id, paths=[[]])
+            return result | {"form_id": form_id, "project_path": str(project_package.layout(ops.project_info().path).entry)}
+        def apply(result):
+            arguments = next((value["value"] for value in result.get("values", []) if not value["path"]), {})
+            self._content_forms.restore(form_id, result, arguments)
+            return result
+        self._project_task("content_submission_read", work, apply)
 
     @staticmethod
     def _exact_integers(settings: dict) -> dict:
@@ -749,189 +809,32 @@ class NativeBridge(QObject):
             from_id, to_id, "用户重命名属性", ops.graph_project_info()["revision"],
         ) | {"to_id": to_id})
 
-    def _manual_record(self, payload: dict) -> dict:
-        """One hand-written disclosure from a QVariantMap.
-
-        The quote is optional but checked the same way as a model's: it has to be
-        an exact, unique substring of the source, or the precheck refuses it.
-        """
-        node_id = str(payload.get("node_id") or "").strip()
-        property_id = str(payload.get("property_id") or "").strip()
-        event_id = str(payload.get("event_id") or "").strip()
-        if not node_id or not property_id or not event_id:
-            raise ValueError("节点、属性名和披露事件都要填")
-        value = payload.get("value")
-        if value is None or (isinstance(value, str) and not value.strip()):
-            raise ValueError("值不能为空")
-        record: dict = {
-            "kind": "property_value",
-            "node_id": node_id,
-            "property_id": property_id,
-            "value": value,
-            "event_id": event_id,
-            # A human picked the anchor, so it is stated rather than inferred.
-            "anchor_basis": "model",
-        }
-        source = str(payload.get("source") or "").strip()
-        if source:
-            record["source"] = source
-        category = str(payload.get("category") or "").strip()
-        if category:
-            record["category"] = category
-        quote = str(payload.get("quote") or "").strip()
-        source_id = str(payload.get("source_id") or "").strip()
-        if quote and source_id:
-            record["evidence"] = {"source_id": source_id, "quote": quote}
-        return record
-
-    def _save_property_edit(self, kind: str, build) -> None:
-        """Precheck and save an explicit user property edit."""
-
-        def work(ops) -> dict:
-            revision = ops.graph_project_info()["revision"]
-            try:
-                records, note = build(ops)
-            except ValueError as exc:
-                return {
-                    "status": "precheck_failed",
-                    "diagnostics": [{
-                        "code": "MANUAL", "severity": "error",
-                        "object_id": None, "message": str(exc),
-                    }],
-                }
-            committed = ops.apply_changes([], records, revision, note)
-            if committed["status"] not in {"accepted", "unchanged"}:
-                return committed
-            anchor = next(
-                (item.get("event_id") for item in records
-                 if item.get("kind") == "property_value"),
-                "",
-            )
-            names = {
-                node["id"]: node.get("name") or node["id"]
-                for node in ops.graph_snapshot().get("nodes", [])
-            }
-            return committed | {"anchor": anchor, "anchor_name": names.get(anchor or "", "")}
-
-        def apply(result: dict) -> dict:
-            # The edit landed where its disclosure sits. If that is beyond the
-            # reading position the pane is parked at, say so instead of letting it
-            # look as if nothing happened.
-            raw_anchor = str(result.get("anchor") or "")
-            raw_cut = self._state_cut or ""
-            anchor = order_key(raw_anchor) if raw_anchor else None
-            cut = order_key(raw_cut) if raw_cut else None
-            result["outside_window"] = bool(
-                anchor is not None and cut is not None and anchor > cut
-            )
-            return result
-
-        self._project_task(kind, work, apply)
-
-    def _place_evidence(self, ops, record: dict, payload: dict) -> str | None:
-        """Where the reader meets this sentence: derived from the quote, not typed."""
-        quote = str(payload.get("quote") or "").strip()
-        source_id = str(payload.get("source_id") or "").strip()
-        if not quote or not source_id:
-            return None
-        found = ops.locate(source_id, [quote], limit_per_quote=2)[0]["matches"]
-        if len(found) == 1:
-            record["disclosure"] = {"source_id": source_id, "start": found[0]["start"]}
-            return None
-        if len(found) > 1:
-            return "这段引文在原文中出现多次，请写长一点以唯一定位"
-        return "这段引文不在原文里，逐字复制后再提交"
-
     @Slot("QVariantMap")
     def addPropertyRecord(self, payload: dict) -> None:
-        """Save one hand-written disclosure after deterministic prechecks."""
-        try:
-            record = self._manual_record(payload)
-        except ValueError as exc:
-            self.errorOccurred.emit("property_add", str(exc))
-            return
-
-        def build(ops) -> tuple[list[dict], str]:
-            problem = self._place_evidence(ops, record, payload)
-            if problem:
-                raise ValueError(problem)
-            records: list[dict] = []
-            # A hand-written property may be the first use of its name; without a
-            # definition the value cannot be checked at all.
-            defined = any(
-                item.get("kind") == "property_definition"
-                and item.get("id") == record["property_id"]
-                for item in ops.property_records()
-            )
-            if not defined:
-                records.append({
-                    "kind": "property_definition", "id": record["property_id"],
-                    "value_type": "any", "cardinality": "one",
-                })
-            records.append(record)
-            # 更早的单值由提交统一结束有效期，这里不再重复算一遍。
-            return records, "人工补录"
-
-        self._save_property_edit("property_add", build)
+        fields = {key: payload[key] for key in ("value", "value_type", "cardinality", "symmetric", "scope", "holder_id",
+                  "context_id", "quote", "source_id", "category", "source", "related_nodes") if key in payload and (key not in {"quote", "source_id"} or payload[key])}
+        self._project_task("property_add", lambda ops: ops.record_property_change(
+            payload.get("node_id"), payload.get("property_id"), payload.get("event_id"), payload.get("op"),
+            expected_revision=int(payload["expected_revision"]), reason=payload.get("reason") or "人工记录属性变更", **fields))
 
     @Slot(str, "QVariantMap")
     def correctPropertyRecord(self, record_id: str, payload: dict) -> None:
-        """Correct an input error in place; this is not a new story state."""
-        def work(ops) -> dict:
-            options = {key: payload[key] for key in (
-                "event_id", "source_id", "quote", "category", "scope", "holder_id"
-            ) if payload.get(key) not in (None, "")}
-            return {"status": "accepted", **ops.correct_property(
-                record_id, payload.get("value"), str(payload.get("reason") or "用户更正录入错误"),
-                **options,
-            )}
-        self._project_task("property_correct", work)
+        changes = {key: payload[key] for key in ("op", "value", "event_id", "category", "scope", "holder_id", "context_id",
+                   "source", "related_nodes", "source_id", "quote") if key in payload and (key not in {"quote", "source_id"} or payload[key])}
+        self._project_task("property_correct", lambda ops: {"status": "accepted", **ops.correct_property(
+            record_id, changes, payload.get("reason") or "更正属性变更录入错误", expected_revision=int(payload["expected_revision"]))})
 
-    @Slot(str, str)
-    def expirePropertyRecords(self, targets_json: str, reason: str) -> None:
-        """End validity at the current reading boundary without a retraction row."""
+    @Slot(str, int)
+    def deletePropertyRecords(self, targets_json: str, expected_revision: int) -> None:
         try:
             targets = json.loads(targets_json)
             if not isinstance(targets, list) or not all(isinstance(item, str) for item in targets):
-                raise ValueError("请提供记录 ID 数组")
-        except (ValueError, json.JSONDecodeError) as exc:
-            self.errorOccurred.emit("property_expire", str(exc))
-            return
-        reading_cut, state_cut = dict(self._reading_cut), self._state_cut
-        def work(ops) -> dict:
-            boundary = self._reading_boundary(ops, reading_cut, state_cut)
-            return ops.expire_properties(targets, boundary["source_id"], boundary["start"],
-                                         event_id=boundary.get("event_id"), reason=reason)
-        self._project_task("property_expire", work)
-
-    @Slot(str)
-    def deletePropertyRecords(self, targets_json: str) -> None:
-        """Physically delete erroneous records, rather than changing story history."""
-        try:
-            targets = json.loads(targets_json)
-            if not isinstance(targets, list) or not all(isinstance(item, str) for item in targets):
-                raise ValueError("请提供记录 ID 数组")
-        except (ValueError, json.JSONDecodeError) as exc:
+                raise ValueError("请提供变更 ID 数组")
+        except ValueError as exc:
             self.errorOccurred.emit("property_delete", str(exc))
             return
-        self._project_task("property_delete", lambda ops: ops.delete_property_records(targets, "用户删除错误记录") | {"deleted": targets})
-
-    @staticmethod
-    def _reading_boundary(ops, reading_cut: dict, state_cut: str) -> dict:
-        if reading_cut.get("source_id") and type(reading_cut.get("start")) is int:
-            return dict(reading_cut)
-        if state_cut:
-            node = next((row for row in ops.graph_snapshot()["nodes"] if row["id"] == state_cut), {})
-            boundary = dict(node.get("disclosure") or {})
-            if boundary.get("source_id") and type(boundary.get("start")) is int:
-                return boundary | {"event_id": state_cut}
-            raise ValueError("该阅读位置没有精确原文边界，无法设置有效期")
-        sources = ops.sources()
-        if not sources:
-            raise ValueError("工程没有原文，无法设置有效期")
-        orders = ops.graph_snapshot().get("source_orders", [])
-        source_id = max(orders, key=lambda row: row["ordinal"])["source_id"] if orders else sources[-1]["id"]
-        return {"source_id": source_id, "start": len(ops.source(source_id)["text"])}
+        self._project_task("property_delete", lambda ops: ops.delete_property_records(
+            targets, "用户删除错误变更", expected_revision=expected_revision) | {"deleted": targets})
 
     @Slot(str, int)
     def previewRollback(self, source_id: str, start: int) -> None:
@@ -984,6 +887,11 @@ class NativeBridge(QObject):
         self._project_task("screenplay_workspace", work, lambda result: result if
                            generation == self._screenplay_query_generation else {"superseded": True})
 
+    @Slot(QObject)
+    def observeBlockTextDoubleClicks(self, item: QObject) -> None:
+        if item.objectName() == "scriptBlockDisplayText" and item.property("readOnly") is True:
+            self._block_text_events.observe(item)
+
     @Slot(str, "QVariantMap")
     def screenplayAction(self, operation: str, arguments: dict) -> None:
         allowed = {
@@ -992,7 +900,9 @@ class NativeBridge(QObject):
             "create_script_segment", "update_script_segment", "read_script_segment",
             "read_scene_table_context", "submit_scene_table", "apply_scene_table_changes", "adopt_scene_table",
             "read_script_unit_context", "submit_script_unit", "apply_script_block_changes",
-            "mark_writing_basis_current", "check_screenplay", "export_screenplay",
+            "mark_writing_basis_current", "check_screenplay", "export_screenplay", "compile_screenplay",
+            "load_compile_settings", "save_compile_settings",
+            "load_creative_agreement", "save_creative_agreement",
             "prepare_script_writing_targets",
             "read_screenplay_timeline", "import_screenplay_timeline_candidates", "import_screenplay_timeline",
             "append_screenplay_timeline",
@@ -1007,7 +917,7 @@ class NativeBridge(QObject):
         request_token = args.pop("_view_request_token", None)
         def normalize(value) -> Any:
             if isinstance(value, dict):
-                return {key: int(item) if key.startswith("expected_") and item is not None
+                    return {key: int(item) if (key.startswith("expected_") or key == "position") and item is not None
                         and isinstance(item, (int, float)) and item == int(item) else normalize(item)
                         for key, item in value.items()}
             if isinstance(value, list):
@@ -1020,13 +930,74 @@ class NativeBridge(QObject):
             "request_token": request_token,
             "result": getattr(ops, operation)(**args)})
 
+    @Slot(str, result=str)
+    def storyboardImageUrl(self, path: str) -> str:
+        from PySide6.QtCore import QUrl
+        return QUrl.fromLocalFile(path).toString() if path else ""
+
+    @Slot("QVariantMap", str, str, result=str)
+    def storyboardPanelPreviewUrl(self, board: dict, shot_id: str, panel_id: str) -> str:
+        """Render the already-read board snapshot without changing project state."""
+        import base64
+        import io
+
+        from .storyboard_panels import render_panel
+        try:
+            shot = next(row for row in board.get("shots", []) if row["id"] == shot_id)
+            panel = next(row for row in shot.get("panels", []) if row["id"] == panel_id)
+            output = io.BytesIO()
+            render_panel(board, shot, panel, annotated=False).save(output, format="PNG")
+            return "data:image/png;base64," + base64.b64encode(output.getvalue()).decode("ascii")
+        except (ValueError, OSError, KeyError, StopIteration):
+            return ""
+
+    @Slot(str, "QVariantMap", int)
+    def storyboardAction(self, operation: str, arguments: dict, token: int) -> None:
+        """Keep the response scoped to the scene and request that opened it."""
+        from .node_material import _as_path
+
+        def normalize(value, key=""):
+            if isinstance(value, dict):
+                return {k: normalize(v, k) for k, v in value.items()}
+            if isinstance(value, list):
+                return [normalize(item) for item in value]
+            if key in {"sketch_path", "style_path", "output_path", "audio_path", "video_path", "path"} and isinstance(value, str) and value:
+                return str(_as_path(value))
+            if key in {"revision", "expected_revision", "offset_ms", "duration_ms", "index", "time_ms", "action_start_ms", "fps", "source_in_ms", "in_ms", "out_ms", "start_ms", "end_ms"}:
+                if isinstance(value, float) and value.is_integer():
+                    return int(value)
+            return value
+
+        def work(ops):
+            try:
+                actions = {
+                    "read_storyboard", "check_storyboard", "preview_storyboard", "preview_storyboard_changes", "apply_storyboard_changes",
+                    "load_storyboard_camera_presets", "save_storyboard_camera_preset",
+                    "read_storyboard_video_settings", "save_storyboard_video_settings", "read_storyboard_video_receipts",
+                    "set_storyboard_animation", "render_storyboard_animatic", "attach_storyboard_video", "detach_storyboard_video",
+                    "prepare_storyboard_video", "submit_storyboard_video", "refresh_storyboard_video",
+                    "generate_storyboard_sketch", "export_storyboard_style_package", "render_storyboard_style",
+                    "export_storyboard_script", "export_storyboard_panel", "generate_storyboard_panel", "generate_storyboard_panels",
+                }
+                if operation not in actions:
+                    raise ValueError("未知分镜操作")
+                result = getattr(ops, operation)(**normalize(dict(arguments)))
+                return {"token": token, "operation": operation, "result": result}
+            except (ValueError, OSError, KeyError) as exc:
+                return {"token": token, "operation": operation, "error": str(exc)}
+            except Exception as exc:
+                if operation != "check_storyboard":
+                    raise
+                # A background diagnostic must never release an unrelated write.
+                return {"token": token, "operation": operation, "error": str(exc), "error_type": type(exc).__name__}
+        self._project_task("storyboard", work)
+
     @Slot(str, str, str)
     def saveScreenplayExport(self, screenplay_id: str, export_format: str, path: str) -> None:
         def work(ops):
             from .node_material import _as_path
             destination = _as_path(path)
-            ops.export_screenplay(screenplay_id, format=export_format, path=str(destination))
-            return {"path": str(destination), "format": export_format}
+            return ops.compile_screenplay(screenplay_id, format=export_format, path=str(destination))
         self._project_task("screenplay_export_saved", work)
 
     @Slot("QVariantMap")
@@ -1049,20 +1020,6 @@ class NativeBridge(QObject):
     def loadAdaptationMaterial(self, node_id: str, cut: str) -> None:
         self._project_task("adaptation_material", lambda ops: ops.adaptation_node_assets(node_id, cut=cut or None))
 
-    @Slot("QVariantList", str, int, str)
-    def expireAdaptationProperties(self, record_ids: list, event_id: str, revision: int, reason: str) -> None:
-        def work(ops):
-            if len(record_ids) != 1:
-                raise ValueError("请逐条选择改编属性记录失效")
-            snapshot = ops.adaptation_snapshot()
-            result = snapshot
-            for identifier in record_ids:
-                row = next(p for p in snapshot["properties"] if p["id"] == identifier)
-                result = ops.set_adaptation_property(row["node_id"], row["property_id"], record_id=identifier,
-                    event_id=event_id or None, expire=True, expected_revision=revision, reason=reason or "失效改编属性")
-            return result
-        self._project_task("adaptation", work)
-
     @Slot()
     def loadAdaptationImportCandidates(self) -> None:
         self._project_task("adaptation_import_candidates", lambda ops: {"moments": ops.import_adaptation_candidates()})
@@ -1078,6 +1035,7 @@ class NativeBridge(QObject):
             "sync": "sync_adaptation", "edit": "edit_adaptation_node",
             "copy": "copy_adaptation_node", "move": "move_adaptation_node",
             "suppress": "suppress_adaptation_node", "property": "set_adaptation_property",
+            "delete_property_changes": "delete_adaptation_property_changes",
         }
         if action not in methods:
             self.errorOccurred.emit("adaptation", "未知改编操作")
@@ -1150,7 +1108,13 @@ class NativeBridge(QObject):
 
         def work(ops) -> dict:
             changed = change(ops)
+            if isinstance(changed, dict) and changed.get("status") == "staged":
+                return changed
             payload = self._material_payload(ops, node_id)
+            if isinstance(changed, dict) and changed.get("submission_id"):
+                for key in ("status", "submission_id", "submission_revision", "operation", "target", "base_revisions", "validation_status", "problems"):
+                    if key in changed:
+                        payload[key] = changed[key]
             # 刚改的那张如果不在当前阅读位置上，界面要说一声——否则像是没保存。
             if isinstance(changed, dict) and changed.get("id"):
                 payload["changed_id"] = changed["id"]
@@ -1311,8 +1275,29 @@ class NativeBridge(QObject):
                 self._assistant_resumed = set()
                 self._assistant_steps = []
 
+    def _assistant_activity_snapshot(self):
+        with self._assistant_lock:
+            self._assistant_activity_sequence += 1
+            return {'active_tasks': {job['chat_id']: job['task_id'] for job in self._assistant_jobs.values()
+                                     if job.get('chat_id') and not job.get('finished')},
+                    'activity_sequence': self._assistant_activity_sequence,
+                    'project_path': str(self._project_path or '')}
+
+    @Slot()
+    def loadAssistantActivity(self):
+        if not self._closed:
+            self.resultReady.emit('assistant_activity', self._assistant_activity_snapshot())
+
     def _conversation_event(self, ops, expected_path, event: dict, *, busy=True):
         if self._closed or self._project_path != expected_path:
+            return
+        if event.get("event") == "usage_update":
+            statistics = event.get("usage_statistics")
+            if isinstance(statistics, dict):
+                self.resultReady.emit("assistant_usage", {
+                    **statistics,
+                    "project_path": str(project_package.layout(expected_path).entry),
+                })
             return
         store = self._chats(ops)
         chat_id = event.get("chat_id")
@@ -1322,7 +1307,7 @@ class NativeBridge(QObject):
         if not chat_id:
             return
         self.resultReady.emit("conversation_progress", {
-            **event, "chat_id": chat_id, "chat": store.load(chat_id), "items": store.list(),
+            **event, **self._assistant_activity_snapshot(), "chat_id": chat_id, "chat": store.load(chat_id), "items": store.list(),
             "current": self._assistant_chat, "project_path": str(project_package.layout(expected_path).entry),
             "busy": busy,
         })
@@ -1331,6 +1316,42 @@ class NativeBridge(QObject):
         from .chat_store import ChatStore
 
         return ChatStore(Path(ops.project_info().path))
+
+    @Slot(str, str)
+    def loadUsageStatistics(self, chat_id: str, task_id: str = "") -> None:
+        if self._closed or self._project_path is None or not chat_id:
+            return
+        def work(ops) -> dict:
+            return {
+                **ops.read_usage_statistics(chat_id=chat_id or None, task_id=task_id or None),
+                "project_path": str(project_package.layout(ops.project_info().path).entry),
+            }
+
+        self._project_task("assistant_usage", work)
+
+    @Slot(str)
+    def loadChatAccess(self, chat_id: str) -> None:
+        if self._closed or self._project_path is None:
+            return
+        def work(ops):
+            identity = {"operation": "read", "chat_id": chat_id or None, "project_path": str(project_package.layout(ops.project_info().path).entry)}
+            try:
+                return ops.read_assistant_access(chat_id or None) | identity
+            except (ValueError, OSError) as exc:
+                return identity | {"error": str(exc)}
+        self._project_task("chat_access", work)
+
+    @Slot(str, str)
+    def setChatAccessMode(self, chat_id: str, access_mode: str) -> None:
+        if self._closed or self._project_path is None:
+            return
+        def work(ops):
+            identity = {"operation": "set", "chat_id": chat_id, "project_path": str(project_package.layout(ops.project_info().path).entry)}
+            try:
+                return ops.set_assistant_access(chat_id, access_mode) | identity
+            except (ValueError, OSError) as exc:
+                return identity | {"error": str(exc)}
+        self._project_task("chat_access", work)
 
     @Slot()
     def loadChats(self) -> None:
@@ -1385,17 +1406,100 @@ class NativeBridge(QObject):
 
         self._project_task("chat", work)
 
+    def _capture_assistant_access(self, requested_chat):
+        ops = project_catalog.open_graph_project(self._project())
+        chat = self._chats(ops).select(requested_chat, activate=False)
+        if chat is None:
+            raise ValueError("无法选择工程会话")
+        return chat["id"], ops.read_assistant_access(chat["id"])["access_mode"]
+
     @Slot(str, str)
     def assistantTurn(self, text: str, image_path: str = "") -> None:
         self._assistant_turn(text, image_path, self._assistant_chat)
 
+    @staticmethod
+    def _attachment_paths(attachments_json):
+        paths = json.loads(attachments_json or '[]')
+        if not isinstance(paths, list) or any(not isinstance(path, str) for path in paths):
+            raise ValueError('附件须为本机文件路径数组')
+        return list(dict.fromkeys(paths))
+
+    @Slot(str, str)
+    def assistantTurnWithAttachments(self, text: str, attachments_json: str = '[]') -> None:
+        try:
+            paths = self._attachment_paths(attachments_json)
+        except (ValueError, TypeError) as error:
+            self.errorOccurred.emit('assistant', str(error))
+            return
+        self._assistant_turn(text, '', self._assistant_chat, attachment_paths=paths)
+
+    @Slot(str, str, str, str)
+    def assistantSteer(self, text: str, attachments_json: str, chat_id: str, task_id: str) -> None:
+        try:
+            path = self._project()
+            paths = self._attachment_paths(attachments_json)
+            message = (text or '').strip()
+            if not message and not paths:
+                raise ValueError('请提供插话文字或附件')
+            with self._assistant_lock:
+                job = next((item for item in self._assistant_jobs.values()
+                            if item.get('chat_id') == chat_id and item.get('task_id') == task_id and not item['cancel'].is_set() and not item.get('finished')), None)
+                if job is None or job.get('runtime') is None or not job.get('binding_nonce'):
+                    raise ValueError('目标任务已结束或尚未就绪，插话未发送；不会另开任务')
+                runtime, nonce = job['runtime'], job['binding_nonce']
+        except (ValueError, TypeError) as error:
+            self.resultReady.emit('assistant_steer', {'chat_id': chat_id, 'task_id': task_id, 'status': 'not_delivered',
+                                                    'reason': str(error), 'project_path': str(self._project_path or '')})
+            return
+        message = message or '补充本条附件。'
+        message_id = f'steer-{datetime.now(UTC):%Y%m%dT%H%M%S%fZ}'
+        def work(ops):
+            from .assistant import build_attachment_blocks
+            from .conversation_steering import pack_instruction
+            store = self._chats(ops)
+            attachments = ops.import_chat_attachments(chat_id, paths, task_id=task_id)['attachments'] if paths else []
+            store.append(chat_id, 'user', message, message_id=message_id, task_id=task_id,
+                         kind='user_steering', steering_status='sending', attachments=attachments)
+            audit_directory = project_package.layout(path).extraction / 'assistant' / 'tasks' / task_id / 'steering'
+            audit_directory.mkdir(parents=True, exist_ok=True)
+            state_lock = threading.RLock()
+            def receipt(event):
+                status = event.get('status', 'not_delivered')
+                with state_lock:
+                    row = store.annotate_steering(chat_id, message_id, status, steering_reason=event.get('reason', ''))
+                    record = {'message_id': message_id, 'chat_id': chat_id, 'task_id': task_id, 'text': message,
+                              'attachments': attachments, 'status': row['steering_status'], 'reason': row.get('steering_reason', '')}
+                    temporary = audit_directory / (message_id+'.tmp')
+                    temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding='utf-8')
+                    temporary.replace(audit_directory / (message_id+'.json'))
+                self._conversation_event(ops, path, {'event': 'steering_status', **record})
+                if not self._closed and self._project_path == path:
+                    self.resultReady.emit('assistant_steer', {**record, 'project_path': str(path)})
+            try:
+                if self._closed or self._project_path != path or job['cancel'].is_set():
+                    raise ValueError('目标任务已结束或工程已切换，附件已入档但插话未送达')
+                blocks = pack_instruction(build_attachment_blocks(message, attachments))
+                result = runtime.steer(chat_id, task_id, nonce, blocks, message_id=message_id, on_status=receipt)
+                receipt(result | {'status': result.get('status', 'queued')})
+                return {**result, 'chat_id': chat_id, 'task_id': task_id, 'message_id': message_id,
+                        'attachments': attachments, 'project_path': str(path)}
+            except Exception as error:
+                receipt({'status': 'not_delivered', 'reason': str(error)})
+                return {'chat_id': chat_id, 'task_id': task_id, 'message_id': message_id, 'status': 'not_delivered',
+                        'reason': str(error), 'attachments': attachments, 'project_path': str(path)}
+        self._project_task('assistant_steer', work)
+
     @Slot(str, "QVariantMap")
     def screenplayWritingTurn(self, text: str, target: dict) -> None:
-        requested_chat = self._assistant_chat
+        try:
+            requested_chat, access_mode = self._capture_assistant_access(self._assistant_chat)
+        except (ValueError, OSError) as exc:
+            self.errorOccurred.emit("screenplay_writing", str(exc))
+            return
         frozen_target = json.loads(json.dumps(dict(target), ensure_ascii=False))
 
         def apply(task):
-            self._assistant_turn(text, "", requested_chat, writing_task=task)
+            self._assistant_turn(text, "", requested_chat, writing_task=task, access_mode_override=access_mode)
             with self._assistant_lock:
                 task_id = self._assistant_jobs.get(self._next_request, {}).get("task_id", "")
             return {"target": task.get("target", frozen_target), "started": True, "task_id": task_id}
@@ -1404,7 +1508,7 @@ class NativeBridge(QObject):
             frozen_target, prompt=text), apply)
 
     def _assistant_turn(self, text: str, image_path: str, requested_chat: str | None,
-                        *, writing_task: dict | None = None) -> None:
+                        *, writing_task: dict | None = None, access_mode_override: str | None = None, attachment_paths: list[str] | None = None) -> None:
         """Run an assistant turn with the tools in assistant.ASSISTANT_TOOLS.
 
         Native tools create source slices, plan exact pattern ranges, and
@@ -1419,7 +1523,10 @@ class NativeBridge(QObject):
             use_chat,
         )
 
-        message = (text or "").strip()
+        paths = list(attachment_paths or [])
+        if str(image_path or "").strip():
+            paths.append(str(image_path).strip())
+        message = (text or "").strip() or ("请查看本条附件。" if paths else "")
         if not message:
             self.errorOccurred.emit("assistant", "先说一句想问什么")
             return
@@ -1429,6 +1536,14 @@ class NativeBridge(QObject):
             self.errorOccurred.emit("assistant", str(exc))
             return
         image = str(image_path or "").strip()
+        try:
+            if access_mode_override is None:
+                requested_chat, access_mode_override = self._capture_assistant_access(requested_chat)
+            if access_mode_override not in {"standard", "full"}:
+                raise ValueError("访问模式须为standard或full")
+        except (ValueError, OSError) as exc:
+            self.errorOccurred.emit("assistant", str(exc))
+            return
 
         job = {"chat_id": requested_chat, "task_id": f"{datetime.now(UTC):%Y%m%dT%H%M%S%fZ}-{uuid4().hex[:8]}", "runtime": None,
                "cancel": threading.Event(), "stop_reason": "user_stopped"}
@@ -1442,7 +1557,7 @@ class NativeBridge(QObject):
         def work(ops) -> dict:
             def observer(event):
                 if not job["cancel"].is_set():
-                    self._conversation_event(ops, path, event)
+                    self._conversation_event(ops, path, event | {"access_mode": job.get("access_mode", "standard")})
             with self._assistant_task_lock, use_chat(ops, requested_chat, on_event=observer) as selected:
                 if self._closed or self._project_path != path:
                     raise ValueError("工程已切换，协作者任务已停止")
@@ -1450,13 +1565,16 @@ class NativeBridge(QObject):
                 starting_revision = ops.graph_project_info()["revision"]
                 store = self._chats(ops)
                 chat_id = selected["id"]
+                access_mode = access_mode_override
+                job["access_mode"] = access_mode
                 if not self._assistant_chat or self._assistant_chat == requested_chat:
                     self._assistant_chat = chat_id
-                store.append(chat_id, "user", message, image=image)
+                attachments = ops.import_chat_attachments(chat_id, paths, task_id=job["task_id"])["attachments"] if paths else []
+                store.append(chat_id, "user", message, attachments=attachments, task_id=job["task_id"])
                 task_id = job["task_id"]
                 with self._assistant_lock:
                     job["chat_id"] = chat_id
-                publish_event(ops, {"event": "assistant_started", "chat_id": chat_id, "task_id": task_id})
+                publish_event(ops, {"event": "assistant_started", "chat_id": chat_id, "task_id": task_id, "access_mode": access_mode})
                 extraction_granularity = ops.load_project_settings()["extraction_granularity"]
                 settings, api_key, workdir = harness_env(ops)
                 runtime = self._attach_conversation_runtime(ops, settings, api_key, path)
@@ -1469,7 +1587,7 @@ class NativeBridge(QObject):
                 audit_dir = workdir / "assistant" / "tasks" / task_id
                 audit_dir.mkdir(parents=True)
                 audit = {"version": ASSISTANT_VERSION, "task_id": task_id,
-                         "chat_id": chat_id, "status": "running", "calls": [],
+                         "chat_id": chat_id, "status": "running", "calls": [], "access_mode": access_mode, "attachments": attachments,
                          "extraction_granularity": extraction_granularity,
                          "config": settings.model_dump(exclude={"key_env"}),
                          "response_idle_timeout_seconds": settings.timeout_seconds,
@@ -1484,10 +1602,13 @@ class NativeBridge(QObject):
                 native_steps: list[dict] = []
                 self._assistant_steps = native_steps
                 calls = 0
+                outcome: dict | None = None
                 model_message_ids: list[str] = []
                 message_lock = threading.RLock()
 
                 def model_message(event):
+                    from .assistant_audit import sanitize_host_audit
+                    event = sanitize_host_audit(event)
                     message_id = str(event.get("message_id") or "")
                     if not message_id:
                         return
@@ -1498,6 +1619,7 @@ class NativeBridge(QObject):
                             chat_id, "assistant", event.get("text") or "",
                             kind="model_output", sdk_turn=True, task_id=task_id,
                             message_id=message_id, full_output=event.get("full_output"),
+                            display_kind=event.get("display_kind", "answer"),
                             content=event.get("content"), seq=event.get("seq"),
                         )
                         model_message_ids.append(message_id)
@@ -1520,6 +1642,8 @@ class NativeBridge(QObject):
                     return value
 
                 def save(name, value):
+                    from .assistant_audit import sanitize_host_audit
+                    value = sanitize_host_audit(value)
                     (audit_dir / name).write_text(
                         redact(json.dumps(value, ensure_ascii=False, indent=2)), encoding="utf-8",
                     )
@@ -1530,28 +1654,47 @@ class NativeBridge(QObject):
                 def native_call(name, args):
                     with native_call_lock:
                         check_cancelled()
-                        if writing_task is not None:
-                            from .screenplay_writing import validate_script_writing_tool_call
-                            from .tool_fingerprint_refs import decode_tool_parameters
-                            try:
-                                validate_script_writing_tool_call(writing_task, name, decode_tool_parameters(ops, args), ops=ops)
-                            except ValueError as exc:
-                                native_steps.append({"tool": name, "args": args, "ok": False,
-                                                     "error": str(exc), "diagnostic": "writing_target_scope"})
-                                raise
-                        if writing_task is not None:
-                            from .tool_execution_context import (
-                                bind_tool_execution_metadata,
-                            )
-                            with bind_tool_execution_metadata(audit["writing_task_metadata"]):
-                                step = _call(entry, name, args)
-                        else:
-                            step = _call(entry, name, args)
+                        effective_name, effective_args = name, args
+                        from .tool_fingerprint_refs import decode_tool_parameters
+                        try:
+                            if name == "patch_content_submission":
+                                decoded = decode_tool_parameters(ops, args)
+                                if not isinstance(decoded.get("submission_id"), str) or not isinstance(decoded.get("patches"), list):
+                                    raise ValueError("请提供暂存编号和字段修补数组")
+                                candidate = ops.preview_content_patch(decoded.get("submission_id"), decoded.get("expected_revision"), decoded.get("patches"))
+                                effective_name, effective_args = candidate["operation"], candidate["arguments"]
+                            if writing_task is not None and access_mode == "standard":
+                                from .screenplay_writing import validate_script_writing_tool_call
+                                validate_script_writing_tool_call(writing_task, effective_name, decode_tool_parameters(ops, effective_args), ops=ops)
+                        except ValueError as exc:
+                            native_steps.append({"tool": name, "args": args, "ok": False,
+                                                 "error": str(exc), "diagnostic": "writing_target_scope"})
+                            raise
+                        from .tool_execution_context import bind_tool_execution_metadata
+                        task_metadata = (audit.get("writing_task_metadata") if access_mode == "standard" else None) or {
+                            "task_id": task_id, "manifest_ref": str(audit_dir / "task.json")}
+                        with bind_tool_execution_metadata(task_metadata):
+                            step = _call(entry, name, args, access_mode=access_mode)
+                        from .assistant_audit import sanitize_host_audit
+                        step = sanitize_host_audit(step)
                         native_steps.append(step)
+                        self.resultReady.emit("conversation_progress", {
+                            "event": "tool_complete", "chat_id": chat_id, "task_id": task_id, "access_mode": access_mode,
+                            "project_path": str(entry), "current": self._assistant_chat, "busy": True,
+                            "step_index": len(native_steps) - 1, "step": _public([step])[0],
+                        })
                         if not step["ok"]:
                             raise ValueError(step["error"])
-                        if writing_task is not None and name in {"submit_script_unit", "apply_script_block_changes"}:
-                            unit_id = str(args.get("unit_id") or "")
+                        committed = isinstance(step["result"], dict) and step["result"].get("status") in {"accepted", "unchanged"}
+                        if committed and effective_name in {"apply_storyboard_changes", "generate_storyboard_sketch", "generate_storyboard_panel", "generate_storyboard_panels", "render_storyboard_style",
+                                    "set_storyboard_animation", "attach_storyboard_video", "detach_storyboard_video",
+                                    "prepare_storyboard_video", "submit_storyboard_video", "refresh_storyboard_video"}:
+                            self._conversation_event(ops, path, {
+                                "event": "storyboard_submission", "chat_id": chat_id, "task_id": task_id,
+                                "unit_id": effective_args.get("unit_id"), "board": step["result"],
+                            })
+                        if committed and writing_task is not None and effective_name in {"submit_script_unit", "apply_script_block_changes"}:
+                            unit_id = str(effective_args.get("unit_id") or "")
                             if unit_id and unit_id not in submitted_unit_ids:
                                 submitted_unit_ids.append(unit_id)
                             self._conversation_event(ops, path, {
@@ -1568,12 +1711,14 @@ class NativeBridge(QObject):
 
                 try:
                     check_cancelled()
-                    task_catalog = tool_catalog()
+                    task_catalog = tool_catalog(access_mode=access_mode)
                     audit["task_tool_names"] = [tool["name"] for tool in task_catalog]
                     session_runner, session = open_conversation_session(
                         ops, settings, api_key, HarnessRunner,
                         task_tools=task_catalog, tool_handler=native_call,
-                        chat_id=chat_id, prompt_config=audit["prompt_config"],
+                        chat_id=chat_id, prompt_config=audit["prompt_config"], task_id=task_id,
+                        access_mode=access_mode, cancel_event=job["cancel"],
+                        output_presentation="thought" if writing_task is not None else "answer",
                     )
                     audit["session_id"] = session
                     with self._assistant_lock:
@@ -1624,13 +1769,13 @@ class NativeBridge(QObject):
 
                     result = run_turn(
                         ask, message if writing_task is None else message + "\n\n" + str(writing_task.get("instruction") or "")
-                        + "\n固定写作目标及输入清单：" + json.dumps(writing_task, ensure_ascii=False)
+                        + ("\n当前页面创作焦点及输入清单（完全访问模式不限制写入范围）：" if access_mode == "full" else "\n固定写作目标及输入清单：") + json.dumps(writing_task, ensure_ascii=False)
                         + "\n任务与依据档案由程序内部关联；请只提供业务内容、对象ID和并发校验参数。"
                         + "\n写作提示版本：" + SCREENPLAY_WRITING_PROMPT_VERSION,
-                        project=entry, image=image, steps=native_steps,
+                        project=entry, image="" if attachments else image, attachments=attachments, steps=native_steps,
                         on_format_error=on_format_error,
                         extraction_granularity=extraction_granularity, prompt_config=audit["prompt_config"],
-                        project_style=audit["project_style"],
+                        project_style=audit["project_style"], task_id=task_id, access_mode=access_mode,
                     )
                     check_cancelled()
                     if model_message_ids:
@@ -1647,9 +1792,10 @@ class NativeBridge(QObject):
                     audit["status"] = "completed"
                     revision = ops.graph_project_info()["revision"]
                     result.update(revision=revision, graph_reset_required=revision != starting_revision)
-                    return result | {"chat_id": chat_id, "title": saved["title"], "chat": saved,
-                                     "items": store.list(), "task_id": task_id,
-                                     "audit_directory": str(audit_dir)}
+                    outcome = result | {"chat_id": chat_id, "title": saved["title"], "chat": saved,
+                                        "items": store.list(), "task_id": task_id,
+                                        "audit_directory": str(audit_dir)}
+                    return outcome
                 except Exception as exc:
                     if job["cancel"].is_set() and not job.get("control_error") and not isinstance(exc, ConversationCancelled):
                         exc = ConversationCancelled(getattr(exc, "metadata", None), reason=job["stop_reason"])
@@ -1672,26 +1818,9 @@ class NativeBridge(QObject):
                     if getattr(exc, "code", "") == "tool_input_invalid_json" and "提取" in message:
                         reason = "模型工具参数 JSON 格式错误，本次提取未完成"
                     revision = ops.graph_project_info()["revision"]
-                    if revision != starting_revision:
-                        state = f"已完成的入库变更仍保留（修订 {starting_revision} → {revision}）。"
-                        if not cancelled:
-                            state += "请勿将本次任务视为全部完成。"
-                    else:
-                        state = f"本次任务未产生新的入库变更（当前修订 {revision}）。"
-                    from . import screenplay_tools
-                    from .tool_api import TOOLS
-                    committed = []
-                    for step in native_steps:
-                        tool = TOOLS.get(str(step.get("tool") or ""))
-                        if (step.get("ok") and tool is not None and tool.writes
-                                and tool.handler.__module__ == screenplay_tools.__name__):
-                            committed.append(step)
-                    audit["completed_screenplay_actions"] = committed
-                    if committed:
-                        script_state = f"已完成的 {len(committed)} 项剧本写入仍保留；任务未全部完成。"
-                        state = state + script_state if revision != starting_revision else script_state
-                    elif writing_task is not None:
-                        state = "本次任务尚无成功的剧本写入。"
+                    state = "实际已提交内容见程序入库汇总。"
+                    if not cancelled:
+                        state += "本次任务未全部完成。"
                     audit.update(finish_reason=failure_metadata.get("finish_reason"),
                                  sdk_error_diagnostics=failure_metadata.get("sdk_error_diagnostics") or [],
                                  diagnostic_path=diagnostic_path, starting_revision=starting_revision,
@@ -1699,25 +1828,57 @@ class NativeBridge(QObject):
                     store.append(chat_id, "system", reason + "。" + state,
                                  kind="assistant_cancelled" if cancelled else "assistant_incomplete", task_id=task_id,
                                  diagnostic_path=diagnostic_path, audit_directory=str(audit_dir),
+                                 steps=_public(native_steps),
                                  error_code=getattr(exc, "code", type(exc).__name__),
                                  finish_reason=failure_metadata.get("finish_reason"),
                                  revision=revision, starting_revision=starting_revision)
                     if cancelled:
-                        return {"status": "cancelled", "chat_id": chat_id, "task_id": task_id,
-                                "chat": store.load(chat_id), "items": store.list(), "revision": revision,
-                                "graph_reset_required": revision != starting_revision,
-                                "audit_directory": str(audit_dir)}
+                        outcome = {"status": "cancelled", "chat_id": chat_id, "task_id": task_id,
+                                   "chat": store.load(chat_id), "items": store.list(), "revision": revision,
+                                   "graph_reset_required": revision != starting_revision,
+                                   "audit_directory": str(audit_dir)}
+                        return outcome
                     raise ValueError(reason + "。" + state + "诊断：" + diagnostic_path) from exc
                 finally:
+                    host_cleanup = None
                     if session_runner is not None:
-                        session_runner.close()
+                        host_cleanup = session_runner.close(completed=audit["status"] == "completed")
+                    if not isinstance(host_cleanup, dict):
+                        from .assistant_host import read_host_task_cleanup
+                        host_cleanup = read_host_task_cleanup(path, task_id)
+                    audit['host_cleanup'] = host_cleanup
+                    unfinished = [row for row in host_cleanup.get('cleanup_receipts', [])
+                                  if row.get('reason') == 'task_completed_before_command_finished']
+                    if unfinished and audit['status'] == 'completed':
+                        audit['model_finish_reason'] = (audit['calls'][-1].get('finish_reason') if audit['calls'] else None) or 'completed'
+                        audit['status'] = 'incomplete'
+                        if outcome is not None:
+                            outcome.update(status='incomplete', model_finish_reason=audit['model_finish_reason'], host_cleanup=host_cleanup)
+                    from .task_write_summary import build_submission_summary
+                    with native_call_lock:
+                        commit_summary = build_submission_summary(
+                            native_steps, task_id=task_id,
+                            status="failed" if audit["status"] == "incomplete" else audit["status"],
+                            host_cleanup=host_cleanup,
+                        )
+                    audit.update(commit_summary=commit_summary,
+                                 commit_summary_text=commit_summary["text"])
+                    store.append(chat_id, "system", commit_summary["text"],
+                                 kind="task_summary", task_id=task_id,
+                                 commit_summary=commit_summary)
+                    if outcome is not None:
+                        outcome.update(commit_summary=commit_summary, host_cleanup=host_cleanup,
+                                       commit_summary_text=commit_summary["text"],
+                                       chat=store.load(chat_id), items=store.list())
                     audit.update(steps=native_steps, public_steps=_public(native_steps),
                                  model_calls=calls, elapsed_seconds=time.monotonic() - started)
                     if writing_task is not None:
                         audit["submitted_unit_ids"] = list(submitted_unit_ids)
                     save("task.json", audit)
+                    with self._assistant_lock:
+                        job["finished"] = True
                     self._conversation_event(ops, path, {
-                        "chat_id": chat_id, "event": "task_complete", "task_id": task_id,
+                        "chat_id": chat_id, "event": "task_complete", "task_id": task_id, "access_mode": access_mode,
                         "revision": ops.graph_project_info()["revision"],
                         "graph_reset_required": ops.graph_project_info()["revision"] != starting_revision,
                         **({"writing_target": writing_task.get("target"), "writing_status": audit["status"],
@@ -1729,33 +1890,47 @@ class NativeBridge(QObject):
                 self._canvas.clear(preserve_positions=True)
             return result
 
-        self._project_task("assistant", work, apply)
         with self._assistant_lock:
-            self._assistant_jobs[self._next_request] = job
+            request_id = self._next_request + 1
+            self._assistant_jobs[request_id] = job
+        self._project_task("assistant", work, apply)
 
     @Slot(str, str)
     def assistantStop(self, chat_id: str, task_id: str) -> None:
         """Stop only the identified running task, never another chat or queued job."""
-        if self._closed or not task_id:
+        if self._closed:
             return
         with self._assistant_lock:
             job = next((item for item in self._assistant_jobs.values()
-                        if item["chat_id"] == chat_id and item["task_id"] == task_id
-                        ), None)
-            if job is None:
-                return
-            job["stop_reason"] = "user_stopped"
-            job["cancel"].set()
-            runtime = job["runtime"]
-            nonce = job.get("binding_nonce")
+                        if item['chat_id'] == chat_id and item['task_id'] == task_id and not item.get('finished')), None)
+            current = next((item for item in self._assistant_jobs.values() if item['chat_id'] == chat_id and not item.get('finished')), None)
+            duplicate = bool(job and job['cancel'].is_set())
+            if job is not None:
+                job['stop_reason'] = 'user_stopped'
+                job['cancel'].set()
+                runtime, nonce = job.get('runtime'), job.get('binding_nonce')
+            else:
+                runtime, nonce = None, None
+        identity = {'chat_id': chat_id, 'task_id': task_id, **self._assistant_activity_snapshot()}
+        if job is None:
+            self.resultReady.emit('assistant_stop', identity | {'status': 'not_running', 'reason': '目标任务已结束或当前进程没有该任务'})
+            if current is None:
+                self.resultReady.emit('conversation_progress', identity | {'event': 'task_complete', 'busy': False, 'status': 'not_running'})
+            else:
+                self.resultReady.emit('conversation_progress', identity | {'event': 'stop_ignored', 'busy': True,
+                                      'task_id': current['task_id'], 'access_mode': current.get('access_mode', 'standard')})
+            return
+        self.resultReady.emit('assistant_stop', identity | {'status': 'stopping'})
+        if duplicate:
+            return
         if runtime is not None and nonce:
             runtime.signal_stop(nonce)
             def interrupt():
                 try:
                     runtime.interrupt(nonce)
                 except Exception as exc:
-                    job["control_error"] = str(exc)
-                    runtime.close("interrupt_failed")
+                    job['control_error'] = str(exc)
+                    runtime.close('interrupt_failed')
             self._pool.submit(interrupt)
 
     @Slot()
@@ -1922,7 +2097,11 @@ class NativeBridge(QObject):
     @Slot(str, str, bool)
     def runSourceTask(self, source_id: str, slice_id: str, review: bool = False) -> None:
         """Send the selected source range to the current unified conversation."""
-        requested_chat = self._assistant_chat
+        try:
+            requested_chat, access_mode = self._capture_assistant_access(self._assistant_chat)
+        except (ValueError, OSError) as exc:
+            self.errorOccurred.emit("source_task", str(exc))
+            return
 
         def work(ops) -> dict:
             source = ops.source(source_id)
@@ -1942,7 +2121,7 @@ class NativeBridge(QObject):
                     "start": start, "end": end, "review": review, "chat_id": requested_chat}
 
         def apply(result: dict) -> dict:
-            self._assistant_turn(result["instruction"], "", requested_chat)
+            self._assistant_turn(result["instruction"], "", requested_chat, access_mode_override=access_mode)
             return result
 
         self._project_task("source_task", work, apply)
@@ -1986,14 +2165,69 @@ class NativeBridge(QObject):
         )
 
     @Slot()
-    def loadProjectSettings(self) -> None:
-        self._project_task("project_settings", lambda ops: ops.load_project_settings() | {"catalog": ops.provider_catalog()})
+    @Slot(int)
+    def loadProjectSettings(self, request_token: int = 0) -> None:
+        self._project_task("project_settings", lambda ops: ops.load_project_settings() | {
+            "catalog": ops.provider_catalog(), "request_token": request_token,
+            "project_path": str(project_package.layout(ops.project_info().path).entry)})
 
     @Slot("QVariantMap")
-    def saveProjectSettings(self, settings: dict) -> None:
+    @Slot("QVariantMap", int)
+    def saveProjectSettings(self, settings: dict, request_token: int = 0) -> None:
+        self.saveProjectSettingsWithKey(settings, "", False, request_token)
+
+    @Slot("QVariantMap", str, bool)
+    @Slot("QVariantMap", str, bool, int)
+    def saveProjectSettingsWithKey(self, settings: dict, api_key: str, clear_api_key: bool,
+                                   request_token: int = 0) -> None:
         payload = dict(settings)
         payload["profile"] = self._exact_integers(dict(payload.get("profile") or {}))
-        self._project_task("project_settings", lambda ops: ops.save_project_settings(payload) | {"catalog": ops.provider_catalog(), "saved": True})
+        def work(ops):
+            identity = {"request_token": request_token,
+                        "project_path": str(project_package.layout(ops.project_info().path).entry)}
+            try:
+                return ops.save_project_settings(payload, api_key=api_key or None, clear_api_key=clear_api_key) | {
+                    **identity, "catalog": ops.provider_catalog(), "saved": True}
+            except Exception as error:
+                # Secret-bearing failures must never cross signals or UI logs.
+                return identity | {"error": "设置未保存，请检查配置及本机密钥存储。", "error_type": type(error).__name__}
+        self._project_task("project_settings", work)
+
+    @Slot("QVariantMap", int)
+    def loadProjectKeyStatus(self, profile: dict, request_token: int) -> None:
+        payload = self._exact_integers(dict(profile))
+        def work(ops):
+            identity = {"request_token": request_token,
+                        "project_path": str(project_package.layout(ops.project_info().path).entry)}
+            try:
+                return identity | {"api_key_status": ops.provider_api_key_status(payload)}
+            except (ValueError, OSError):
+                return identity | {"error": "当前配置的密钥状态暂不可用。"}
+        self._project_task("project_key_status", work)
+
+    @Slot("QVariantMap", str, bool, int)
+    def checkProjectApiKey(self, profile: dict, api_key: str, clear_api_key: bool,
+                           request_token: int) -> None:
+        try:
+            path = self._project()
+        except ValueError:
+            return
+        epoch = self._epoch
+        payload = self._exact_integers(dict(profile))
+        def work():
+            identity = {"project_path": str(path), "request_token": request_token}
+            try:
+                ops = project_catalog.open_graph_project(path)
+                result = ops.check_model_credential(payload, api_key=api_key or None,
+                                                    ignore_saved_key=clear_api_key)
+            except Exception:
+                result = {"valid": None, "code": "check_failed", "message": "暂时无法完成有效性检查。"}
+            if not self._closed and self._project_path == path and self._epoch == epoch:
+                try:
+                    self.resultReady.emit("project_key_check", result | identity)
+                except RuntimeError:
+                    pass  # The window was destroyed while the request completed.
+        self._pool.submit(work)
 
     @Slot()
     def loadProjectStyle(self) -> None:
@@ -2039,7 +2273,11 @@ class NativeBridge(QObject):
     @Slot(str)
     def extractEventActions(self, node_id: str) -> None:
         """An explicit user request, dispatched into the selected unified chat."""
-        requested_chat = self._assistant_chat
+        try:
+            requested_chat, access_mode = self._capture_assistant_access(self._assistant_chat)
+        except (ValueError, OSError) as exc:
+            self.errorOccurred.emit("event_actions_task", str(exc))
+            return
         def work(ops) -> dict:
             node = next((row for row in ops.graph_snapshot()["nodes"] if row["id"] == node_id), None)
             if node is None or node.get("node_type") != "event":
@@ -2048,17 +2286,18 @@ class NativeBridge(QObject):
                            + json.dumps({"event_id": node_id, "name": node.get("name")}, ensure_ascii=False))
             return {"instruction": instruction, "event_id": node_id, "chat_id": requested_chat}
         def apply(result: dict) -> dict:
-            self._assistant_turn(result["instruction"], "", requested_chat)
+            self._assistant_turn(result["instruction"], "", requested_chat, access_mode_override=access_mode)
             return result
         self._project_task("event_actions_task", work, apply)
 
     @Slot(str)
-    def loadProviderProfileFor(self, provider: str) -> None:
+    @Slot(str, int)
+    def loadProviderProfileFor(self, provider: str, request_token: int = 0) -> None:
         """Read this project's saved provider profile before editing or activating it."""
-        self._project_task(
-            "provider",
-            lambda ops: {
-                "profile": ops.harness_settings(provider.strip() or None),
-                "catalog": ops.provider_catalog(),
-            },
-        )
+        def work(ops):
+            profile = ops.harness_settings(provider.strip() or None)
+            return {"profile": profile, "catalog": ops.provider_catalog(),
+                    "api_key_status": ops.provider_api_key_status(profile),
+                    "request_token": request_token,
+                    "project_path": str(project_package.layout(ops.project_info().path).entry)}
+        self._project_task("provider", work)

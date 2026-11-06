@@ -103,3 +103,43 @@ def test_relation_layout_accepts_prototype_and_delimiter_ids_without_key_collisi
     assert set(data['positions']) == set(ids)
     assert sorted(sorted(c) for c in data['components']) == sorted([['__proto__', 'constructor'], ['a|b', 'c'], ['a', 'b|c']])
     assert app is not None
+
+
+def test_relation_spacing_and_compact_labels_remain_readable_with_real_pan_zoom(tmp_path, monkeypatch):
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+    from PySide6.QtTest import QTest
+    from test_static_check_ui import plain
+
+    with transcript_shell(tmp_path, monkeypatch) as ui:
+        ui.window.setProperty('assistantOpen', False)
+        ui.window.setProperty('currentPage', 'relations')
+        ui.settle()
+        page=ui.window.findChild(object,'relationPage')
+        data={'persons':[{'id':'a','name':'甲'},{'id':'b','name':'乙'}], 'edges':[{'from':'a','to':'b','kind':'故交'}]}
+        page.apply(data)
+        ui.wait(lambda:bool(plain(page.property('displayLabelLayout'))['edges']))
+        positions=plain(page.property('graphLayout'))['positions']
+        a,b=positions['a'],positions['b']
+        camera=plain(page.property('graphLabelLayout'))['fitScale']
+        gap=math.hypot(a['x']-b['x'],a['y']-b['y'])-a['r']-b['r']
+        assert gap*camera>=85
+        assert gap/min(a['r'],b['r'])>4.5
+        box=plain(page.property('displayLabelLayout'))['edges'][0]['label']
+        assert box['h']*camera<22
+        assert page.property('labelScreenFontSize')==11
+        assert page.property('zoom')==1
+        canvas=ui.window.findChild(object,'relationCanvas')
+        point=canvas.mapToScene(QPointF(30,30)).toPoint()
+        QTest.mousePress(ui.window,Qt.MouseButton.LeftButton,Qt.KeyboardModifier.NoModifier,point)
+        QTest.mouseMove(ui.window,point+QPoint(35,20),30)
+        QTest.mouseRelease(ui.window,Qt.MouseButton.LeftButton,Qt.KeyboardModifier.NoModifier,point+QPoint(35,20))
+        ui.settle()
+        assert page.property('panX')==pytest.approx(35)
+        assert page.property('panY')==pytest.approx(20)
+        wheel_point=canvas.mapToScene(QPointF(canvas.width()/2,canvas.height()/2))
+        ui.app.sendEvent(ui.window,QWheelEvent(wheel_point,ui.window.mapToGlobal(wheel_point.toPoint()),QPoint(),QPoint(0,120),Qt.MouseButton.NoButton,Qt.KeyboardModifier.NoModifier,Qt.ScrollPhase.NoScrollPhase,False))
+        ui.settle()
+        assert page.property('zoom')>1
+        assert plain(page.property('graphLayout'))['positions']==positions
+        assert plain(page.property('edges'))==data['edges']

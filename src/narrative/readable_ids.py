@@ -9,6 +9,8 @@ import re
 from collections.abc import Iterable
 from sqlite3 import Connection
 
+from .content_errors import ContentConflictError
+
 
 def allocate_id(db: Connection, namespace: str, prefix: str, existing_ids: Iterable[str] = ()) -> str:
     """Return ``prefix + integer`` without reusing successfully allocated IDs.
@@ -18,7 +20,7 @@ def allocate_id(db: Connection, namespace: str, prefix: str, existing_ids: Itera
     Existing readable IDs bootstrap the high-water mark without rewriting them.
     """
     if not db.in_transaction:
-        raise ValueError("可读业务ID必须在现有写事务中自动分配")
+        raise ContentConflictError("可读业务ID必须在现有写事务中自动分配")
     if not isinstance(namespace, str) or not namespace or namespace != namespace.strip():
         raise ValueError("ID计数命名空间不能为空")
     if not isinstance(prefix, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", prefix):
@@ -28,9 +30,9 @@ def allocate_id(db: Connection, namespace: str, prefix: str, existing_ids: Itera
     try:
         previous = int(row[0]) if row else 0
     except (ValueError, TypeError) as exc:
-        raise ValueError("可读ID计数器无效，未重置或复用编号") from exc
+        raise ContentConflictError("可读ID计数器无效，未重置或复用编号") from exc
     if previous < 0:
-        raise ValueError("可读ID计数器无效，未重置或复用编号")
+        raise ContentConflictError("可读ID计数器无效，未重置或复用编号")
     pattern = re.compile(re.escape(prefix) + r"([1-9][0-9]*)\Z")
     taken = set(existing_ids)
     highest = previous
@@ -51,7 +53,7 @@ def reserve_id(db: Connection, namespace: str, prefix: str, identifier: str) -> 
     numeric sequence. The reservation rolls back with the caller's transaction.
     """
     if not db.in_transaction:
-        raise ValueError("可读业务ID必须在现有写事务中自动分配")
+        raise ContentConflictError("可读业务ID必须在现有写事务中自动分配")
     if not isinstance(namespace, str) or not namespace or namespace != namespace.strip():
         raise ValueError("ID计数命名空间不能为空")
     if not isinstance(prefix, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", prefix):
@@ -66,9 +68,9 @@ def reserve_id(db: Connection, namespace: str, prefix: str, identifier: str) -> 
     try:
         previous = int(row[0]) if row else 0
     except (ValueError, TypeError) as exc:
-        raise ValueError("可读ID计数器无效，未重置或复用编号") from exc
+        raise ContentConflictError("可读ID计数器无效，未重置或复用编号") from exc
     if previous < 0:
-        raise ValueError("可读ID计数器无效，未重置或复用编号")
+        raise ContentConflictError("可读ID计数器无效，未重置或复用编号")
     if int(match[1]) > previous:
         db.execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                    (key, int(match[1])))

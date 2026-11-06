@@ -9,6 +9,7 @@ import copy
 import json
 from uuid import uuid4
 
+from .content_errors import ContentConflictError, ContentValidationError, content_validation
 from .graph_models import Node
 from .graph_store import GraphStore
 from .property_core import _valid_value
@@ -47,7 +48,7 @@ def _node_id(db, state, node_type):
 
 
 def _value_id(db, state):
-    return allocate_id(db, "adaptation", "adapt-value-", (row["id"] for row in state["properties"]))
+    return allocate_id(db, "adaptation", "adapt-change-", (row["id"] for row in state["properties"]))
 
 
 def _order(state, node_id, after_id):
@@ -76,46 +77,8 @@ def _parent(state, node_id, parent_id):
 
 
 def _normalize_properties(records, nodes):
-    """Translate source-coordinate intervals to the adaptation ordering axis."""
-    by_id = {n["id"]: n for n in nodes}
-    moments = [n for n in nodes if n["node_type"] in {"event", "action"} and not n.get("retracted")]
-    diagnostics = []
-    result = copy.deepcopy(records)
-    for row in result:
-        if row.get("kind") != "property_value":
-            continue
-        for source_field, target_field in (("valid_from", "event_id"), ("valid_to", "end_event_id")):
-            boundary = row.pop(source_field, None)
-            if boundary is None:
-                continue
-            row["source_" + source_field] = copy.deepcopy(boundary)
-            explicit = boundary.get("event_id")
-            if explicit and explicit in by_id and by_id[explicit]["node_type"] in {"event", "action"}:
-                row[target_field] = explicit
-                continue
-            sid, offset = boundary.get("source_id"), boundary.get("start")
-            exact = [n for n in moments if (n.get("disclosure") or {}).get("source_id") == sid
-                     and (n.get("disclosure") or {}).get("start") == offset]
-            candidates = exact
-            if not candidates and isinstance(offset, int):
-                candidates = [n for n in moments if any(span.get("source_id") == sid
-                    and span.get("start", -1) <= offset < span.get("end", -1)
-                    for span in n.get("evidence_spans", []))]
-            if len(candidates) > 1:
-                preferred = row.get("event_id") if source_field == "valid_from" else None
-                candidates = [n for n in candidates if n["id"] == preferred] or candidates
-            if len(candidates) == 1:
-                row[target_field] = candidates[0]["id"]
-                diagnostics.append({"severity": "warning", "code": "SOURCE_BOUNDARY_MAPPED", "object_id": row["id"],
-                                    "field": source_field, "boundary": boundary, "event_id": row[target_field],
-                                    "message": "原文区间边界无有效事件锚点，已由精确原文坐标定位改编时点"})
-            else:
-                row[target_field] = None
-                row["unresolved_" + target_field] = copy.deepcopy(boundary)
-                diagnostics.append({"severity": "error", "code": "SOURCE_BOUNDARY_UNRESOLVED", "object_id": row["id"],
-                                    "field": source_field, "boundary": boundary,
-                                    "message": "原文区间边界无法唯一定位改编时点；同步未入库，请先纠正原文锚点"})
-    return result, diagnostics
+    """Change identities and event anchors survive import without interval conversion."""
+    return copy.deepcopy(records), []
 
 
 def _issues(state):
@@ -192,39 +155,53 @@ def _issues(state):
         if definition.get("value_type") not in {"any", "string", "number", "boolean", "node", "either"} or definition.get("cardinality", "one") not in {"one", "many"}:
             issue("PROPERTY_DEFINITION", "改编属性定义类型或基数无效", definition["id"])
     for row in state["properties"]:
-        if row.get("kind") != "property_value":
+        if row.get("kind") == "property_definition":
             continue
-        for field in ("node_id", "event_id", "end_event_id"):
-            if row.get(field) and row[field] not in (nodes if field == "node_id" else points):
+        if row.get("kind") != "property_change":
+            issue("PROPERTY_KIND", "只接受事件属性变更，不接受有效期记录", row.get("id"))
+            continue
+        for field in ("node_id", "event_id"):
+            if not row.get(field) or row[field] not in (nodes if field == "node_id" else points):
                 issue("PROPERTY_REF", f"属性{field}引用不存在", row.get("id"))
-        if row.get("property_id") not in definitions:
-            issue("PROPERTY_DEFINITION", "属性定义不存在", row.get("id"))
         definition = definitions.get(row.get("property_id"))
-        if definition and not _valid_value(row.get("value"), definition, nodes):
-            issue("PROPERTY_VALUE", "改编属性值与定义类型或节点引用不匹配", row.get("id"))
-        if row.get("holder_id") and row["holder_id"] not in nodes:
-            issue("PROPERTY_HOLDER", "改编认知持有人引用不存在", row.get("id"))
-        for field in ("event_id", "end_event_id"):
-            point = points.get(row.get(field))
-            if point and point["node_type"] not in {"storyline", "big_event", "scene", "event", "action"}:
-                issue("PROPERTY_POINT", "属性有效时点必须引用叙事节点", row.get("id"))
-        start, end = points.get(row.get("event_id")), points.get(row.get("end_event_id"))
-        if start and end and start["sort_id"] >= end["sort_id"]:
-            issue("PROPERTY_INTERVAL", "属性失效时点必须晚于生效时点", row.get("id"))
+        if definition is None:
+            issue("PROPERTY_DEFINITION", "属性定义不存在", row.get("id"))
+        op = row.get("op")
+        if op not in {"set", "add", "remove", "clear", "unknown"}:
+            issue("PROPERTY_OP", "属性变更操作无效", row.get("id"))
+        elif op in {"clear", "unknown"}:
+            if "value" in row:
+                issue("PROPERTY_VALUE", "清除或未知操作不能携带值", row.get("id"))
+        elif definition:
+            values = row.get("value") if definition.get("cardinality") == "many" and isinstance(row.get("value"), list) else [row.get("value")]
+            if "value" not in row or any(not _valid_value(value, definition, nodes) for value in values):
+                issue("PROPERTY_VALUE", "改编属性值与定义类型或节点引用不匹配", row.get("id"))
+        if type(row.get("sequence")) is not int or row["sequence"] < 0:
+            issue("PROPERTY_SEQUENCE", "属性变更顺序必须为非负整数", row.get("id"))
+        if set(row) & {"valid_from", "valid_to", "end_event_id", "source_valid_from", "source_valid_to"}:
+            issue("PROPERTY_INTERVAL", "属性变更不接受有效期字段", row.get("id"))
+        point = points.get(row.get("event_id"))
+        if point and point["node_type"] not in {"event", "action"}:
+            issue("PROPERTY_POINT", "属性变更必须引用事件或动作", row.get("id"))
+        scope, holder = row.get("scope", "world"), row.get("holder_id")
+        if scope not in {"world", "claim", "cognition"} or (scope == "world" and holder is not None) or (scope != "world" and nodes.get(holder, {}).get("node_type") != "person"):
+            issue("PROPERTY_HOLDER", "属性立场及认知持有人无效", row.get("id"))
+    if any(row.get("code") in {"PROPERTY_REF", "PROPERTY_SEQUENCE", "PROPERTY_OP", "PROPERTY_KIND"} for row in issues):
+        return issues
+    from .adaptation_state import current_rows, replay
+    for reduction in replay(state).values():
+        issues.extend(reduction.get("diagnostics", []))
     holder_names = {p["id"] for p in state["properties"] if p.get("kind") == "property_definition"
                     and (p.get("semantic") == "item_holder" or p["id"] == "持有者")}
+    current = current_rows(state)
     for identifier, node in active.items():
         if node["node_type"] != "item":
             continue
-        values = [p for p in state["properties"] if p.get("kind") == "property_value"
-                  and p.get("node_id") == identifier and p.get("property_id") in holder_names
-                  and p.get("scope", "world") == "world" and not p.get("holder_id")
-                  and not p.get("valid_to") and not p.get("end_event_id")]
-        values.sort(key=lambda p: nodes.get(p.get("event_id"), {}).get("sort_id", 0))
-        value = values[-1].get("value") if values else None
-        if not isinstance(value, str) or (value not in {"无", "未知"} and
-                                         (value not in active or value == identifier)):
-            issue("ITEM_HOLDER_REQUIRED", f"物品“{node['name']}”缺少明确持有者，请先指定现存节点、无或未知，再删除相关时点", identifier)
+        values = [row for row in current if row.get("node_id") == identifier and row.get("property_id") in holder_names
+                  and row.get("scope", "world") == "world" and not row.get("holder_id")]
+        value = ("未知" if values[-1].get("state_kind") == "unknown" else values[-1].get("value")) if values else None
+        if not isinstance(value, str) or (value not in {"无", "未知"} and (value not in active or value == identifier)):
+            issue("ITEM_HOLDER_REQUIRED", f"物品“{node['name']}”缺少明确持有者，请在事件处指定节点、无或未知", identifier)
     return issues
 
 
@@ -292,6 +269,8 @@ def _merge_source(state, source_nodes, records, source_revision, *, partial=Fals
     state["source_revision"] = source_revision
 
 
+
+
 class AdaptationOperationsMixin:
     _store: GraphStore
 
@@ -301,16 +280,17 @@ class AdaptationOperationsMixin:
 
     def _adaptation_write(self, mutate, expected_revision, reason):
         if not isinstance(reason, str) or not reason.strip():
-            raise ValueError("改编操作须提供原因")
+            raise ContentValidationError("改编操作须提供原因")
         with self._store.connect(write=True) as db:
             state = _read(db)
             if expected_revision is not None and (not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision != state["revision"]):
-                raise ValueError("改编修订已变化，请刷新后重试")
-            mutate(state, db)
-            issues = _issues(state)
+                raise ContentConflictError("改编修订已变化，请刷新后重试")
+            with content_validation():
+                mutate(state, db)
+                issues = _issues(state)
             blockers = issues
             if blockers:
-                raise ValueError(blockers[0]["message"])
+                raise ContentValidationError(blockers[0]["message"])
             state["revision"] += 1
             db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)", (_KEY, json.dumps(state, ensure_ascii=False)))
             revision = int(db.execute("SELECT value FROM meta WHERE key='revision'").fetchone()[0])
@@ -375,9 +355,9 @@ class AdaptationOperationsMixin:
                     if not any(p["id"] == holder_name for p in state["properties"]):
                         state["properties"].append({"id": holder_name, "kind": "property_definition", "value_type": "either",
                                                     "cardinality": "one", "semantic": "item_holder"})
-                    state["properties"].append({"id": _value_id(db, state), "kind": "property_value", "node_id": node["id"],
+                    state["properties"].append({"id": _value_id(db, state), "kind": "property_change", "node_id": node["id"],
                                                 "property_id": holder_name, "value": changes["initial_holder"],
-                                                "event_id": changes.get("point_id"), "scope": "world"})
+                                                "event_id": changes.get("point_id"), "scope": "world", "op": "set", "sequence": max((p["sequence"] for p in state["properties"] if p.get("kind") == "property_change" and p.get("event_id") == changes.get("point_id")), default=-1) + 1})
                 _order(state, node["id"], after_id)
                 report["created_node_id"] = node["id"]
             else:
@@ -431,13 +411,16 @@ class AdaptationOperationsMixin:
             for value in values:
                 row = copy.deepcopy(value)
                 row.update(id=_value_id(db, state), node_id=ids[row["node_id"]])
-                for field in ("event_id", "end_event_id", "holder_id", "applies_to"):
+                for field in ("event_id", "holder_id", "applies_to"):
                     if row.get(field) in ids:
                         row[field] = ids[row[field]]
                 row["related_nodes"] = [ids.get(value, value) for value in row.get("related_nodes", [])]
                 definition = next((p for p in state["properties"] if p["id"] == row.get("property_id")), {})
-                if definition.get("value_type") in {"node", "either"} and isinstance(row.get("value"), str):
-                    row["value"] = ids.get(row["value"], row["value"])
+                if definition.get("value_type") in {"node", "either"}:
+                    if isinstance(row.get("value"), str):
+                        row["value"] = ids.get(row["value"], row["value"])
+                    elif isinstance(row.get("value"), list):
+                        row["value"] = [ids.get(value, value) for value in row["value"]]
                 state["properties"].append(row)
         return self._adaptation_write(mutate, expected_revision, reason) | report
 
@@ -537,43 +520,20 @@ class AdaptationOperationsMixin:
                     node["occurrence"] = None
             definitions = {p["id"]: p for p in state["properties"] if p.get("kind") == "property_definition"}
             retained = []
-            opened = set()
             for row in state["properties"]:
-                if row.get("kind") == "property_value":
+                if row.get("kind") == "property_change":
                     if any(row.get(field) in deleted for field in ("node_id", "event_id", "holder_id", "applies_to")):
                         continue
                     definition = definitions.get(row.get("property_id"), {})
-                    if definition.get("value_type") in {"node", "either"} and isinstance(row.get("value"), str) and row["value"] in deleted:
+                    value = row.get("value")
+                    targets = value if isinstance(value, list) else [value]
+                    if definition.get("value_type") in {"node", "either"} and any(isinstance(target, str) and target in deleted for target in targets):
                         continue
                     row["related_nodes"] = [key for key in row.get("related_nodes", []) if key not in deleted]
-                    if row.get("end_event_id") in deleted:
-                        row["end_event_id"] = None
-                        row.pop("source_valid_to", None)
-                        opened.add(row["id"])
                 retained.append(row)
             state["properties"] = retained
-            points = {**anchor_nodes(state), **{n["id"]: n for n in state["nodes"]}}
-            old_points = {**anchor_nodes(before), **{n["id"]: n for n in before["nodes"]}}
             old_values = {row["id"]: row for row in before["properties"]}
-            def overlaps(left, right, geometry):
-                def bound(row, field, fallback):
-                    return geometry.get(row.get(field), {}).get("sort_id", fallback)
-                return max(bound(left, "event_id", float("-inf")), bound(right, "event_id", float("-inf"))) < min(
-                    bound(left, "end_event_id", float("inf")), bound(right, "end_event_id", float("inf")))
-            for row in (value for value in retained if value["id"] in opened):
-                if definitions.get(row.get("property_id"), {}).get("cardinality", "one") != "one":
-                    continue
-                for other in retained:
-                    if other.get("kind") != "property_value" or other["id"] == row["id"]:
-                        continue
-                    fields = ("node_id", "property_id", "scope", "holder_id")
-                    if any(row.get(key) != other.get(key) for key in fields):
-                        continue
-                    if overlaps(row, other, points) and not overlaps(old_values[row["id"]], old_values[other["id"]], old_points):
-                        name = points.get(row.get("node_id"), {}).get("name", row.get("node_id"))
-                        raise ValueError(f"删除结束时点会使{name}的{row.get('property_id')}单值状态区间重叠，请先显式调整状态；未删除任何内容")
             report["deleted_property_ids"] = sorted(set(old_values) - {row["id"] for row in retained})
-            report["opened_property_ids"] = sorted(opened)
             # Physical deletion removes source baselines and their references too.
             state["baseline_nodes"] = {key: value for key, value in state.get("baseline_nodes", {}).items() if key not in deleted}
             for value in state["baseline_nodes"].values():
@@ -590,15 +550,11 @@ class AdaptationOperationsMixin:
             for value in state["baseline_properties"].values():
                 if "related_nodes" in value:
                     value["related_nodes"] = [key for key in value["related_nodes"] if key not in deleted]
-            for identifier in opened:
-                if identifier in state["baseline_properties"]:
-                    state["baseline_properties"][identifier]["end_event_id"] = None
-                    state["baseline_properties"][identifier].pop("source_valid_to", None)
-            referenced_anchors = {row.get(field) for row in retained for field in ("event_id", "end_event_id", "holder_id", "applies_to")}
+            referenced_anchors = {row.get(field) for row in retained for field in ("event_id", "holder_id", "applies_to")}
             referenced_anchors.update(node.get("point_id") for node in state["nodes"])
             for row in retained:
                 referenced_anchors.update(row.get("related_nodes", []))
-                if row.get("kind") == "property_value" and definitions.get(row.get("property_id"), {}).get("value_type") in {"node", "either"}:
+                if row.get("kind") == "property_change" and definitions.get(row.get("property_id"), {}).get("value_type") in {"node", "either"}:
                     value = row.get("value")
                     referenced_anchors.update(value if isinstance(value, list) else [value] if isinstance(value, str) else [])
             for node in state["nodes"]:
@@ -615,35 +571,55 @@ class AdaptationOperationsMixin:
         result = self._adaptation_write(mutate, expected_revision, reason)
         return result | report
 
-    def set_adaptation_property(self, node_id, property_id, value=None, event_id=None,
-                                record_id=None, expire=False, expected_revision=None,
-                                reason="编辑改编属性") -> dict:
+    def set_adaptation_property(self, node_id, property_id, event_id, op, value=None,
+                                record_id=None, expected_revision=None, reason="编辑改编属性",
+                                scope=None, holder_id=None, context_id=None) -> dict:
         def mutate(state, db):
-            _find(state, node_id)
-            if event_id is not None:
-                event = _find(state, event_id)
-                if event["node_type"] not in {"event", "action", "scene", "big_event", "storyline"}:
-                    raise ValueError("属性时点须为叙事节点")
+            node = _find(state, node_id)
+            event = ({**anchor_nodes(state), **{node["id"]: node for node in state["nodes"]}}.get(event_id)
+                     if record_id else _find(state, event_id))
+            if not event or event["node_type"] not in {"event", "action"}:
+                raise ValueError("属性变更须指定事件或动作")
+            if op not in {"set", "add", "remove", "clear", "unknown"}:
+                raise ValueError("请选择明确的属性变更操作")
             row = next((p for p in state["properties"] if p["id"] == record_id), None) if record_id else None
             if record_id and (not row or row.get("node_id") != node_id or row.get("property_id") != property_id):
-                raise ValueError("改编属性记录不存在或不属于当前节点属性")
-            if expire:
-                if row is None or event_id is None:
-                    raise ValueError("失效属性须指定记录与时点")
-                row["end_event_id"] = event_id
-                return
+                raise ValueError("改编属性变更不存在或不属于当前属性")
             if not any(p["id"] == property_id and p.get("kind") == "property_definition" for p in state["properties"]):
                 if not property_id or not isinstance(property_id, str):
                     raise ValueError("属性名称不能为空")
                 state["properties"].append({"id": property_id, "kind": "property_definition", "value_type": "any", "cardinality": "one"})
-            if row is not None:
-                if event_id is None or event_id == row.get("event_id"):
-                    row["value"] = value
-                    return
-                row["end_event_id"] = event_id
-            state["properties"].append({"id": _value_id(db, state), "kind": "property_value", "node_id": node_id,
-                                        "property_id": property_id, "value": copy.deepcopy(value), "event_id": event_id,
-                                        "end_event_id": None, "scope": "world"})
+            if row is None:
+                sequence = max((p["sequence"] for p in state["properties"] if p.get("kind") == "property_change" and p.get("event_id") == event_id), default=-1) + 1
+                row = {"id": _value_id(db, state), "kind": "property_change", "node_id": node_id,
+                       "property_id": property_id, "event_id": event_id, "sequence": sequence,
+                       "scope": scope or "world", "context_id": context_id or node.get("context_id", "canon")}
+                if holder_id is not None:
+                    row["holder_id"] = holder_id
+                state["properties"].append(row)
+            row.update(event_id=event_id, op=op)
+            if scope is not None:
+                row["scope"] = scope
+                if scope == "world":
+                    row.pop("holder_id", None)
+            if holder_id is not None:
+                row["holder_id"] = holder_id
+            if context_id is not None:
+                row["context_id"] = context_id
+            if op in {"clear", "unknown"}:
+                row.pop("value", None)
+            else:
+                row["value"] = copy.deepcopy(value)
+        return self._adaptation_write(mutate, expected_revision, reason)
+
+    def delete_adaptation_property_changes(self, record_ids, expected_revision=None, reason="删除改编属性变更"):
+        def mutate(state, _db):
+            wanted = set(record_ids)
+            found = {row["id"] for row in state["properties"] if row.get("kind") == "property_change"}
+            if not wanted or wanted - found:
+                raise ValueError("待删除的属性变更不存在")
+            state["properties"] = [row for row in state["properties"] if row["id"] not in wanted]
+            state["baseline_properties"] = {key: row for key, row in state["baseline_properties"].items() if key not in wanted}
         return self._adaptation_write(mutate, expected_revision, reason)
 
     def check_adaptation(self) -> dict:

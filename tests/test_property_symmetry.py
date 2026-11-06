@@ -17,9 +17,9 @@ def draft():
         {'type': 'event', 'name': '相互信任并敬佩', 'scene': '交往', 'quotes': [TEXT], 'participants': ['甲', '乙']},
     ], 'properties': [
         {'node': '甲', 'property': '任意相互关系', 'value': '乙', 'value_type': 'node',
-         'symmetric': True, 'category': '关系', 'quotes': ['甲与乙互相信任。']},
+         'symmetric': True, 'op': 'set', 'at_event': '相互信任并敬佩', 'category': '关系', 'quotes': ['甲与乙互相信任。']},
         {'node': '甲', 'property': '敬佩', 'value': '乙', 'value_type': 'node',
-         'category': '关系', 'quotes': ['甲敬佩乙。']},
+         'op': 'set', 'at_event': '相互信任并敬佩', 'category': '关系', 'quotes': ['甲敬佩乙。']},
     ]}
 
 
@@ -30,7 +30,7 @@ def test_draft_symmetric_definition_persists_without_reverse_values(project):
     definitions = {row['id']: row for row in project.property_records() if row['kind'] == 'property_definition'}
     assert definitions['任意相互关系']['symmetric'] is True
     assert definitions['敬佩']['symmetric'] is False
-    values = [row for row in project.property_records() if row['kind'] == 'property_value']
+    values = [row for row in project.property_records() if row['kind'] == 'property_change']
     assert len(values) == 2
     names = {node['id']: node['name'] for node in project.graph_snapshot()['nodes']}
     assert all(names[row['node_id']] == '甲' and names[row['value']] == '乙' for row in values)

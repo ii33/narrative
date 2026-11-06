@@ -17,7 +17,7 @@ from narrative.operations import Operations
     (["adaptation-copy", "E1", "--after", "E2"], "copy_adaptation_node", {"node_id": "E1", "after_id": "E2"}),
     (["adaptation-move", "E1", "--parent", "S1"], "move_adaptation_node", {"node_id": "E1", "parent_id": "S1"}),
     (["adaptation-suppress", "E1", "--suppressed", "false"], "suppress_adaptation_node", {"node_id": "E1", "suppressed": False}),
-    (["adaptation-property", "P1", "存活", "--value", "false", "--expire", "false"], "set_adaptation_property", {"node_id": "P1", "property_id": "存活", "value": False, "expire": False}),
+    (["adaptation-property", "P1", "存活", "E1", "set", "--value", "false"], "set_adaptation_property", {"node_id": "P1", "property_id": "存活", "event_id":"E1", "op":"set", "value": False}),
     (["assets", "appearance", "--node", "P1", "--moment", "E1"], "list_assets", {"category": "appearance", "node_id": "P1", "moment": "E1"}),
     (["asset", "A1"], "get_asset", {"asset_id": "A1"}),
     (["asset-save", "--payload", '{"category":"material","title":"布"}'], "save_asset", {"payload": {"category": "material", "title": "布"}}),
@@ -59,7 +59,9 @@ def test_json_files_and_real_independent_edit_lifecycle(tmp_path, capsys):
     assert not next(n for n in snap["nodes"] if n["id"] == identifier)["suppressed"]
     value = tmp_path / "value.json"
     value.write_text("0", encoding="utf-8")
-    snap = run("adaptation-property", identifier, "数量", "--value-file", str(value), "--expire", "false")
+    scene=run("adaptation-edit","--changes",'{"node_type":"scene","name":"数量变更场景"}')["created_node_id"]
+    event=run("adaptation-edit","--changes",'{"node_type":"event","name":"数量变更事件"}',"--parent",scene)["created_node_id"]
+    snap = run("adaptation-property", identifier, "数量", event, "set", "--value-file", str(value))
     assert next(p for p in snap["properties"] if p.get("node_id") == identifier)["value"] == 0
     payload = tmp_path / "asset.json"
     payload.write_text('{"category":"material","title":"丝绸","prompt":"柔光"}', encoding="utf-8")

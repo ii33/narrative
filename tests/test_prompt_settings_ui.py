@@ -79,7 +79,9 @@ def test_prompt_settings_actual_edit_preview_restore_and_project_isolation(tmp_p
         ui.window.setProperty('currentPage', 'project_settings')
         ui.wait(lambda: page.property('promptsLoaded') and page.property('boundProjectPath') == str(first_path) and not ui.window.property('busy'))
         assert select('scene_table_shortcut')['effective'] == custom
-        click(ui, page.findChild(object, 'projectPromptRestore'))
+        restore=page.findChild(object,'projectPromptRestore')
+        ui.wait(lambda:restore.property('enabled'))
+        click(ui,restore)
         ui.wait(lambda: '已恢复' in page.property('promptMessage'))
         assert select('scene_table_shortcut')['effective'] == default
         assert not select('scene_table_shortcut')['overridden']

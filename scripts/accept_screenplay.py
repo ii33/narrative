@@ -141,7 +141,7 @@ def seed(ops):
 
 def main(validate=None, required_tools=None, target_factory=None, use_writing_target=True,
          prompt_factory=None, fixture_resolver=None, ops_resolver=None, allow_adaptation_change=False,
-         allow_extraction_change=False):
+         allow_extraction_change=False, on_started=None, on_progress=None, external_abort=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seconds", type=int, default=600)
@@ -173,6 +173,10 @@ def main(validate=None, required_tools=None, target_factory=None, use_writing_ta
         "system_prompt_sha256": digest(CONVERSATION_SYSTEM_PROMPT.encode()),
         "implementation_sha256": {str(p): digest(p.read_bytes()) for p in sorted({
             *Path("src/narrative").glob("screenplay*.py"),
+            *Path("src/narrative").glob("production*.py"),
+            *Path("src/narrative").glob("extraction*.py"),
+            Path("src/narrative/source_location.py"), Path("src/narrative/graph_service.py"),
+            Path("src/narrative/property_core.py"),
             *Path("src/narrative").glob("tool*.py"),
             *Path("src/narrative").glob("*prompt*.py"),
             *Path("src/narrative").glob("conversation*.py"),
@@ -234,6 +238,8 @@ def main(validate=None, required_tools=None, target_factory=None, use_writing_ta
         audit_root = layout(ops.project_info().path).extraction / "assistant" / "tasks"
         began = time.monotonic()
         report["tasks_started"] = 1
+        if on_started is not None:
+            on_started(ops, fixture, report, directory, began)
         task_message = prompt_factory(fixture) if prompt_factory else TASK
         (directory / "user-task.txt").write_text(task_message, encoding="utf-8")
         report["task_sha256"] = digest(task_message.encode())
@@ -260,13 +266,18 @@ def main(validate=None, required_tools=None, target_factory=None, use_writing_ta
         while not any(k == "assistant" for k, _ in results) and not errors:
             app.processEvents()
             observed = observed_usage()
-            if watchdog.triggered.is_set() or time.monotonic() >= deadline or observed > args.token_budget:
+            if on_progress is not None:
+                on_progress(ops, fixture, report, directory, began, observed)
+            abort_reason = external_abort() if external_abort is not None else None
+            if abort_reason:
+                report["external_abort_reason"] = str(abort_reason)
+            if abort_reason or watchdog.triggered.is_set() or time.monotonic() >= deadline or observed > args.token_budget:
                 report.update(observation_expired=time.monotonic() >= deadline, observed_usage_budget_exceeded=observed > args.token_budget)
                 for job in list(bridge._assistant_jobs.values()):
                     if job.get("task_id"):
                         bridge.assistantStop(job["chat_id"], job["task_id"])
                 wait(lambda: any(k == "assistant" for k, _ in results) or errors, 20)
-                raise RuntimeError("external QA budget reached; no retry; completed scene commits retained")
+                raise RuntimeError(str(abort_reason) if abort_reason else "external QA budget reached; no retry; completed scene commits retained")
             time.sleep(0.01)
         if errors:
             raise RuntimeError("real screenplay task returned an error; inspect saved evidence")
@@ -296,7 +307,7 @@ def main(validate=None, required_tools=None, target_factory=None, use_writing_ta
             save("model-metadata.json", metadata)
             save("tool-calls.json", calls)
             if ops:
-                store = ChatStore(ops.project_info().path)
+                store = ChatStore(Path(ops.project_info().path))
                 chat = store.active(create=False)
                 save("chat-visible-output.json", store.load(chat["id"]) if chat else {})
                 with sqlite3.connect(ops.project.store.path) as db:
@@ -308,6 +319,8 @@ def main(validate=None, required_tools=None, target_factory=None, use_writing_ta
                         save("fixture-resolved.json", fixture)
                         report["resolved_fixture"] = fixture
                     screenplay = ops.read_screenplay(fixture["screenplay_id"])
+                    if not isinstance(screenplay, dict):
+                        raise ValueError("验收必须按明确剧本ID读取单份剧本对象")
                     check = ops.check_screenplay(fixture["screenplay_id"])
                     save("screenplay.json", screenplay)
                     save("static-check.json", check)

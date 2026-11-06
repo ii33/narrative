@@ -7,6 +7,8 @@ import QtQuick.Window
 // 数据浏览：左侧分类，中间节点列表（按阅读顺序排，编号按类型各成一套），右侧详情 + 属性。
 Item {
     id: page
+    SubmissionState{id:contentSubmission;owner:page;operation:"";target:({})}
+
     objectName: adaptationMode ? "adaptationBrowsePage" : "browsePage"
     property bool adaptationMode: false
     property bool showSuppressed: false
@@ -530,8 +532,7 @@ Item {
             page.io.addMaterialCard(page.selectedId, cardTitle.text,
                 cardDetail.text, page.cardFromId, page.cardToId,
                 page.draftImagesJson())
-        page.cardEditId = ""
-        cardDialog.close()
+
     }
 
     // -- 分级选择 -------------------------------------------------------
@@ -573,14 +574,20 @@ Item {
         materialImagePicker.open()
     }
 
+    readonly property var changeOps:[{key:"set",label:"设为"},{key:"add",label:"增加"},{key:"remove",label:"移除"},{key:"clear",label:"清除"},{key:"unknown",label:"未知"}]
     function valueText(item) {
+        var state=item.state_kind||(typeof item.state==="object"&&item.state?item.state.kind:"");
+        if(state==="unknown")return "未知";
+        if(state==="absent")return "已清除";
+        if(state==="unrecorded")return "未记录";
+        if(state==="conflict")return "变更冲突，需核对";
         if (item.value_node) return item.value_node.name
         if (item.value === null || item.value === undefined) return "（空）"
         return String(item.value)
     }
 
     function buildItem(item) {
-        var unrecorded = item.state === "unrecorded"
+        var unrecorded = (item.state_kind || (item.state || {}).kind) === "unrecorded"
         var records = item.records || []
         var ids = []
         for (var i = 0; i < records.length; ++i) ids.push(records[i].id)
@@ -609,7 +616,7 @@ Item {
             holderId: item.holder_id || "",
             holderName: item.holder_name
                 || (item.holder_id ? page.nameOf(item.holder_id) : ""),
-            // 有效区间另行呈现；这里说明该值首次披露的位置。
+            // 当前状态由事件变更推导；这里说明最后一次变更的位置。
             disclosedText: unrecorded ? "" : ("披露于 " + (item.disclosed_at || "—")),
             // 大事件这一行是从场景借来的：说清出处，读者才知道它是跟着阅读位置变的。
             derivedText: unrecorded
@@ -715,6 +722,7 @@ Item {
         addPropertyField.text = ""
         addValueField.text = ""
         addValueType.currentIndex = 0
+        addOperation.currentIndex=0
         addQuoteField.text = ""
         addCategoryField.currentIndex = Math.max(0, page.vocabulary.indexOf("其他"))
         // 停在某个阅读位置时，补的就是「此刻」：默认披露在这个事件，而不是第一个事件。
@@ -725,7 +733,7 @@ Item {
 
     function submitAddProperty() {
         var inputValue = addValueField.text
-        if (adaptationMode && addValueType.currentIndex === 1) {
+        if (addValueType.currentIndex === 1 && ["set","add","remove"].indexOf(changeOps[addOperation.currentIndex].key)>=0) {
             try { inputValue = JSON.parse(inputValue) }
             catch (error) { app.toast("JSON 格式错误：" + error.message, true); return }
         }
@@ -733,7 +741,9 @@ Item {
         var node = page.detail.node || ({})
         var sourceId = node.evidence ? node.evidence.source_id
             : (node.disclosure ? node.disclosure.source_id : "")
-        page.io.addPropertyRecord({
+        var payload={
+            op:changeOps[addOperation.currentIndex].key, expected_revision:page.revision,context_id:node.context_id||"canon",
+            value_type:"any",cardinality:"one",
             node_id: page.selectedId,
             property_id: addPropertyField.text,
             value: inputValue,
@@ -742,7 +752,9 @@ Item {
             source: addSourceField.currentText,
             quote: addQuoteField.text,
             source_id: sourceId || ""
-        })
+        };
+        if(["clear","unknown"].indexOf(payload.op)>=0)delete payload.value;
+        page.io.addPropertyRecord(payload)
         // 不在这里关：预检没过时要把填好的内容留在框里，等结果再决定。
     }
 
@@ -909,6 +921,8 @@ Item {
     }
 
     ColumnLayout {
+        SubmissionFeedback{state:contentSubmission}
+
         anchors.fill: parent
         anchors.margins: 20
         spacing: 12
@@ -2145,6 +2159,7 @@ Item {
     // 新增 / 编辑资料卡：标题、详情、生效与失效（分级挑一步）、图片。
     Dialog {
         id: cardDialog
+        SubmissionState{id:cardSubmission;owner:cardDialog;app:page.app;controller:page;closeOnAccepted:true;operation:page.cardEditId?"material_update_card":"material_add_card";target:page.cardEditId?({node_id:page.selectedId,card_id:page.cardEditId}):({node_id:page.selectedId});onRestoreRequested:function(a){cardTitle.text=a.title||"";cardDetail.text=a.detail||"";page.cardFromId=a.valid_from||"";page.cardToId=a.valid_to||"";page.draftImages=a.images||[]}}
         objectName: "materialCardDialog"
         title: page.cardEditId.length > 0 ? "编辑资料" : "新增资料"
         modal: true
@@ -2152,6 +2167,7 @@ Item {
         width: 480
 
         contentItem: ColumnLayout {
+            SubmissionFeedback{state:cardSubmission}
             spacing: 6
             TextField {
                 id: cardTitle
@@ -2629,6 +2645,7 @@ Item {
     // 补录：人工写一条披露。它仍然先成为候选，接受后才进正式资料。
     Dialog {
         id: addPropertyDialog
+        SubmissionState{id:propertySubmission;owner:addPropertyDialog;app:page.app;controller:page;operation:page.adaptationMode?"set_adaptation_property":"record_property_change";target:({node_id:page.selectedId});onRestoreRequested:function(a){addPropertyField.text=a.property_id||"";addValueType.currentIndex=typeof a.value==="string"?0:1;addValueField.text=typeof a.value==="string"?a.value:JSON.stringify(a.value);addOperation.currentIndex=Math.max(0,page.changeOps.findIndex(function(x){return x.key===a.op}));addEventField.currentIndex=Math.max(0,page.events.findIndex(function(x){return x.id===a.event_id}))}}
         objectName: "addPropertyDialog"
         title: "补一条属性"
         modal: true
@@ -2636,12 +2653,13 @@ Item {
         width: 460
 
         contentItem: ColumnLayout {
+            SubmissionFeedback{state:propertySubmission}
             spacing: 6
 
             Label {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
-                text: "引文逐字复制，程序会核对位置；通过后立即生效（和它同一方面的更早的值，从这次披露起失效）。"
+                text: "在所选事件记录建立、变更或失效；程序按事件及同事件内顺序推导状态。引文可逐字核对，不填写有效期。"
                 color: t.muted
                 font.pixelSize: 11
             }
@@ -2659,16 +2677,19 @@ Item {
                     placeholderText: "例如 state"
                     onAccepted: page.submitAddProperty()
                 }
+                Label { text:"变更操作";color:t.muted }
+                ComboBox{id:addOperation;objectName:"addPropertyOperation";model:page.changeOps;textRole:"label";Layout.fillWidth:true}
                 Label { text: "值"; color: t.muted; font.pixelSize: 11 }
                 TextField {
                     id: addValueField
                     objectName: "addValueField"
                     Layout.fillWidth: true
+                    enabled:["set","add","remove"].indexOf(page.changeOps[addOperation.currentIndex].key)>=0
                     placeholderText: "照原文写"
                     onAccepted: page.submitAddProperty()
                 }
-                Label { visible: page.adaptationMode; text: "值类型"; color: t.muted }
-                ComboBox { id: addValueType; visible: page.adaptationMode; objectName: "addValueType"; model: ["文本", "JSON"] }
+                Label { text: "值类型"; color: t.muted }
+                ComboBox { id: addValueType; objectName: "addValueType"; model: ["文本", "JSON"] }
                 Label { text: "披露事件"; color: t.muted; font.pixelSize: 11 }
                 ColumnLayout {
                     Layout.fillWidth: true

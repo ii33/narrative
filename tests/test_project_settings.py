@@ -15,7 +15,8 @@ def test_project_granularity_and_model_configuration_are_independent(tmp_path, m
     assert a.load_project_settings()["extraction_granularity"] == "fine"
     model=HarnessSettings(provider="custom",model="isolated-test",base_url="http://127.0.0.1:12345/v1").model_dump()
     saved=a.save_project_settings({"extraction_granularity":"fine","profile":model})
-    assert saved == {"extraction_granularity":"fine","profile":model}
+    assert saved["extraction_granularity"] == "fine" and saved["profile"] == model
+    assert "api_key_status" in saved and "api_key" not in saved["api_key_status"]
     assert Operations.open(tmp_path/"a.nproj").load_project_settings() == saved
     assert b.load_project_settings() == before
     assert a.graph_project_info()["revision"] == 0

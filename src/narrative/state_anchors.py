@@ -1,4 +1,4 @@
-"""Non-narrative interval anchors kept outside imported timeline nodes."""
+"""Non-narrative event-state anchors kept outside imported timeline nodes."""
 from __future__ import annotations
 
 import copy
@@ -47,7 +47,7 @@ def selection_anchors(source, visible_ids, reference_ids):
     for identifier in sorted(reference_ids - visible_ids):
         point = points.get(identifier)
         if not point:
-            raise ValueError("状态区间边界不存在：" + identifier)
+            raise ValueError("状态变更锚点不存在：" + identifier)
         context = point.get("context_id", "canon")
         same_context = [node for node in visible if node.get("context_id", "canon") == context]
         preceding = [node for node in same_context if node["sort_id"] < point["sort_id"]][-1:]

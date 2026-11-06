@@ -39,6 +39,8 @@ def setup(project, *, item=False):
             {"node": "纸条", "property": "持有者", "value": "无", "value_type": "either", "scope": "world",
              "at_event": "事件2", "quotes": [QUOTES[2]]},
         ])
+    for row in properties:
+        row["op"]="set"
     result = project.submit_extraction(sid, {"nodes": nodes, "properties": properties})
     assert result["status"] == "accepted", result
     return {n["name"]: n["id"] for n in project.graph_snapshot()["nodes"]}
@@ -66,7 +68,7 @@ def test_selected_point_imports_effective_state_boundaries_and_location_only(pro
     imported = {n["id"]: n for n in state["nodes"]}
     assert ids["事件1"] in imported
     assert ids["事件0"] not in imported and ids["事件2"] not in imported
-    assert {row["id"] for row in state["state_anchors"]} == {ids["事件0"], ids["事件2"]}
+    assert {row["id"] for row in state["state_anchors"]} == {ids["事件0"]}
     assert ids["事件3"] not in imported and ids["场景3"] not in imported
     assert ids["丙"] not in imported and ids["远处"] not in imported
     assert ids["桥边"] in imported
@@ -74,7 +76,8 @@ def test_selected_point_imports_effective_state_boundaries_and_location_only(pro
     assert imported[ids["等候"]]["events"] == [ids["场景1"]]
     coat = [p for p in state["properties"] if p.get("property_id") == "服装"]
     assert len(coat) == 1 and coat[0]["value"] == "青衣"
-    assert coat[0]["event_id"] == ids["事件0"] and coat[0]["end_event_id"] == ids["事件2"]
+    assert coat[0]["event_id"] == ids["事件0"] and coat[0]["op"] == "set"
+    assert all("end_event_id" not in row for row in coat)
     assert state["import_summary"]["imported_moment_ids"] == [ids["事件1"]]
     assert project.check_adaptation()["ok"]
     assert project.graph_snapshot() == extraction
@@ -97,7 +100,7 @@ def test_reimport_is_idempotent_preserves_local_changes_and_records_source_confl
     assert state["nodes"] == before_nodes and state["properties"] == before_values
     state = project.edit_adaptation_node(ids["事件1"], {"name": "改编桥边"})
     row = next(p for p in state["properties"] if p.get("property_id") == "服装")
-    project.set_adaptation_property(ids["甲"], "服装", "红衣", record_id=row["id"])
+    project.set_adaptation_property(ids["甲"], "服装", row["event_id"], "set", value="红衣", record_id=row["id"])
     source_node = copy.deepcopy(next(n for n in project.graph_snapshot()["nodes"] if n["id"] == ids["事件1"]))
     source_row = copy.deepcopy(next(p for p in project.property_records() if p["id"] == row["id"]))
     source_node["name"], source_row["value"] = "原文桥边", "蓝衣"
